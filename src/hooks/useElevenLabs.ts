@@ -4,9 +4,6 @@ const ELEVENLABS_API_KEY = 'sk_632e7857df9f28257efd1e9995e06af8741ead98b385099b'
 const VOICE_ID = 'UgBBYS2sOqTuMpoF3BR0';
 const TTS_URL = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=mp3_44100_128`;
 
-const PRE_SPEECH_PAUSE_MS  = 500;   // silence after duck-down, before voice starts
-const POST_SPEECH_PAUSE_MS = 900;   // silence after voice ends, before music fades back up
-
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 export interface ElevenLabsOptions {
@@ -108,10 +105,6 @@ export function useElevenLabs() {
       setIsGenerating(false);
       setIsSpeaking(true);
 
-      // Brief silence after duck-down settles, before voice begins
-      await sleep(PRE_SPEECH_PAUSE_MS);
-      if (abort.signal.aborted) return;
-
       await new Promise<void>((resolve, reject) => {
         audio.src = url;
         audio.volume = 1;
@@ -123,11 +116,9 @@ export function useElevenLabs() {
         };
 
         const onEnded = () => {
-          console.log('[ElevenLabs] Playback ended cleanly — holding for post-speech pause');
+          console.log('[ElevenLabs] Playback ended cleanly');
           cleanup();
-          // Hold isSpeaking=true during the tail silence so duck stays down
-          // until the fade-back can start gracefully
-          sleep(POST_SPEECH_PAUSE_MS).then(resolve);
+          resolve();
         };
 
         const onError = (e: Event) => {

@@ -163,6 +163,33 @@ export function useRadioModerator() {
   );
 
   /**
+   * Comment on one or two tracks that just played, then introduce the next one.
+   * Called after 1–2 silent tracks as a natural mid-set break.
+   */
+  const speakReviewAndIntro = useCallback(
+    async (played: WavlakeTrack[], next: WavlakeTrack): Promise<void> => {
+      const playedList = played
+        .map(t => `"${t.name}" by ${t.artist}`)
+        .join(' and then ');
+
+      const prompt =
+        `You just played ${playedList} on air without commentary. ` +
+        `Give a brief, warm reaction to that music — one sentence. ` +
+        `Then introduce the next track: "${next.name}" by ${next.artist}. ` +
+        `Keep the whole thing to 2–3 sentences. Sound like a natural radio DJ, not a robot.`;
+
+      const fallback = played.length > 1
+        ? `Great music from ${played.map(t => t.artist).join(' and ')} — hope you enjoyed that. ` +
+          `Coming up next — "${next.name}" by ${next.artist}.`
+        : `That was "${played[0].name}" by ${played[0].artist}. ` +
+          `Now let's keep it going — here's "${next.name}" by ${next.artist}.`;
+
+      await buildAndSpeak(prompt, fallback);
+    },
+    [buildAndSpeak]
+  );
+
+  /**
    * Short transition bridge between a music segment and a podcast segment.
    */
   const speakPodcastTransition = useCallback(
@@ -183,6 +210,7 @@ export function useRadioModerator() {
   return {
     speakGreeting,
     speakTrackIntro,
+    speakReviewAndIntro,
     speakPodcastTransition,
     stop,
     isSpeaking,

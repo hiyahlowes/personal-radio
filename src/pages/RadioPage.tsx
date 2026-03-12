@@ -4,27 +4,35 @@ import { useWavlakeTracks, type WavlakeTrack } from '@/hooks/useWavlakeTracks';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { Skeleton } from '@/components/ui/skeleton';
 
-const DUCK_LEVEL  = 0.15;   // volume during speech
-const FADE_STEP   = 0.025;  // per animation frame (~1.5 s full fade at 60 fps)
-const FADE_MS     = 16;     // ~60 fps
+// ─── Ducking constants ────────────────────────────────────────────────────────
+const DUCK_LEVEL    = 0.15;
+const TICK_MS       = 50;          // setInterval resolution
+const DUCK_DOWN_MS  = 1000;        // fade down over 1 s
+const FADE_BACK_MS  = 2000;        // fade up over 2 s
 
-/** Smoothly ramp an Audio element's volume to `target` using rAF. */
-function fadeVolume(audio: HTMLAudioElement, target: number, onDone?: () => void) {
-  const step = target > audio.volume ? FADE_STEP : -FADE_STEP;
-  let raf: number;
-  const tick = () => {
-    const next = audio.volume + step;
-    if ((step > 0 && next >= target) || (step < 0 && next <= target)) {
-      audio.volume = Math.max(0, Math.min(1, target));
-      onDone?.();
-      return;
-    }
-    audio.volume = Math.max(0, Math.min(1, next));
-    raf = setTimeout(tick, FADE_MS) as unknown as number;
-  };
-  raf = setTimeout(tick, FADE_MS) as unknown as number;
-  return () => clearTimeout(raf);
+/** Smoothly ramp audio.volume to `target` over `durationMs` using setInterval. Returns cancel fn. */
+function rampVolume(audio: HTMLAudioElement, target: number, durationMs: number): () => void {
+  const start  = audio.volume;
+  const delta  = target - start;
+  const steps  = Math.max(1, Math.round(durationMs / TICK_MS));
+  const stepBy = delta / steps;
+  let count    = 0;
+  const id     = setInterval(() => {
+    count++;
+    const next = start + stepBy * count;
+    audio.volume = Math.max(0, Math.min(1, count >= steps ? target : next));
+    if (count >= steps) clearInterval(id);
+  }, TICK_MS);
+  return () => clearInterval(id);
 }
+
+// ─── Sequencing helpers ───────────────────────────────────────────────────────
+/** Pick a random integer in [min, max] inclusive */
+function randInt(min: number, max: number) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 function fmt(s: number) {
   if (!isFinite(s) || s < 0) return '0:00';
@@ -37,54 +45,56 @@ const UPCOMING = [
   { type: 'podcast', title: 'Tech Horizons: AI in Creative Work',    host: 'Sam & Priya',  duration: '32 min', icon: '🎙️' },
 ];
 
+// ─── Component ────────────────────────────────────────────────────────────────
 export function RadioPage() {
-  const [params]   = useSearchParams();
-  const navigate   = useNavigate();
-  const name       = params.get('name') || 'Listener';
-  const firstName  = name.split(' ')[0];
+  const [params]  = useSearchParams();
+  const navigate  = useNavigate();
+  const name      = params.get('name') || 'Listener';
+  const firstName = name.split(' ')[0];
 
   const { data: tracks = [], isLoading, isError } = useWavlakeTracks();
   const moderator = useRadioModerator();
 
-  // ── player state ──────────────────────────────────────────────────────────
-  const [idx, setIdx]           = useState(0);
-  const [playing, setPlaying]   = useState(false);
-  const [buffering, setBuf]     = useState(false);
-  const [currentTime, setCT]    = useState(0);
-  const [duration, setDur]      = useState(0);
-  const [volume, setVol]        = useState(0.8);
-  const [muted, setMuted]       = useState(false);
+  // ── player state ─────────────────────────────────────────────────────────
+  const [idx, setIdx]         = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [buffering, setBuf]   = useState(false);
+  const [currentTime, setCT]  = useState(0);
+  const [duration, setDur]    = useState(0);
+  const [volume, setVol]      = useState(0.8);
+  const [muted, setMuted]     = useState(false);
 
-  // ── sequencing flags ──────────────────────────────────────────────────────
-  const greetedRef   = useRef(false);   // has the opening greeting played?
-  const sequenceRef  = useRef(false);   // is a greeting+intro sequence running?
+  const audioRef        = useRef<HTMLAudioElement | null>(null);
+  const cancelRampRef   = useRef<(() => void) | null>(null);
 
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // ── sequencing state (all in refs to avoid stale closures) ───────────────
+  const greetedRef      = useRef(false);   // opening greeting played?
+  const runningRef      = useRef(false);   // loop is active (user hasn't paused)?
+  const silentCountRef  = useRef(0);       // tracks played silently since last break
+  const silentBudgetRef = useRef(randInt(1, 2)); // how many silent tracks before next break
+  const recentTracksRef = useRef<WavlakeTrack[]>([]); // tracks played since last moderation
+  const idxRef          = useRef(0);       // mirror of idx for use inside callbacks
+
   const track: WavlakeTrack | undefined = tracks[idx];
 
-  // ── audio element setup (once) ───────────────────────────────────────────
+  // keep idxRef in sync
+  useEffect(() => { idxRef.current = idx; }, [idx]);
+
+  // ── audio element setup (once) ──────────────────────────────────────────
   useEffect(() => {
     const audio = audioRef.current = new Audio();
     audio.preload = 'metadata';
-    const onTime  = () => setCT(audio.currentTime);
-    const onDur   = () => setDur(audio.duration || 0);
-    const onPlay  = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
-    const onWait  = () => setBuf(true);
-    const onCan   = () => setBuf(false);
-    const onEnd   = () => advance(1);
-    audio.addEventListener('timeupdate',     onTime);
-    audio.addEventListener('durationchange', onDur);
-    audio.addEventListener('play',           onPlay);
-    audio.addEventListener('pause',          onPause);
-    audio.addEventListener('waiting',        onWait);
-    audio.addEventListener('canplay',        onCan);
-    audio.addEventListener('ended',          onEnd);
+    audio.addEventListener('timeupdate',     () => setCT(audio.currentTime));
+    audio.addEventListener('durationchange', () => setDur(audio.duration || 0));
+    audio.addEventListener('play',           () => setPlaying(true));
+    audio.addEventListener('pause',          () => setPlaying(false));
+    audio.addEventListener('waiting',        () => setBuf(true));
+    audio.addEventListener('canplay',        () => setBuf(false));
+    // 'ended' is handled by the loop — not here — to avoid double-advance
     return () => { audio.pause(); audio.src = ''; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── load track whenever idx/tracks change ────────────────────────────────
+  // ── load track src whenever idx changes ─────────────────────────────────
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !track) return;
@@ -93,74 +103,159 @@ export function RadioPage() {
     audio.load();
     setCT(0);
     setDur(track.duration || 0);
-    // actual play is triggered by the sequence orchestrator, not here
   }, [idx, tracks]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── volume / mute sync (only when moderator is NOT ducking) ─────────────
-  useEffect(() => {
-    if (audioRef.current && !moderator.isSpeaking && !moderator.isGenerating) {
-      audioRef.current.volume = muted ? 0 : volume;
-    }
-  }, [volume, muted, moderator.isSpeaking, moderator.isGenerating]);
+  // ── ducking: ramp on isSpeaking changes only ────────────────────────────
+  const volumeRef = useRef(volume);
+  const mutedRef  = useRef(muted);
+  useEffect(() => { volumeRef.current = volume; }, [volume]);
+  useEffect(() => { mutedRef.current  = muted;  }, [muted]);
 
-  // ── radio ducking ─────────────────────────────────────────────────────────
-  const cancelFadeRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    cancelFadeRef.current?.();           // cancel any in-progress fade
-    const isModerating = moderator.isSpeaking || moderator.isGenerating;
-    const target = isModerating ? DUCK_LEVEL : (muted ? 0 : volume);
-    cancelFadeRef.current = fadeVolume(audio, target);
-    return () => cancelFadeRef.current?.();
-  }, [moderator.isSpeaking, moderator.isGenerating, volume, muted]);
-
-  // ── sequence: greeting → intro → play ────────────────────────────────────
-  // For the very first tune-in: greeting (no music) → intro (no music) → play
-  // For subsequent tracks: music is already loaded, ducking handles the volume;
-  //   intro plays over ducked music, then music resumes at full volume.
-  const runSequence = useCallback(async (t: WavlakeTrack, withGreeting: boolean) => {
-    if (sequenceRef.current) return;
-    sequenceRef.current = true;
-    try {
-      if (withGreeting) await moderator.speakGreeting(name);
-      await moderator.speakTrackIntro(t);
-      await audioRef.current?.play();
-    } finally {
-      sequenceRef.current = false;
+    cancelRampRef.current?.();
+    if (moderator.isSpeaking) {
+      // Duck down over 1 s
+      cancelRampRef.current = rampVolume(audio, DUCK_LEVEL, DUCK_DOWN_MS);
+    } else {
+      // Fade back to user volume over 2 s
+      const target = mutedRef.current ? 0 : volumeRef.current;
+      cancelRampRef.current = rampVolume(audio, target, FADE_BACK_MS);
     }
-  }, [name, moderator]);
+    return () => cancelRampRef.current?.();
+  }, [moderator.isSpeaking]);
 
-  // ── public play handler (called by user) ─────────────────────────────────
-  const handlePlay = useCallback(() => {
-    if (!track) return;
+  // ── volume/mute changes (only when not ducked) ───────────────────────────
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || moderator.isSpeaking) return;
+    cancelRampRef.current?.();
+    audio.volume = muted ? 0 : volume;
+  }, [volume, muted, moderator.isSpeaking]);
+
+  // ── core loop: plays one track, then decides what happens next ───────────
+  const playTrack = useCallback(async (trackIdx: number): Promise<void> => {
+    const audio = audioRef.current;
+    if (!audio || !runningRef.current) return;
+
+    const t = tracks[trackIdx];
+    if (!t) return;
+
+    // Update UI index
+    setIdx(trackIdx);
+    idxRef.current = trackIdx;
+
+    // Load & play
+    audio.pause();
+    audio.src = t.liveUrl;
+    audio.load();
+    setCT(0);
+    setDur(t.duration || 0);
+
+    try {
+      await audio.play();
+    } catch {
+      // Autoplay blocked — loop stalls gracefully
+      return;
+    }
+
+    // Wait for track to finish
+    await new Promise<void>(resolve => {
+      const onEnd  = () => { cleanup(); resolve(); };
+      const onStop = () => { cleanup(); resolve(); };
+      function cleanup() {
+        audio.removeEventListener('ended', onEnd);
+        audio.removeEventListener('pause', onStop);
+      }
+      audio.addEventListener('ended', onEnd);
+      audio.addEventListener('pause', onStop);
+    });
+
+    if (!runningRef.current) return; // user paused — stop the loop
+
+    // Record this track as recently played
+    recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
+    silentCountRef.current++;
+
+    const nextIdx = (trackIdx + 1) % tracks.length;
+    const nextTrack = tracks[nextIdx];
+    if (!nextTrack) return;
+
+    if (silentCountRef.current >= silentBudgetRef.current) {
+      // Time for a moderation break
+      silentCountRef.current  = 0;
+      silentBudgetRef.current = randInt(1, 2); // pick new budget for next run
+
+      const played = recentTracksRef.current;
+      recentTracksRef.current = [];
+
+      // Duck starts automatically when isSpeaking → true
+      await moderator.speakReviewAndIntro(played, nextTrack);
+
+      // After speech: 800 ms breathing room before music comes back
+      await sleep(800);
+    }
+
+    if (!runningRef.current) return;
+
+    // Continue loop
+    await playTrack(nextIdx);
+  }, [tracks, moderator]);
+
+  // ── start: opening greeting → first track intro → loop ──────────────────
+  const startRadio = useCallback(async () => {
+    if (!tracks.length || runningRef.current) return;
+    runningRef.current = true;
+
+    const firstTrack = tracks[0];
+
     if (!greetedRef.current) {
       greetedRef.current = true;
-      runSequence(track, true);
-    } else {
-      audioRef.current?.play().catch(() => {});
+      await moderator.speakGreeting(name);
+      await sleep(400);
+      await moderator.speakTrackIntro(firstTrack);
+      await sleep(600);
     }
-  }, [track, runSequence]);
 
-  // ── when track ends, auto-intro + play next ───────────────────────────────
-  const advance = useCallback((delta: number) => {
-    setIdx(i => {
-      const next = (i + delta + tracks.length) % tracks.length;
-      const nextTrack = tracks[next];
-      if (nextTrack && greetedRef.current) {
-        // Wait for the post-speech pause + fade-back to clear before running
-        // the next sequence. POST_SPEECH_PAUSE_MS (900) + fade duration (~600)
-        // = ~1500 ms; use 1600 to be safe.
-        setTimeout(() => runSequence(nextTrack, false), 1600);
-      }
-      return next;
-    });
-  }, [tracks, runSequence]);
+    recentTracksRef.current = [];
+    await playTrack(0);
+  }, [tracks, name, moderator, playTrack]);
 
-  const handlePause  = () => { moderator.stop(); audioRef.current?.pause(); };
-  const handlePrev   = () => advance(-1);
-  const handleNext   = () => advance(1);
-  const handleSelect = (i: number) => { setIdx(i); setTimeout(() => runSequence(tracks[i], false), 400); };
+  // ── public controls ──────────────────────────────────────────────────────
+  const handlePlay = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (!greetedRef.current || !runningRef.current) {
+      startRadio();
+    } else {
+      runningRef.current = true;
+      audio.play().catch(() => {});
+    }
+  }, [startRadio]);
+
+  const handlePause = useCallback(() => {
+    runningRef.current = false;
+    moderator.stop();
+    audioRef.current?.pause();
+  }, [moderator]);
+
+  const handlePrev = useCallback(() => {
+    const prev = (idxRef.current - 1 + tracks.length) % tracks.length;
+    setIdx(prev);
+    if (runningRef.current) setTimeout(() => playTrack(prev), 200);
+  }, [tracks.length, playTrack]);
+
+  const handleNext = useCallback(() => {
+    const next = (idxRef.current + 1) % tracks.length;
+    setIdx(next);
+    if (runningRef.current) setTimeout(() => playTrack(next), 200);
+  }, [tracks.length, playTrack]);
+
+  const handleSelect = useCallback((i: number) => {
+    setIdx(i);
+    if (runningRef.current) setTimeout(() => playTrack(i), 200);
+  }, [playTrack]);
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     const audio = audioRef.current;
@@ -169,10 +264,11 @@ export function RadioPage() {
     audio.currentTime = Math.max(0, Math.min(1, r)) * duration;
   };
 
-  const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
+  // ── derived UI state ─────────────────────────────────────────────────────
+  const pct          = duration > 0 ? (currentTime / duration) * 100 : 0;
   const isModerating = moderator.isSpeaking || moderator.isGenerating;
-  const statusLabel = moderator.isGenerating ? 'WRITING' : moderator.isSpeaking ? 'ON AIR' : buffering ? 'BUFFERING' : playing ? 'LIVE' : 'PAUSED';
-  const statusColor = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
+  const statusLabel  = moderator.isGenerating ? 'WRITING' : moderator.isSpeaking ? 'ON AIR' : buffering ? 'BUFFERING' : playing ? 'LIVE' : 'PAUSED';
+  const statusColor  = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
 
   return (
     <div className="min-h-screen gradient-bg text-white relative overflow-hidden">
@@ -183,7 +279,7 @@ export function RadioPage() {
 
       <div className="relative z-10 max-w-2xl mx-auto px-4 py-8 space-y-6">
 
-        {/* ── Header ── */}
+        {/* Header */}
         <header className="flex items-center justify-between fade-in-up">
           <div>
             <button onClick={() => navigate('/')} className="text-xs tracking-[0.25em] text-purple-400 uppercase font-semibold hover:text-purple-300 transition-colors flex items-center gap-1.5">
@@ -198,7 +294,7 @@ export function RadioPage() {
           </div>
         </header>
 
-        {/* ── Moderator banner ── */}
+        {/* Moderator banner */}
         {isModerating && (
           <div className="fade-in-up glass-card rounded-2xl px-5 py-4 flex items-center gap-4 border border-amber-500/20">
             <div className="w-9 h-9 rounded-full bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center flex-shrink-0 animate-pulse">
@@ -217,24 +313,26 @@ export function RadioPage() {
           </div>
         )}
 
-        {/* ── Player card ── */}
+        {/* Player card */}
         <div className="fade-in-up-delay-2 glass-card rounded-3xl p-6">
           <div className="flex items-center gap-5 mb-6">
-            {/* Vinyl */}
             <div className="relative flex-shrink-0">
               <div className={`w-24 h-24 rounded-full overflow-hidden border-4 border-gray-700 shadow-2xl bg-gray-800 ${(playing && !isModerating) ? 'vinyl-spin' : 'vinyl-spin paused'}`}>
-                {track?.artworkUrl && <img src={track.artworkUrl} alt={track.name} className="w-full h-full object-cover" onError={e => (e.currentTarget.style.display='none')} />}
+                {track?.artworkUrl && <img src={track.artworkUrl} alt={track.name} className="w-full h-full object-cover" onError={e => (e.currentTarget.style.display = 'none')} />}
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                   <div className="w-6 h-6 rounded-full bg-black/60 border-2 border-white/20" />
                 </div>
               </div>
               {(playing && !isModerating) && <div className="absolute inset-0 rounded-full bg-purple-600/15 blur-xl animate-pulse pointer-events-none" />}
             </div>
-            {/* Info */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs font-semibold text-purple-400 uppercase tracking-widest">Now Playing</span>
-                {track && <a href={`https://wavlake.com/track/${track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors"><svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>}
+                {track && (
+                  <a href={`https://wavlake.com/track/${track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                  </a>
+                )}
               </div>
               {isLoading ? (
                 <div className="space-y-2"><Skeleton className="h-5 w-36 bg-white/10"/><Skeleton className="h-3.5 w-24 bg-white/10"/></div>
@@ -272,26 +370,32 @@ export function RadioPage() {
 
           {/* Controls */}
           <div className="flex items-center justify-between">
-            {/* Volume */}
             <div className="flex items-center gap-2 flex-1">
               <button onClick={() => setMuted(m => !m)} className="text-white/40 hover:text-white/80 transition-colors" aria-label={muted ? 'Unmute' : 'Mute'}>
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">{muted ? <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/> : <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>}</svg>
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  {muted
+                    ? <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+                    : <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>
+                  }
+                </svg>
               </button>
-              <input type="range" min={0} max={1} step={0.02} value={muted ? 0 : volume} onChange={e => { setVol(+e.target.value); setMuted(false); }} className="w-20 h-1" aria-label="Volume" />
+              <input type="range" min={0} max={1} step={0.02} value={muted ? 0 : volume}
+                onChange={e => { setVol(+e.target.value); setMuted(false); }}
+                className="w-20 h-1" aria-label="Volume" />
             </div>
-            {/* Playback */}
             <div className="flex items-center gap-4">
               <button onClick={handlePrev} disabled={isLoading} className="w-10 h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Previous">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
               </button>
-              <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || tracks.length === 0} className="w-14 h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40" aria-label={playing ? 'Pause' : 'Play'}>
-                {(buffering && !isModerating) ? (
-                  <svg className="w-5 h-5 text-white animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                ) : playing ? (
-                  <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                ) : (
-                  <svg className="w-6 h-6 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                )}
+              <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || tracks.length === 0}
+                className="w-14 h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40"
+                aria-label={playing ? 'Pause' : 'Play'}>
+                {buffering && !isModerating
+                  ? <svg className="w-5 h-5 text-white animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+                  : playing
+                    ? <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                    : <svg className="w-6 h-6 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                }
               </button>
               <button onClick={handleNext} disabled={isLoading} className="w-10 h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Next">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
@@ -303,11 +407,9 @@ export function RadioPage() {
           </div>
         </div>
 
-        {/* ── Coming Up ── */}
+        {/* Coming Up */}
         <div className="fade-in-up-delay-3 space-y-3">
-          <div className="flex items-center justify-between px-1">
-            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up</h3>
-          </div>
+          <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest px-1">Coming Up</h3>
           {UPCOMING.map((seg, i) => (
             <div key={i} className="glass-card rounded-2xl p-4 flex items-start gap-4">
               <div className="w-11 h-11 rounded-xl bg-white/5 flex items-center justify-center flex-shrink-0 text-xl">{seg.icon}</div>
@@ -324,7 +426,7 @@ export function RadioPage() {
           ))}
         </div>
 
-        {/* ── Playlist ── */}
+        {/* Playlist */}
         <div className="fade-in-up-delay-3 space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Playlist</h3>
@@ -333,19 +435,23 @@ export function RadioPage() {
           <div className="glass-card rounded-2xl overflow-hidden divide-y divide-white/5">
             {isLoading ? Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="flex items-center gap-3 px-4 py-3.5">
-                <Skeleton className="w-8 h-8 rounded-lg bg-white/10"/><div className="flex-1 space-y-1.5"><Skeleton className="h-3.5 w-3/5 bg-white/10"/><Skeleton className="h-3 w-2/5 bg-white/10"/></div><Skeleton className="h-3 w-8 bg-white/10"/>
+                <Skeleton className="w-8 h-8 rounded-lg bg-white/10"/>
+                <div className="flex-1 space-y-1.5"><Skeleton className="h-3.5 w-3/5 bg-white/10"/><Skeleton className="h-3 w-2/5 bg-white/10"/></div>
+                <Skeleton className="h-3 w-8 bg-white/10"/>
               </div>
             )) : isError ? (
               <div className="px-4 py-8 text-center"><p className="text-white/40 text-sm">Couldn't load playlist from Wavlake.</p></div>
             ) : tracks.map((t, i) => (
-              <button key={t.id} onClick={() => handleSelect(i)} className={`w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-white/5 transition-colors group ${i === idx ? 'bg-purple-900/20' : ''}`}>
+              <button key={t.id} onClick={() => handleSelect(i)}
+                className={`w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-white/5 transition-colors group ${i === idx ? 'bg-purple-900/20' : ''}`}>
                 <div className="w-8 flex items-center justify-center flex-shrink-0">
-                  {i === idx ? (
-                    <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                  ) : <span className="text-white/30 text-sm group-hover:text-white/60">{i + 1}</span>}
+                  {i === idx
+                    ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
+                    : <span className="text-white/30 text-sm group-hover:text-white/60">{i + 1}</span>
+                  }
                 </div>
                 <div className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
-                  <img src={t.artworkUrl} alt={t.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display='none')} />
+                  <img src={t.artworkUrl} alt={t.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className={`text-sm font-medium truncate ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>{t.name}</p>
@@ -357,7 +463,7 @@ export function RadioPage() {
           </div>
         </div>
 
-        {/* ── Footer ── */}
+        {/* Footer */}
         <div className="text-center pt-2 pb-10">
           <p className="text-white/20 text-xs">
             Music by <a href="https://wavlake.com" target="_blank" rel="noopener noreferrer" className="hover:text-purple-400 transition-colors">Wavlake ⚡</a>
