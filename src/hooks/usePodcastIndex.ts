@@ -3,8 +3,6 @@
  *
  * Thin wrapper around the PodcastIndex REST API.
  * Auth: SHA-1(apiKey + apiSecret + unixTimestamp) per PodcastIndex spec.
- * Credentials are read from VITE_PODCASTINDEX_API_KEY / VITE_PODCASTINDEX_API_SECRET
- * in .env.local (special chars in the secret require quoting + \$ escaping there).
  */
 
 const BASE_URL = 'https://api.podcastindex.org/api/1.0';
@@ -29,8 +27,8 @@ async function sha1Hex(str: string): Promise<string> {
 }
 
 async function buildHeaders(): Promise<Record<string, string>> {
-  const apiKey    = import.meta.env.VITE_PODCASTINDEX_API_KEY    ?? '';
-  const apiSecret = import.meta.env.VITE_PODCASTINDEX_API_SECRET ?? '';
+  const apiKey    = 'GFE3HU2AD5HGAWEULYWW';
+  const apiSecret = '#vXhc923mSznbMdg$qQWXBvdfTUMA3DqdPtwgC6J';
   const timestamp = Math.floor(Date.now() / 1000);
   const hash      = await sha1Hex(apiKey + apiSecret + timestamp);
 
