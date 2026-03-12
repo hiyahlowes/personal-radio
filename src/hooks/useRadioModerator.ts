@@ -231,6 +231,41 @@ export function useRadioModerator() {
   );
 
   /**
+   * Speak a pre-generated commentary script (from Claude) directly via TTS.
+   * Used by the podcast segmenter after a mid-episode break point is detected.
+   * The text has already been generated — we just speak it.
+   */
+  const speakPodcastSegmentCommentary = useCallback(
+    async (script: string): Promise<void> => {
+      await sayScript(script);
+    },
+    [sayScript]
+  );
+
+  /**
+   * Announce the return to a podcast after a music break.
+   * e.g. "And we're back — here's part 2 of Huberman Lab"
+   */
+  const speakPodcastReturn = useCallback(
+    async (podcastTitle: string, partNumber: number): Promise<void> => {
+      const prompt =
+        `You're a radio host returning from a music break back to a podcast. ` +
+        `Podcast: "${podcastTitle}". This is part ${partNumber} of the episode. ` +
+        `Say something warm and brief — 1 sentence — like "And we're back, here's part ${partNumber} of ${podcastTitle}". ` +
+        `Vary the phrasing. Sound natural, not scripted.`;
+
+      const fallback = [
+        `And we're back — here's part ${partNumber} of ${podcastTitle}.`,
+        `Welcome back. Picking up where we left off — ${podcastTitle}, part ${partNumber}.`,
+        `Alright, back to it. Here's the next part of ${podcastTitle}.`,
+      ][partNumber % 3];
+
+      await buildAndSpeak(prompt, fallback);
+    },
+    [buildAndSpeak]
+  );
+
+  /**
    * Bridge back from podcast to music.
    */
   const speakPodcastOutro = useCallback(
@@ -257,6 +292,8 @@ export function useRadioModerator() {
     speakPodcastIntro,
     speakPodcastOutro,
     speakPodcastTransition,
+    speakPodcastSegmentCommentary,
+    speakPodcastReturn,
     stop,
     isSpeaking,
     isGenerating,

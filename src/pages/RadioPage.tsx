@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useWavlakeTracks, type WavlakeTrack } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
+import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { Skeleton } from '@/components/ui/skeleton';
 
 // ─── RadioItem union ─────────────────────────────────────────────────────────
@@ -72,6 +73,10 @@ export function RadioPage() {
   const nowPlayingRef = useRef<RadioItem | null>(null);
 
   const audioRef         = useRef<HTMLAudioElement | null>(null);
+  // Separate audio element for podcasts — needs crossOrigin='anonymous' for
+  // Web Audio API (AnalyserNode / MediaRecorder). Music CDN (Wavlake) has no
+  // CORS headers so the music element must stay untouched.
+  const podAudioRef      = useRef<HTMLAudioElement | null>(null);
   const cancelRampRef    = useRef<(() => void) | null>(null);
   const loopGenRef       = useRef(0);  // incremented each iteration to cancel stale listeners
   const tracksRef        = useRef<WavlakeTrack[]>([]);
@@ -88,6 +93,8 @@ export function RadioPage() {
   const volumeRef        = useRef(0.9);
   const mutedRef         = useRef(false);
 
+  const segmenter = usePodcastSegmenter();
+
   // Sync refs to latest state/props
   useEffect(() => { tracksRef.current    = tracks;    }, [tracks]);
   useEffect(() => { episodesRef.current  = episodes;  }, [episodes]);
@@ -96,12 +103,11 @@ export function RadioPage() {
   useEffect(() => { volumeRef.current    = volume;    }, [volume]);
   useEffect(() => { mutedRef.current     = muted;     }, [muted]);
 
-  // ── Audio element — created once, no crossOrigin ──────────────────────────
+  // ── Audio elements — created once ─────────────────────────────────────────
   useEffect(() => {
+    // Music audio: NO crossOrigin — Wavlake CDN has no CORS headers.
     const audio      = new Audio();
     audio.preload    = 'metadata';
-    // Do NOT set audio.crossOrigin — Wavlake CDN has no CORS headers and
-    // crossOrigin='anonymous' would cause all requests to fail.
     audioRef.current = audio;
 
     audio.addEventListener('timeupdate',     () => setCT(audio.currentTime));
@@ -113,8 +119,27 @@ export function RadioPage() {
     audio.addEventListener('canplay',        () => setBuf(false));
     audio.addEventListener('error',          () => { if (audio.src) console.error('[Music] error', audio.error?.message); });
 
-    return () => { audio.pause(); audio.src = ''; };
-  }, []);
+    // Podcast audio: crossOrigin='anonymous' so Web Audio API can connect to it.
+    // Podcast CDNs (Libsyn, Fountain, Simplecast, Acast) all send CORS headers.
+    // Must set crossOrigin BEFORE src to ensure the CORS request is made.
+    const pod          = new Audio();
+    pod.preload        = 'metadata';
+    pod.crossOrigin    = 'anonymous';
+    podAudioRef.current = pod;
+
+    pod.addEventListener('timeupdate',     () => { if (nowPlayingRef.current?.kind === 'podcast') setCT(pod.currentTime); });
+    pod.addEventListener('durationchange', () => { if (nowPlayingRef.current?.kind === 'podcast') setDur(pod.duration || 0); });
+    pod.addEventListener('play',           () => { if (nowPlayingRef.current?.kind === 'podcast') { setPlaying(true);  setBuf(false); } });
+    pod.addEventListener('pause',          () => { if (nowPlayingRef.current?.kind === 'podcast')   setPlaying(false); });
+    pod.addEventListener('waiting',        () => { if (nowPlayingRef.current?.kind === 'podcast')   setBuf(true);  });
+    pod.addEventListener('canplay',        () => { if (nowPlayingRef.current?.kind === 'podcast')   setBuf(false); });
+    pod.addEventListener('error',          () => { if (pod.src) console.error('[Podcast] audio error', pod.error?.message); });
+
+    return () => {
+      audio.pause(); audio.src = '';
+      pod.pause();   pod.src   = '';
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Ducking — ramp audio.volume on isSpeaking changes ────────────────────
   useEffect(() => {
@@ -278,55 +303,142 @@ export function RadioPage() {
           await moderatorRef.current.speakPodcastTransition(episode.title, episode.feedTitle);
           if (!runningRef.current) break;
 
-          // ── Load and play the podcast episode ─────────────────────────────
-          loopGenRef.current++;
-          audio.pause();
-          audio.src    = episode.audioUrl;
-          audio.volume = mutedRef.current ? 0 : volumeRef.current;
-          audio.load();
-          setCT(0);
-          setDur(episode.duration || 0);
+          // ── Load podcast onto the dedicated CORS-enabled audio element ────
+          const pod = podAudioRef.current;
+          if (!pod) {
+            console.warn('[Loop] podAudioRef not ready — skipping podcast');
+          } else {
+            loopGenRef.current++;
 
-          // Update Now Playing to show podcast info
-          nowPlayingRef.current = { kind: 'podcast', episode };
-          setNowPlaying({ kind: 'podcast', episode });
+            // Pause music while podcast plays
+            audio.pause();
 
-          try {
-            await audio.play();
-            console.log('[Loop] podcast playing');
-          } catch (e) {
-            console.error('[Loop] podcast play failed:', e);
-            // On failure, skip this podcast slot and return to music
-            nowPlayingRef.current = { kind: 'music', track: t };
-            setNowPlaying({ kind: 'music', track: t });
-          }
+            // Set src AFTER crossOrigin is already set (done at element creation)
+            pod.src    = episode.audioUrl;
+            pod.volume = mutedRef.current ? 0 : volumeRef.current;
+            pod.load();
+            setCT(0);
+            setDur(episode.duration || 0);
 
-          // ── Wait for podcast to finish (or user to pause) ─────────────────
-          if (runningRef.current) {
-            const podGen = ++loopGenRef.current;
-            await new Promise<boolean>(resolve => {
-              const onEnded = () => {
-                if (loopGenRef.current !== podGen) return;
-                cleanup();
-                console.log('[Loop] podcast ended naturally');
-                resolve(true);
-              };
-              const onPause = () => {
-                if (loopGenRef.current !== podGen) return;
-                if (!runningRef.current) { cleanup(); resolve(false); }
-              };
-              function cleanup() {
-                audio.removeEventListener('ended', onEnded);
-                audio.removeEventListener('pause', onPause);
-              }
-              audio.addEventListener('ended', onEnded);
-              audio.addEventListener('pause', onPause);
-            });
-          }
+            // Update Now Playing to show podcast info
+            nowPlayingRef.current = { kind: 'podcast', episode };
+            setNowPlaying({ kind: 'podcast', episode });
 
-          // ── Outro: bridge back to music ───────────────────────────────────
-          if (runningRef.current && nextMusicTrack) {
-            await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
+            let podStarted = false;
+            try {
+              await pod.play();
+              podStarted = true;
+              console.log('[Loop] podcast playing via dedicated element');
+            } catch (e) {
+              console.error('[Loop] podcast play failed:', e);
+              nowPlayingRef.current = { kind: 'music', track: t };
+              setNowPlaying({ kind: 'music', track: t });
+            }
+
+            // ── Run episode through segmenter ─────────────────────────────
+            if (podStarted && runningRef.current) {
+              // Snapshot local refs for use inside segmenter callbacks
+              const localMod      = moderatorRef;
+              const localTracks   = tracksRef;
+              const localIdx      = idxRef;
+              const localVolume   = volumeRef;
+              const localMuted    = mutedRef;
+
+              await segmenter.runEpisode(
+                pod,
+                episode.title,
+                episode.feedTitle,
+                {
+                  isRunning: () => runningRef.current,
+
+                  speakCommentary: async (script) => {
+                    await localMod.current.speakPodcastSegmentCommentary(script);
+                  },
+
+                  playMusicBreak: async () => {
+                    // Play 1–3 random Wavlake tracks as a music break
+                    const breakCount = randInt(1, 3);
+                    const allTracks  = localTracks.current;
+                    if (!allTracks.length) return;
+
+                    for (let b = 0; b < breakCount; b++) {
+                      if (!runningRef.current) break;
+
+                      // Pick a random track (different from current podcast position)
+                      const breakIdx   = Math.floor(Math.random() * allTracks.length);
+                      const breakTrack = allTracks[breakIdx];
+
+                      console.log(`[Loop] music break ${b + 1}/${breakCount}: "${breakTrack.name}"`);
+
+                      // Update Now Playing to music
+                      nowPlayingRef.current = { kind: 'music', track: breakTrack };
+                      setNowPlaying({ kind: 'music', track: breakTrack });
+
+                      // Intro the first track of the break
+                      if (b === 0) {
+                        await localMod.current.speakTrackIntro(breakTrack);
+                      }
+
+                      if (!runningRef.current) break;
+
+                      // Load & play on the music element (no CORS, as always)
+                      audio.src    = breakTrack.liveUrl;
+                      audio.volume = DUCK_LEVEL;
+                      audio.load();
+
+                      loopGenRef.current++;
+                      const breakGen = loopGenRef.current;
+
+                      try {
+                        await audio.play();
+                      } catch (e) {
+                        console.error('[Loop] break music play failed:', e);
+                        break;
+                      }
+
+                      // Fade up after intro
+                      cancelRampRef.current?.();
+                      const target = localMuted.current ? 0 : localVolume.current;
+                      cancelRampRef.current = rampVolume(audio, target, 1000);
+
+                      // Wait for break track to end or loop to be stopped
+                      await new Promise<void>(res => {
+                        const onEnded = () => { if (loopGenRef.current !== breakGen) return; cleanup(); res(); };
+                        const onPause = () => { if (loopGenRef.current !== breakGen) return; if (!runningRef.current) { cleanup(); res(); } };
+                        function cleanup() {
+                          audio.removeEventListener('ended', onEnded);
+                          audio.removeEventListener('pause', onPause);
+                        }
+                        audio.addEventListener('ended', onEnded);
+                        audio.addEventListener('pause', onPause);
+                      });
+
+                      audio.pause();
+                    }
+
+                    // Restore Now Playing to podcast
+                    nowPlayingRef.current = { kind: 'podcast', episode };
+                    setNowPlaying({ kind: 'podcast', episode });
+
+                    // Update the playlist cursor to reflect where we are
+                    idxRef.current = localIdx.current;
+                  },
+
+                  speakReturn: async (podcastTitle, partNumber) => {
+                    await localMod.current.speakPodcastReturn(podcastTitle, partNumber);
+                  },
+                },
+              );
+            }
+
+            // ── Episode finished (naturally or user paused) ────────────────
+            pod.pause();
+            pod.src = '';
+
+            // ── Outro: bridge back to music ───────────────────────────────
+            if (runningRef.current && nextMusicTrack) {
+              await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
+            }
           }
 
           // Clear the recent-tracks buffer so the review after a podcast
