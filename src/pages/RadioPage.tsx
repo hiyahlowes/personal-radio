@@ -4,6 +4,28 @@ import { useWavlakeTracks, type WavlakeTrack } from '@/hooks/useWavlakeTracks';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { Skeleton } from '@/components/ui/skeleton';
 
+const DUCK_LEVEL  = 0.15;   // volume during speech
+const FADE_STEP   = 0.025;  // per animation frame (~1.5 s full fade at 60 fps)
+const FADE_MS     = 16;     // ~60 fps
+
+/** Smoothly ramp an Audio element's volume to `target` using rAF. */
+function fadeVolume(audio: HTMLAudioElement, target: number, onDone?: () => void) {
+  const step = target > audio.volume ? FADE_STEP : -FADE_STEP;
+  let raf: number;
+  const tick = () => {
+    const next = audio.volume + step;
+    if ((step > 0 && next >= target) || (step < 0 && next <= target)) {
+      audio.volume = Math.max(0, Math.min(1, target));
+      onDone?.();
+      return;
+    }
+    audio.volume = Math.max(0, Math.min(1, next));
+    raf = setTimeout(tick, FADE_MS) as unknown as number;
+  };
+  raf = setTimeout(tick, FADE_MS) as unknown as number;
+  return () => clearTimeout(raf);
+}
+
 function fmt(s: number) {
   if (!isFinite(s) || s < 0) return '0:00';
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -74,12 +96,29 @@ export function RadioPage() {
     // actual play is triggered by the sequence orchestrator, not here
   }, [idx, tracks]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── volume / mute sync ───────────────────────────────────────────────────
+  // ── volume / mute sync (only when moderator is NOT ducking) ─────────────
   useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = muted ? 0 : volume;
-  }, [volume, muted]);
+    if (audioRef.current && !moderator.isSpeaking && !moderator.isGenerating) {
+      audioRef.current.volume = muted ? 0 : volume;
+    }
+  }, [volume, muted, moderator.isSpeaking, moderator.isGenerating]);
+
+  // ── radio ducking ─────────────────────────────────────────────────────────
+  const cancelFadeRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    cancelFadeRef.current?.();           // cancel any in-progress fade
+    const isModerating = moderator.isSpeaking || moderator.isGenerating;
+    const target = isModerating ? DUCK_LEVEL : (muted ? 0 : volume);
+    cancelFadeRef.current = fadeVolume(audio, target);
+    return () => cancelFadeRef.current?.();
+  }, [moderator.isSpeaking, moderator.isGenerating, volume, muted]);
 
   // ── sequence: greeting → intro → play ────────────────────────────────────
+  // For the very first tune-in: greeting (no music) → intro (no music) → play
+  // For subsequent tracks: music is already loaded, ducking handles the volume;
+  //   intro plays over ducked music, then music resumes at full volume.
   const runSequence = useCallback(async (t: WavlakeTrack, withGreeting: boolean) => {
     if (sequenceRef.current) return;
     sequenceRef.current = true;
