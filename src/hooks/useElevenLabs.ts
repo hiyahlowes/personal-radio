@@ -103,6 +103,7 @@ export function useElevenLabs() {
       console.log('[ElevenLabs] Blob URL created:', url);
 
       setIsGenerating(false);
+      console.log('[ElevenLabs] isSpeaking → TRUE');
       setIsSpeaking(true);
 
       await new Promise<void>((resolve, reject) => {
@@ -161,6 +162,7 @@ export function useElevenLabs() {
       console.error('[ElevenLabs] speak() caught error:', msg, err);
       setError(msg);
     } finally {
+      console.log('[ElevenLabs] isSpeaking → FALSE');
       setIsSpeaking(false);
       setIsGenerating(false);
     }

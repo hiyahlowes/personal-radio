@@ -7,7 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 // ─── Ducking via audio.volume + setInterval ───────────────────────────────────
 // Note: Web Audio API MediaElementAudioSourceNode requires CORS headers on the
 // media URL. Wavlake's CDN does not send them, so we use audio.volume directly.
-const DUCK_LEVEL  = 0.15;
+const DUCK_LEVEL  = 0.08;
 const TICK_MS     = 40;   // ~25 steps/s — smooth enough
 
 function rampVolume(
@@ -110,6 +110,7 @@ export function RadioPage() {
 
   // ── Ducking — ramp audio.volume on isSpeaking changes ────────────────────
   useEffect(() => {
+    console.log('[Duck] effect fired — isSpeaking:', moderator.isSpeaking, '| audio.volume:', audioRef.current?.volume ?? 'no audio');
     const audio = audioRef.current;
     if (!audio) return;
     cancelRampRef.current?.();
@@ -126,12 +127,14 @@ export function RadioPage() {
   }, [moderator.isSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Volume/mute slider (when not ducked) ─────────────────────────────────
+  // Only fires on user volume/mute changes — NOT on isSpeaking changes, so the
+  // ducking fade-back ramp started above is not immediately cancelled.
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || moderator.isSpeaking) return;
     cancelRampRef.current?.();
     audio.volume = muted ? 0 : volume;
-  }, [volume, muted, moderator.isSpeaking]);
+  }, [volume, muted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Core loop — stable, reads everything via refs ─────────────────────────
   const advanceLoop = useCallback(async () => {
@@ -141,9 +144,9 @@ export function RadioPage() {
     console.log('[Loop] advanceLoop() started, idxRef:', idxRef.current);
 
     while (runningRef.current) {
-      const tracks    = tracksRef.current;
+      const tracks     = tracksRef.current;
       const currentIdx = idxRef.current;
-      const t         = tracks[currentIdx];
+      const t          = tracks[currentIdx];
 
       if (!tracks.length || !t) {
         console.log('[Loop] no tracks — exiting');
@@ -151,11 +154,11 @@ export function RadioPage() {
       }
 
       console.log(`[Loop] loading track ${currentIdx}: "${t.name}" by ${t.artist}`);
-      console.log(`[Loop] src: ${t.liveUrl}`);
 
+      // 1. Load and start track at duck level — speech will play over it
       audio.pause();
       audio.src    = t.liveUrl;
-      audio.volume = mutedRef.current ? 0 : volumeRef.current;
+      audio.volume = DUCK_LEVEL; // always start ducked; fade restored after speech
       audio.load();
       setCT(0);
       setDur(t.duration || 0);
@@ -163,17 +166,65 @@ export function RadioPage() {
 
       try {
         await audio.play();
-        console.log('[Loop] audio.play() resolved — track is playing');
+        console.log('[Loop] audio.play() resolved at duck level');
       } catch (e) {
         console.error('[Loop] audio.play() failed:', e);
         runningRef.current = false;
         break;
       }
 
-      // Wait for track to finish naturally, or user pause
+      if (!runningRef.current) break;
+
+      // 2. Speak over the playing music; when isSpeaking flips false the
+      //    ducking useEffect automatically fades volume back to target.
+      if (!greetedRef.current) {
+        greetedRef.current = true;
+        console.log('[Loop] greeting + track intro over music');
+        await moderatorRef.current.speakGreeting(nameRef.current);
+        await sleep(400);
+        await moderatorRef.current.speakTrackIntro(t);
+      } else if (silentCountRef.current >= silentBudgetRef.current && recentTracksRef.current.length > 0) {
+        silentCountRef.current  = 0;
+        silentBudgetRef.current = randInt(1, 2);
+        const played = recentTracksRef.current;
+        recentTracksRef.current = [];
+        console.log('[Loop] moderation — speakReviewAndIntro over music');
+        await moderatorRef.current.speakReviewAndIntro(played, t);
+      } else {
+        // No speech this track — fade up immediately
+        console.log('[Loop] no speech — fading up now');
+        cancelRampRef.current?.();
+        const target = mutedRef.current ? 0 : volumeRef.current;
+        cancelRampRef.current = rampVolume(audio, target, 1000);
+      }
+
+      if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
+
+      // 3. Wait for track to finish naturally, or user pause.
+      //    Browsers fire 'pause' before 'ended' on natural end — guard with settled flag
+      //    and always clean up the listener so it doesn't leak into the next iteration.
       const endedNaturally = await new Promise<boolean>(resolve => {
-        const onEnded = () => { cleanup(); console.log('[Loop] ended naturally'); resolve(true);  };
-        const onPause = () => { cleanup(); console.log('[Loop] paused by user'); resolve(false); };
+        let settled = false;
+        const onEnded = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          console.log(`[Loop] onEnded — track ${currentIdx} finished`);
+          resolve(true);
+        };
+        const onPause = () => {
+          console.log(`[Loop] onPause — runningRef: ${runningRef.current}, settled: ${settled}`);
+          if (settled) return;
+          if (!runningRef.current) {
+            // handlePause sets runningRef=false before audio.pause(), so this is user-initiated
+            settled = true;
+            cleanup();
+            console.log('[Loop] paused by user');
+            resolve(false);
+          }
+          // else: natural-end pause fires before ended — do NOT cleanup here,
+          // onEnded will fire next and resolve correctly
+        };
         function cleanup() {
           audio.removeEventListener('ended', onEnded);
           audio.removeEventListener('pause', onPause);
@@ -187,22 +238,11 @@ export function RadioPage() {
       if (endedNaturally) {
         recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
         silentCountRef.current++;
-
-        const nextIdx   = (currentIdx + 1) % tracks.length;
-        idxRef.current  = nextIdx;
-        const nextTrack = tracks[nextIdx];
-
-        if (nextTrack && silentCountRef.current >= silentBudgetRef.current) {
-          silentCountRef.current  = 0;
-          silentBudgetRef.current = randInt(1, 2);
-          const played = recentTracksRef.current;
-          recentTracksRef.current = [];
-          console.log('[Loop] moderation break — speakReviewAndIntro');
-          await moderatorRef.current.speakReviewAndIntro(played, nextTrack);
-          await sleep(800);
-        }
+        const nextIdx  = (currentIdx + 1) % tracks.length;
+        idxRef.current = nextIdx;
+        console.log(`[Loop] index advanced ${currentIdx} → ${nextIdx}`);
       }
-      // loop continues — picks up idxRef.current on next iteration
+      // loop continues — next iteration reads idxRef.current
     }
 
     console.log('[Loop] advanceLoop() exited');
@@ -216,20 +256,6 @@ export function RadioPage() {
     console.log('[Start] startRadio()');
     runningRef.current = true;
     idxRef.current     = 0;
-
-    if (!greetedRef.current) {
-      greetedRef.current = true;
-      const first = tracksRef.current[0];
-      console.log('[Start] speaking greeting');
-      await moderatorRef.current.speakGreeting(nameRef.current);
-      await sleep(400);
-      console.log('[Start] speaking track intro');
-      await moderatorRef.current.speakTrackIntro(first);
-      await sleep(500);
-    }
-
-    if (!runningRef.current) return; // paused during greeting
-    console.log('[Start] entering advanceLoop');
     await advanceLoop();
   }, [advanceLoop]);
 
