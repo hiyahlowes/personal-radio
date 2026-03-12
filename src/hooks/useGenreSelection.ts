@@ -6,7 +6,7 @@ const STORAGE_KEY = 'pr:selected-genres';
 function loadFromStorage(): string[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return ALL_GENRE_IDS;
+    if (!raw) return ALL_GENRE_IDS; // fallback so RadioPage always has music
     const parsed = JSON.parse(raw) as string[];
     // Validate: must be a non-empty array of strings
     if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(s => typeof s === 'string')) {

@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import {
+  DragDropContext,
+  Droppable,
+  Draggable,
+  type DropResult,
+} from '@hello-pangea/dnd';
 import { useWavlakeTracks, type WavlakeTrack, GENRES } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
@@ -7,6 +13,7 @@ import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { useRadioContext } from '@/contexts/RadioContext';
 import { Skeleton } from '@/components/ui/skeleton';
+import { getStoredName } from '@/pages/SetupPage';
 
 // ─── RadioItem union ─────────────────────────────────────────────────────────
 type RadioItem =
@@ -54,7 +61,8 @@ function fmt(s: number) {
 export function RadioPage() {
   const [params]  = useSearchParams();
   const navigate  = useNavigate();
-  const name      = params.get('name') || 'Listener';
+  // Prefer name from URL param (keeps existing behaviour); fall back to localStorage
+  const name      = params.get('name') || getStoredName() || 'Listener';
   const firstName = name.split(' ')[0];
 
   const { selectedIds, toggle, selectAll, isAllSelected } = useGenreSelection();
@@ -70,6 +78,10 @@ export function RadioPage() {
   const [duration, setDur]    = useState(0);
   const [volume, setVol]      = useState(0.9);
   const [muted, setMuted]     = useState(false);
+
+  // ── Draggable / reorderable local copies of playlist & queue ──────────────
+  const [orderedTracks, setOrderedTracks] = useState<WavlakeTrack[]>([]);
+  const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>([]);
 
   // ── Stable refs ───────────────────────────────────────────────────────────
   const [nowPlaying, setNowPlaying] = useState<RadioItem | null>(null);
@@ -106,6 +118,18 @@ export function RadioPage() {
   useEffect(() => { nameRef.current      = name;      }, [name]);
   useEffect(() => { volumeRef.current    = volume;    }, [volume]);
   useEffect(() => { mutedRef.current     = muted;     }, [muted]);
+
+  // Seed ordered arrays when fresh data arrives from the query
+  useEffect(() => {
+    if (tracks.length > 0) setOrderedTracks(tracks);
+  }, [tracks]);
+  useEffect(() => {
+    if (episodes.length > 0) setOrderedEpisodes(episodes);
+  }, [episodes]);
+
+  // Keep refs in sync with ordered arrays (so the loop reads the user's order)
+  useEffect(() => { tracksRef.current   = orderedTracks;   }, [orderedTracks]);
+  useEffect(() => { episodesRef.current = orderedEpisodes; }, [orderedEpisodes]);
 
   // ── Wire UI state listeners to the persistent audio elements ─────────────
   // The <audio> elements live in RadioContext (above the router) so they
@@ -538,6 +562,45 @@ export function RadioPage() {
   const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length), [jumpTo]);
   const handleSelect = useCallback((i: number) => jumpTo(i), [jumpTo]);
 
+  // ── Drag-and-drop handlers ─────────────────────────────────────────────────
+  const handleDragEnd = useCallback((result: DropResult) => {
+    const { source, destination, droppableId } = result;
+    if (!destination) return; // dropped outside a list
+    if (source.index === destination.index && source.droppableId === destination.droppableId) return;
+
+    if (droppableId === 'playlist') {
+      setOrderedTracks(prev => {
+        const next = [...prev];
+        const [moved] = next.splice(source.index, 1);
+        next.splice(destination.index, 0, moved);
+
+        // Keep idxRef pointing at the same track after reorder
+        const currentTrack = tracksRef.current[idxRef.current];
+        if (currentTrack) {
+          const newIdx = next.findIndex(t => t.id === currentTrack.id);
+          if (newIdx !== -1) {
+            idxRef.current = newIdx;
+            setIdx(newIdx);
+          }
+        }
+
+        tracksRef.current = next;
+        return next;
+      });
+    } else if (droppableId === 'podcast-queue') {
+      setOrderedEpisodes(prev => {
+        const next = [...prev];
+        const [moved] = next.splice(source.index, 1);
+        next.splice(destination.index, 0, moved);
+        episodesRef.current = next;
+
+        // Reset podcast index so the loop picks up from position 0
+        podcastIdxRef.current = 0;
+        return next;
+      });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     const audio = audioRef.current;
     if (!audio || !duration) return;
@@ -546,7 +609,8 @@ export function RadioPage() {
   };
 
   // ── Derived UI ────────────────────────────────────────────────────────────
-  const track        = tracks[idx];
+  // Use orderedTracks so the displayed track matches what the loop is playing
+  const track        = (orderedTracks.length > 0 ? orderedTracks : tracks)[idx];
   const pct          = duration > 0 ? (currentTime / duration) * 100 : 0;
   const isModerating = moderator.isSpeaking || moderator.isGenerating;
   const statusLabel  = moderator.isGenerating ? 'WRITING' : moderator.isSpeaking ? 'ON AIR' : buffering ? 'BUFFERING' : playing ? 'LIVE' : 'PAUSED';
@@ -702,7 +766,7 @@ export function RadioPage() {
               <button onClick={handlePrev} disabled={isLoading} className="w-10 h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Previous">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
               </button>
-              <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || tracks.length === 0}
+              <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || (orderedTracks.length === 0 && tracks.length === 0)}
                 className="w-14 h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40"
                 aria-label={playing ? 'Pause' : 'Play'}>
                 {buffering && !isModerating
@@ -756,65 +820,153 @@ export function RadioPage() {
           </div>
         </div>
 
-        {/* Coming Up — next 3 podcast episodes in queue */}
-        {episodes.length > 0 && (
-          <div className="fade-in-up-delay-3 space-y-3">
-            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest px-1">Coming Up · Podcasts</h3>
-            {episodes.slice(0, 3).map((ep) => (
-              <div key={ep.id} className="glass-card rounded-2xl p-4 flex items-start gap-4">
-                <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-xl">🎙️</div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
-                    {ep.duration > 0 && <>
-                      <span className="text-xs text-white/25">·</span>
-                      <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
-                    </>}
-                  </div>
-                  <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
-                  <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Drag-and-drop context wraps both sortable lists */}
+        <DragDropContext onDragEnd={handleDragEnd}>
 
-        {/* Playlist */}
-        <div className="fade-in-up-delay-3 space-y-3">
-          <div className="flex items-center justify-between px-1">
-            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Playlist</h3>
-            <span className="text-xs text-purple-400">{isLoading ? '…' : `${tracks.length} tracks`}</span>
-          </div>
-          <div className="glass-card rounded-2xl overflow-hidden divide-y divide-white/5">
-            {isLoading ? Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-3 px-4 py-3.5">
-                <Skeleton className="w-8 h-8 rounded-lg bg-white/10"/>
-                <div className="flex-1 space-y-1.5"><Skeleton className="h-3.5 w-3/5 bg-white/10"/><Skeleton className="h-3 w-2/5 bg-white/10"/></div>
-                <Skeleton className="h-3 w-8 bg-white/10"/>
+          {/* Coming Up — podcast queue (draggable) */}
+          {orderedEpisodes.length > 0 && (
+            <div className="fade-in-up-delay-3 space-y-3">
+              <div className="flex items-center justify-between px-1">
+                <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up · Podcasts</h3>
+                <span className="text-xs text-amber-400/60">drag to reorder</span>
               </div>
-            )) : isError ? (
-              <div className="px-4 py-8 text-center"><p className="text-white/40 text-sm">Couldn't load playlist from Wavlake.</p></div>
-            ) : tracks.map((t, i) => (
-              <button key={t.id} onClick={() => handleSelect(i)}
-                className={`w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-white/5 transition-colors group ${i === idx ? 'bg-purple-900/20' : ''}`}>
-                <div className="w-8 flex items-center justify-center flex-shrink-0">
-                  {i === idx
-                    ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                    : <span className="text-white/30 text-sm group-hover:text-white/60">{i + 1}</span>
-                  }
+              <Droppable droppableId="podcast-queue">
+                {(provided, snapshot) => (
+                  <div
+                    ref={provided.innerRef}
+                    {...provided.droppableProps}
+                    className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
+                  >
+                    {orderedEpisodes.slice(0, 5).map((ep, i) => (
+                      <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
+                        {(drag, dragSnapshot) => (
+                          <div
+                            ref={drag.innerRef}
+                            {...drag.draggableProps}
+                            className={`glass-card rounded-2xl p-4 flex items-start gap-4 transition-all
+                              ${dragSnapshot.isDragging ? 'shadow-2xl shadow-amber-900/30 scale-[1.02] ring-1 ring-amber-500/30' : ''}
+                            `}
+                          >
+                            {/* Drag handle */}
+                            <div
+                              {...drag.dragHandleProps}
+                              className="flex-shrink-0 flex items-center justify-center w-5 self-center cursor-grab active:cursor-grabbing text-white/20 hover:text-white/50 transition-colors"
+                              aria-label="Drag to reorder"
+                            >
+                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
+                              </svg>
+                            </div>
+                            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-0.5">
+                                <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
+                                {ep.duration > 0 && <>
+                                  <span className="text-xs text-white/25">·</span>
+                                  <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
+                                </>}
+                                {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
+                              </div>
+                              <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
+                              <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
+                            </div>
+                          </div>
+                        )}
+                      </Draggable>
+                    ))}
+                    {provided.placeholder}
+                  </div>
+                )}
+              </Droppable>
+            </div>
+          )}
+
+          {/* Playlist (draggable) */}
+          <div className="fade-in-up-delay-3 space-y-3">
+            <div className="flex items-center justify-between px-1">
+              <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Playlist</h3>
+              <span className="text-xs text-purple-400">{isLoading ? '…' : `${orderedTracks.length || tracks.length} tracks`}</span>
+            </div>
+            <div className="glass-card rounded-2xl overflow-hidden">
+              {isLoading ? (
+                <div className="divide-y divide-white/5">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div key={i} className="flex items-center gap-3 px-4 py-3.5">
+                      <Skeleton className="w-8 h-8 rounded-lg bg-white/10"/>
+                      <div className="flex-1 space-y-1.5"><Skeleton className="h-3.5 w-3/5 bg-white/10"/><Skeleton className="h-3 w-2/5 bg-white/10"/></div>
+                      <Skeleton className="h-3 w-8 bg-white/10"/>
+                    </div>
+                  ))}
                 </div>
-                <div className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
-                  <img src={t.artworkUrl} alt={t.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className={`text-sm font-medium truncate ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>{t.name}</p>
-                  <p className="text-xs text-white/40 truncate">{t.artist}</p>
-                </div>
-                <span className="text-xs text-white/30 flex-shrink-0">{fmt(t.duration)}</span>
-              </button>
-            ))}
+              ) : isError ? (
+                <div className="px-4 py-8 text-center"><p className="text-white/40 text-sm">Couldn't load playlist from Wavlake.</p></div>
+              ) : (
+                <Droppable droppableId="playlist">
+                  {(provided, snapshot) => (
+                    <div
+                      ref={provided.innerRef}
+                      {...provided.droppableProps}
+                      className={`divide-y divide-white/5 transition-colors ${snapshot.isDraggingOver ? 'bg-purple-900/10' : ''}`}
+                    >
+                      {orderedTracks.map((t, i) => (
+                        <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
+                          {(drag, dragSnapshot) => (
+                            <div
+                              ref={drag.innerRef}
+                              {...drag.draggableProps}
+                              className={`flex items-center gap-3 px-4 py-3.5 transition-all
+                                ${i === idx ? 'bg-purple-900/20' : 'hover:bg-white/5'}
+                                ${dragSnapshot.isDragging ? 'shadow-xl shadow-purple-900/30 scale-[1.01] bg-white/5 ring-1 ring-purple-500/30 rounded-xl' : ''}
+                              `}
+                            >
+                              {/* Drag handle */}
+                              <div
+                                {...drag.dragHandleProps}
+                                className="flex-shrink-0 w-5 flex items-center justify-center cursor-grab active:cursor-grabbing text-white/15 hover:text-white/40 transition-colors"
+                                aria-label="Drag to reorder"
+                              >
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
+                                </svg>
+                              </div>
+
+                              {/* Track number / playing indicator */}
+                              <button
+                                onClick={() => handleSelect(i)}
+                                className="w-6 flex items-center justify-center flex-shrink-0"
+                                aria-label={i === idx ? 'Currently playing' : `Play ${t.name}`}
+                              >
+                                {i === idx
+                                  ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
+                                  : <span className="text-white/30 text-xs hover:text-white/60">{i + 1}</span>
+                                }
+                              </button>
+
+                              {/* Artwork */}
+                              <button onClick={() => handleSelect(i)} className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5 flex-shrink-0">
+                                <img src={t.artworkUrl} alt={t.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
+                              </button>
+
+                              {/* Info */}
+                              <button onClick={() => handleSelect(i)} className="flex-1 min-w-0 text-left">
+                                <p className={`text-sm font-medium truncate ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>{t.name}</p>
+                                <p className="text-xs text-white/40 truncate">{t.artist}</p>
+                              </button>
+
+                              <span className="text-xs text-white/30 flex-shrink-0 pr-1">{fmt(t.duration)}</span>
+                            </div>
+                          )}
+                        </Draggable>
+                      ))}
+                      {provided.placeholder}
+                    </div>
+                  )}
+                </Droppable>
+              )}
+            </div>
           </div>
-        </div>
+
+        </DragDropContext>
 
         {/* Footer */}
         <div className="text-center pt-2 pb-10">

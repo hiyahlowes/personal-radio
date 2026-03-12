@@ -88,41 +88,20 @@ export interface PodcastFeed {
   title: string;
 }
 
-// ── Verified working feed URLs (tested 2026-03-12) ───────────────────────────
-// User-supplied URLs, verified live via curl before use.
-// Note: feeds.pippa.io/shows/6359a8448c5fe9001207c0ac returns a Cloudflare
-// DNS error — the canonical Acast URL for the same show ID is used instead.
-export const DEFAULT_FEEDS: PodcastFeed[] = [
-  {
-    url: 'https://feeds.fountain.fm/UZSKQcrOnhqYS1JopxGg',
-    title: 'What Bitcoin Did',
-  },
-  {
-    url: 'https://feeds.fountain.fm/40huHEEF6JMPGYctMuUI',
-    title: 'This Week in Bitcoin',
-  },
-  {
-    url: 'https://feeds.simplecast.com/mDS2jisg',
-    title: 'A Bit of Optimism',
-  },
-  {
-    // feeds.pippa.io/shows/6359a8448c5fe9001207c0ac → Cloudflare DNS error;
-    // same show ID resolves correctly on Acast's CDN.
-    url: 'https://feeds.acast.com/public/shows/6359a8448c5fe9001207c0ac',
-    title: 'Secular Buddhism',
-  },
-];
+// No hardcoded default feeds — user sets their own during onboarding (SetupPage).
+// An empty array is the correct default; onboarding enforces at least 1 feed.
+export const DEFAULT_FEEDS: PodcastFeed[] = [];
 
 const FEEDS_STORAGE_KEY = 'pr:podcast-feeds';
 
 export function getStoredFeeds(): PodcastFeed[] {
   try {
     const raw = localStorage.getItem(FEEDS_STORAGE_KEY);
-    if (!raw) return DEFAULT_FEEDS;
+    if (!raw) return [];
     const parsed = JSON.parse(raw) as PodcastFeed[];
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_FEEDS;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return DEFAULT_FEEDS;
+    return [];
   }
 }
 

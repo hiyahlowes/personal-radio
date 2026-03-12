@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSeoMeta } from '@unhead/react';
 import {
-  DEFAULT_FEEDS,
   getStoredFeeds,
   setStoredFeeds,
   type PodcastFeed,
@@ -12,19 +11,81 @@ import {
   searchPodcasts,
   type PodcastIndexFeed,
 } from '@/hooks/usePodcastIndex';
+import { GENRES, ALL_GENRE_IDS } from '@/hooks/useWavlakeTracks';
+import {
+  getStoredName,
+  setStoredName,
+  GENRES_KEY,
+} from '@/pages/SetupPage';
+
+// Emoji map (shared style with SetupPage)
+const genreEmoji: Record<string, string> = {
+  ambient:    '🌊',
+  electronic: '⚡',
+  lofi:       '☕',
+  rock:       '🎸',
+  folk:       '🪕',
+  jazz:       '🎷',
+  classical:  '🎻',
+  hiphop:     '🎤',
+};
+
+function loadStoredGenres(): string[] {
+  try {
+    const raw = localStorage.getItem(GENRES_KEY);
+    if (!raw) return ALL_GENRE_IDS;
+    const parsed = JSON.parse(raw) as string[];
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : ALL_GENRE_IDS;
+  } catch {
+    return ALL_GENRE_IDS;
+  }
+}
 
 export function SettingsPage() {
   useSeoMeta({ title: 'Settings — PR Personal Radio' });
   const navigate = useNavigate();
 
+  // ── Listener name ─────────────────────────────────────────────────────────
+  const [listenerName, setListenerName] = useState(getStoredName);
+  const [nameSaved, setNameSaved]       = useState(false);
+
+  const saveName = () => {
+    setStoredName(listenerName.trim());
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  // ── Genre selection ───────────────────────────────────────────────────────
+  const [selectedGenres, setSelectedGenres] = useState<string[]>(loadStoredGenres);
+  const [genresSaved, setGenresSaved]       = useState(false);
+
+  const toggleGenre = (id: string) => {
+    setSelectedGenres(prev => {
+      const next = prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id];
+      // Save immediately
+      localStorage.setItem(GENRES_KEY, JSON.stringify(next.length > 0 ? next : ALL_GENRE_IDS));
+      setGenresSaved(true);
+      setTimeout(() => setGenresSaved(false), 1500);
+      return next.length > 0 ? next : prev; // don't allow deselecting the last one
+    });
+  };
+
+  const selectAllGenres = () => {
+    setSelectedGenres(ALL_GENRE_IDS);
+    localStorage.setItem(GENRES_KEY, JSON.stringify(ALL_GENRE_IDS));
+    setGenresSaved(true);
+    setTimeout(() => setGenresSaved(false), 1500);
+  };
+
+  // ── Podcast feeds ─────────────────────────────────────────────────────────
   const [feeds, setFeeds]   = useState<PodcastFeed[]>(getStoredFeeds);
   const [error, setError]   = useState('');
-  const [saved, setSaved]   = useState(false);
+  const [feedSaved, setFeedSaved] = useState(false);
 
-  // ── Podcast search / trending ────────────────────────────────────────────
-  const [query, setQuery]           = useState('');
-  const [trending, setTrending]     = useState<PodcastIndexFeed[]>([]);
-  const [results, setResults]       = useState<PodcastIndexFeed[]>([]);
+  // ── Podcast search / trending ─────────────────────────────────────────────
+  const [query, setQuery]               = useState('');
+  const [trending, setTrending]         = useState<PodcastIndexFeed[]>([]);
+  const [results, setResults]           = useState<PodcastIndexFeed[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError]     = useState('');
   const [addedIds, setAddedIds]           = useState<Set<number>>(new Set());
@@ -61,29 +122,27 @@ export function SettingsPage() {
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
   }, [query]);
 
-  const save = (next: PodcastFeed[]) => {
+  const saveFeeds = (next: PodcastFeed[]) => {
     setFeeds(next);
     setStoredFeeds(next);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    setFeedSaved(true);
+    setTimeout(() => setFeedSaved(false), 2000);
   };
 
   const addFeedByUrl = (url: string, title: string) => {
     setError('');
     if (!url.startsWith('http')) { setError('URL must start with http:// or https://'); return; }
     if (feeds.find(f => f.url === url)) { setError('That feed is already in your list.'); return; }
-    save([...feeds, { url, title: title || new URL(url).hostname }]);
+    saveFeeds([...feeds, { url, title: title || new URL(url).hostname }]);
   };
 
   const addFromIndex = (feed: PodcastIndexFeed) => {
     if (feeds.find(f => f.url === feed.url)) return;
-    save([...feeds, { url: feed.url, title: feed.title }]);
+    saveFeeds([...feeds, { url: feed.url, title: feed.title }]);
     setAddedIds(prev => new Set(prev).add(feed.id));
   };
 
-  const removeFeed = (url: string) => save(feeds.filter(f => f.url !== url));
-
-  const resetToDefaults = () => save([...DEFAULT_FEEDS]);
+  const removeFeed = (url: string) => saveFeeds(feeds.filter(f => f.url !== url));
 
   return (
     <div className="min-h-screen gradient-bg text-white">
@@ -106,14 +165,97 @@ export function SettingsPage() {
           </div>
         </header>
 
-        {/* Podcast feeds */}
+        {/* ── Listener name ──────────────────────────────────────────────── */}
+        <section className="fade-in-up space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-bold">Your name</h2>
+              <p className="text-sm text-white/40 mt-0.5">How your AI host greets you</p>
+            </div>
+            {nameSaved && (
+              <span className="text-xs text-green-400 font-semibold flex items-center gap-1">
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                Saved
+              </span>
+            )}
+          </div>
+          <div className="glass-card rounded-2xl p-5 flex items-center gap-3">
+            <input
+              type="text"
+              value={listenerName}
+              onChange={e => setListenerName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && listenerName.trim() && saveName()}
+              placeholder="Your name…"
+              maxLength={50}
+              className="flex-1 px-4 py-2.5 bg-white/5 border border-white/10 rounded-xl text-sm text-white placeholder-white/25 outline-none focus:border-purple-500 transition-colors"
+            />
+            <button
+              onClick={saveName}
+              disabled={!listenerName.trim()}
+              className="px-4 py-2.5 bg-purple-600/20 text-purple-300 border border-purple-500/30 rounded-xl text-sm font-semibold hover:bg-purple-600/40 hover:text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Save
+            </button>
+          </div>
+        </section>
+
+        {/* ── Genre selection ────────────────────────────────────────────── */}
+        <section className="fade-in-up-delay-1 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-bold">Music genres</h2>
+              <p className="text-sm text-white/40 mt-0.5">Filter the Wavlake tracks in your stream</p>
+            </div>
+            <div className="flex items-center gap-3">
+              {genresSaved && (
+                <span className="text-xs text-green-400 font-semibold flex items-center gap-1">
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                  Saved
+                </span>
+              )}
+              {selectedGenres.length !== ALL_GENRE_IDS.length && (
+                <button
+                  onClick={selectAllGenres}
+                  className="text-xs text-purple-400 hover:text-purple-300 transition-colors"
+                >
+                  All
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="glass-card rounded-2xl p-4">
+            <div className="flex flex-wrap gap-2">
+              {GENRES.map(genre => {
+                const active = selectedGenres.includes(genre.id);
+                return (
+                  <button
+                    key={genre.id}
+                    onClick={() => toggleGenre(genre.id)}
+                    aria-pressed={active}
+                    className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border transition-all duration-150 text-sm font-semibold select-none
+                      ${active
+                        ? 'bg-purple-600/25 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
+                        : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
+                      }`}
+                  >
+                    <span>{genreEmoji[genre.id] ?? '🎵'}</span>
+                    {genre.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </section>
+
+        {/* ── Podcast feeds ──────────────────────────────────────────────── */}
         <section className="fade-in-up-delay-1 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-lg font-bold">Podcast Feeds</h2>
               <p className="text-sm text-white/40 mt-0.5">RSS feeds mixed into your radio stream</p>
             </div>
-            {saved && (
+            {feedSaved && (
               <span className="text-xs text-green-400 font-semibold flex items-center gap-1">
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
                 Saved
@@ -226,7 +368,7 @@ export function SettingsPage() {
                             : 'bg-purple-600/20 text-purple-300 border border-purple-500/30 hover:bg-purple-600/40 hover:text-white'
                         }`}
                       >
-                        {alreadyAdded ? '✓ Added' : 'Add to session'}
+                        {alreadyAdded ? '✓ Added' : 'Add'}
                       </button>
                     </div>
                   );
@@ -244,13 +386,18 @@ export function SettingsPage() {
               <PasteUrlForm feeds={feeds} onAdd={addFeedByUrl} error={error} setError={setError} />
             </div>
           </div>
+        </section>
 
-          {/* Reset */}
+        {/* ── Re-run setup ───────────────────────────────────────────────── */}
+        <section className="fade-in-up-delay-2 pt-2">
           <button
-            onClick={resetToDefaults}
+            onClick={() => {
+              localStorage.removeItem('pr:setupComplete');
+              navigate('/setup');
+            }}
             className="text-xs text-white/25 hover:text-white/50 transition-colors"
           >
-            Reset to default feeds
+            Re-run setup wizard
           </button>
         </section>
 
@@ -292,6 +439,9 @@ function PasteUrlForm({
     setTitle('');
     setOpen(false);
   };
+
+  // feeds is used by the parent — keep it in the dependency but suppress lint
+  void feeds;
 
   return (
     <div className="space-y-2">
