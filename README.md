@@ -1,7 +1,9 @@
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]
-[![Bitcoin Lightning](https://img.shields.io/badge/payments-Lightning-orange)]# PR – Personal Radio
+# PR – Personal Radio
 
 **Your personal AI radio station, powered by Bitcoin Lightning & Nostr**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]
+[![Bitcoin Lightning](https://img.shields.io/badge/payments-Lightning-orange)]
 
 [![Edit with Shakespeare](https://shakespeare.diy/badge.svg)](https://shakespeare.diy/clone?url=https%3A%2F%2Fgithub.com%2Fhiyahlowes%2Fpersonal-radio)
 
