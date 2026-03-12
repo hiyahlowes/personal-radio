@@ -1,0 +1,193 @@
+import { useCallback, useRef } from 'react';
+import { useElevenLabs } from './useElevenLabs';
+import type { WavlakeTrack } from './useWavlakeTracks';
+
+// ─── Time-of-day helpers ──────────────────────────────────────────────────────
+type TimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night';
+
+function getTimeOfDay(): TimeOfDay {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 12) return 'morning';
+  if (h >= 12 && h < 17) return 'afternoon';
+  if (h >= 17 && h < 21) return 'evening';
+  return 'night';
+}
+
+function getDateString(): string {
+  return new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+// ─── Fallback script generators (no AI required) ──────────────────────────────
+function fallbackGreeting(name: string): string {
+  const tod = getTimeOfDay();
+  const firstName = name.split(' ')[0];
+  const scripts: Record<TimeOfDay, string> = {
+    morning: `Good morning, ${firstName}. You're tuned in to PR — your personal radio station. It's a great morning for music, so let's kick things off right. Sit back, relax, and enjoy the show.`,
+    afternoon: `Good afternoon, ${firstName}. Welcome back to PR — your personal station. The afternoon playlist is ready and it's a good one. Let's get into it.`,
+    evening: `Good evening, ${firstName}. You're listening to PR. The day is winding down and the evening set is ready to go. This one's for you — enjoy.`,
+    night: `Hey, ${firstName}. Late night, good music. You're tuned in to PR and we've got the perfect soundtrack for the quiet hours. Let's go.`,
+  };
+  return scripts[tod];
+}
+
+function fallbackTrackIntro(track: WavlakeTrack): string {
+  const templates = [
+    `Up next — "${track.name}" by ${track.artist}. This one's a great listen.`,
+    `Here's "${track.name}" from ${track.artist}. Enjoy.`,
+    `Coming up — ${track.artist} with "${track.name}". Let it play.`,
+    `Next on the playlist — "${track.name}" by ${track.artist}.`,
+    `And now, from ${track.artist} — "${track.name}".`,
+  ];
+  // Pick deterministically based on track id to avoid randomness on re-render
+  const idx = track.id.charCodeAt(0) % templates.length;
+  return templates[idx];
+}
+
+function fallbackPodcastTransition(podcastTitle: string, hostName: string): string {
+  const templates = [
+    `Coming up — we're switching gears for a moment. ${hostName} joins us with "${podcastTitle}". Stay with us.`,
+    `That's the music for now. Next up — "${podcastTitle}" with ${hostName}. Don't go anywhere.`,
+    `And now for something a little different. ${hostName} is here with "${podcastTitle}". Take a listen.`,
+  ];
+  const idx = podcastTitle.charCodeAt(0) % templates.length;
+  return templates[idx];
+}
+
+// ─── Shakespeare AI script generator ─────────────────────────────────────────
+// We call the Shakespeare API directly here (without requiring Nostr login)
+// using a simple fetch — greetings are unauthenticated text generation.
+async function generateScript(prompt: string): Promise<string | null> {
+  try {
+    const response = await fetch('https://ai.shakespeare.diy/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'tybalt', // free, no auth required
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a warm, natural-sounding AI radio host for PR – Personal Radio. ' +
+              'Speak exactly as you would on air: no stage directions, no quotation marks, no asterisks, ' +
+              'no parenthetical notes. Just pure, natural radio speech. ' +
+              'Keep it short — 2 to 3 sentences maximum. No emojis.',
+          },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: 100,
+        temperature: 0.85,
+      }),
+    });
+
+    if (!response.ok) return null;
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content;
+    return typeof text === 'string' && text.trim() ? text.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+export interface ModeratorState {
+  isSpeaking: boolean;
+  isGenerating: boolean;
+  currentScript: string;
+  error: string | null;
+}
+
+export function useRadioModerator() {
+  const { speak, stop, isSpeaking, isGenerating, error } = useElevenLabs();
+  const currentScriptRef = useRef('');
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  const sayScript = useCallback(
+    async (script: string): Promise<void> => {
+      currentScriptRef.current = script;
+      await speak(script);
+    },
+    [speak]
+  );
+
+  const buildAndSpeak = useCallback(
+    async (prompt: string, fallback: string): Promise<void> => {
+      // Try AI first; fall back to pre-written script on any failure
+      const aiScript = await generateScript(prompt);
+      await sayScript(aiScript ?? fallback);
+    },
+    [sayScript]
+  );
+
+  // ── Public API ────────────────────────────────────────────────────────────
+
+  /**
+   * Play a personalized greeting when the listener tunes in.
+   * Called once, on first play.
+   */
+  const speakGreeting = useCallback(
+    async (listenerName: string): Promise<void> => {
+      const tod = getTimeOfDay();
+      const firstName = listenerName.split(' ')[0];
+      const date = getDateString();
+      const prompt =
+        `Write a ${tod} on-air greeting for a listener named ${firstName}. ` +
+        `Today is ${date}. ` +
+        `Sound warm, personal and authentic — like a real radio host welcoming them to their favourite station. ` +
+        `Reference the time of day naturally. 2–3 sentences.`;
+
+      await buildAndSpeak(prompt, fallbackGreeting(listenerName));
+    },
+    [buildAndSpeak]
+  );
+
+  /**
+   * Introduce a track before it plays.
+   * Called whenever the current track changes and music is about to start.
+   */
+  const speakTrackIntro = useCallback(
+    async (track: WavlakeTrack): Promise<void> => {
+      const prompt =
+        `Introduce the next song on air. ` +
+        `Song title: "${track.name}". Artist: "${track.artist}". ` +
+        `Album: "${track.albumTitle || 'their latest work'}". ` +
+        `Sound like a natural radio DJ handing off to the track. Keep it to 1–2 sentences. ` +
+        `Don't say "here's" at the start — vary your phrasing.`;
+
+      await buildAndSpeak(prompt, fallbackTrackIntro(track));
+    },
+    [buildAndSpeak]
+  );
+
+  /**
+   * Short transition bridge between a music segment and a podcast segment.
+   */
+  const speakPodcastTransition = useCallback(
+    async (podcastTitle: string, hostName: string): Promise<void> => {
+      const prompt =
+        `You're transitioning from a music set to a podcast segment. ` +
+        `Podcast title: "${podcastTitle}". Host: "${hostName}". ` +
+        `Give a smooth, natural on-air handoff — 1–2 sentences. Make it feel seamless.`;
+
+      await buildAndSpeak(
+        prompt,
+        fallbackPodcastTransition(podcastTitle, hostName)
+      );
+    },
+    [buildAndSpeak]
+  );
+
+  return {
+    speakGreeting,
+    speakTrackIntro,
+    speakPodcastTransition,
+    stop,
+    isSpeaking,
+    isGenerating,
+    currentScript: currentScriptRef.current,
+    error,
+  };
+}
