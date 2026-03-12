@@ -2,8 +2,8 @@
 
 **Your personal AI radio station, powered by Bitcoin Lightning & Nostr**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Payments: Lightning](https://img.shields.io/badge/payments-Lightning-orange)](https://lightning.network)
+![MIT License](https://img.shields.io/github/license/hiyahlowes/personal-radio)
+![GitHub stars](https://img.shields.io/github/stars/hiyahlowes/personal-radio)
 
 [![Edit with Shakespeare](https://shakespeare.diy/badge.svg)](https://shakespeare.diy/clone?url=https%3A%2F%2Fgithub.com%2Fhiyahlowes%2Fpersonal-radio)
 
