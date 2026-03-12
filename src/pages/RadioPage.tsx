@@ -4,36 +4,14 @@ import { useWavlakeTracks, type WavlakeTrack } from '@/hooks/useWavlakeTracks';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { Skeleton } from '@/components/ui/skeleton';
 
-// ─── Ducking constants ────────────────────────────────────────────────────────
-const DUCK_LEVEL    = 0.15;
-const TICK_MS       = 50;          // setInterval resolution
-const DUCK_DOWN_MS  = 1000;        // fade down over 1 s
-const FADE_BACK_MS  = 2000;        // fade up over 2 s
+const DUCK_LEVEL   = 0.15;
+const DUCK_DOWN_S  = 1.0;
+const FADE_BACK_S  = 2.0;
 
-/** Smoothly ramp audio.volume to `target` over `durationMs` using setInterval. Returns cancel fn. */
-function rampVolume(audio: HTMLAudioElement, target: number, durationMs: number): () => void {
-  const start  = audio.volume;
-  const delta  = target - start;
-  const steps  = Math.max(1, Math.round(durationMs / TICK_MS));
-  const stepBy = delta / steps;
-  let count    = 0;
-  const id     = setInterval(() => {
-    count++;
-    const next = start + stepBy * count;
-    audio.volume = Math.max(0, Math.min(1, count >= steps ? target : next));
-    if (count >= steps) clearInterval(id);
-  }, TICK_MS);
-  return () => clearInterval(id);
-}
-
-// ─── Sequencing helpers ───────────────────────────────────────────────────────
-/** Pick a random integer in [min, max] inclusive */
 function randInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
-
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-
 function fmt(s: number) {
   if (!isFinite(s) || s < 0) return '0:00';
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -45,7 +23,6 @@ const UPCOMING = [
   { type: 'podcast', title: 'Tech Horizons: AI in Creative Work',    host: 'Sam & Priya',  duration: '32 min', icon: '🎙️' },
 ];
 
-// ─── Component ────────────────────────────────────────────────────────────────
 export function RadioPage() {
   const [params]  = useSearchParams();
   const navigate  = useNavigate();
@@ -55,207 +32,233 @@ export function RadioPage() {
   const { data: tracks = [], isLoading, isError } = useWavlakeTracks();
   const moderator = useRadioModerator();
 
-  // ── player state ─────────────────────────────────────────────────────────
+  // ── UI state ──────────────────────────────────────────────────────────────
   const [idx, setIdx]         = useState(0);
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuf]   = useState(false);
   const [currentTime, setCT]  = useState(0);
   const [duration, setDur]    = useState(0);
-  const [volume, setVol]      = useState(0.8);
+  const [volume, setVol]      = useState(1.0);   // target gain 0–1
   const [muted, setMuted]     = useState(false);
 
-  const audioRef        = useRef<HTMLAudioElement | null>(null);
-  const cancelRampRef   = useRef<(() => void) | null>(null);
+  // ── Audio + Web Audio API refs ────────────────────────────────────────────
+  const audioRef   = useRef<HTMLAudioElement | null>(null);
+  const ctxRef     = useRef<AudioContext | null>(null);
+  const gainRef    = useRef<GainNode | null>(null);
+  const sourceRef  = useRef<MediaElementAudioSourceNode | null>(null);
 
-  // ── sequencing state (all in refs to avoid stale closures) ───────────────
-  const greetedRef      = useRef(false);   // opening greeting played?
-  const runningRef      = useRef(false);   // loop is active (user hasn't paused)?
-  const silentCountRef  = useRef(0);       // tracks played silently since last break
-  const silentBudgetRef = useRef(randInt(1, 2)); // how many silent tracks before next break
-  const recentTracksRef = useRef<WavlakeTrack[]>([]); // tracks played since last moderation
-  const idxRef          = useRef(0);       // mirror of idx for use inside callbacks
+  // ── Loop state kept in refs (never causes re-renders, no stale closures) ──
+  const tracksRef        = useRef<WavlakeTrack[]>([]);
+  const runningRef       = useRef(false);
+  const greetedRef       = useRef(false);
+  const idxRef           = useRef(0);
+  const silentCountRef   = useRef(0);
+  const silentBudgetRef  = useRef(randInt(1, 2));
+  const recentTracksRef  = useRef<WavlakeTrack[]>([]);
+  const moderatorRef     = useRef(moderator);
+  const nameRef          = useRef(name);
 
-  const track: WavlakeTrack | undefined = tracks[idx];
+  // Keep refs in sync with latest values
+  useEffect(() => { tracksRef.current   = tracks;   }, [tracks]);
+  useEffect(() => { moderatorRef.current = moderator; }, [moderator]);
+  useEffect(() => { nameRef.current      = name;     }, [name]);
+  useEffect(() => { idxRef.current       = idx;      }, [idx]);
 
-  // keep idxRef in sync
-  useEffect(() => { idxRef.current = idx; }, [idx]);
+  // ── Web Audio API: init once on first play (requires user gesture) ────────
+  const initAudioContext = useCallback(() => {
+    if (ctxRef.current) return; // already initialised
+    const audio = audioRef.current!;
+    const ctx   = new AudioContext();
+    const gain  = ctx.createGain();
+    const src   = ctx.createMediaElementSource(audio);
+    src.connect(gain);
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(1.0, ctx.currentTime);
+    ctxRef.current  = ctx;
+    gainRef.current = gain;
+    sourceRef.current = src;
+  }, []);
 
-  // ── audio element setup (once) ──────────────────────────────────────────
+  // ── Duck helpers using GainNode.linearRampToValueAtTime ──────────────────
+  const duckDown = useCallback(() => {
+    const ctx  = ctxRef.current;
+    const gain = gainRef.current;
+    if (!ctx || !gain) return;
+    const now = ctx.currentTime;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setValueAtTime(gain.gain.value, now);
+    gain.gain.linearRampToValueAtTime(DUCK_LEVEL, now + DUCK_DOWN_S);
+  }, []);
+
+  const fadeBack = useCallback(() => {
+    const ctx  = ctxRef.current;
+    const gain = gainRef.current;
+    if (!ctx || !gain) return;
+    const target = muted ? 0 : volume;
+    const now    = ctx.currentTime;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setValueAtTime(gain.gain.value, now);
+    gain.gain.linearRampToValueAtTime(target, now + FADE_BACK_S);
+  }, [muted, volume]);
+
+  // ── React to isSpeaking changes to duck/unduck ────────────────────────────
   useEffect(() => {
-    const audio = audioRef.current = new Audio();
-    audio.preload = 'metadata';
+    if (moderator.isSpeaking) {
+      duckDown();
+    } else {
+      fadeBack();
+    }
+  }, [moderator.isSpeaking, duckDown, fadeBack]);
+
+  // ── Volume / mute changes (when not ducked) ───────────────────────────────
+  useEffect(() => {
+    const ctx  = ctxRef.current;
+    const gain = gainRef.current;
+    if (!ctx || !gain || moderator.isSpeaking) return;
+    const target = muted ? 0 : volume;
+    const now    = ctx.currentTime;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setValueAtTime(gain.gain.value, now);
+    gain.gain.linearRampToValueAtTime(target, now + 0.1); // 100ms snap
+  }, [volume, muted, moderator.isSpeaking]);
+
+  // ── Audio element (created once) ─────────────────────────────────────────
+  useEffect(() => {
+    const audio       = new Audio();
+    audio.preload     = 'metadata';
+    audio.crossOrigin = 'anonymous'; // required for Web Audio API CORS
+    audioRef.current  = audio;
     audio.addEventListener('timeupdate',     () => setCT(audio.currentTime));
     audio.addEventListener('durationchange', () => setDur(audio.duration || 0));
     audio.addEventListener('play',           () => setPlaying(true));
     audio.addEventListener('pause',          () => setPlaying(false));
     audio.addEventListener('waiting',        () => setBuf(true));
     audio.addEventListener('canplay',        () => setBuf(false));
-    // 'ended' is handled by the loop — not here — to avoid double-advance
     return () => { audio.pause(); audio.src = ''; };
   }, []);
 
-  // ── load track src whenever idx changes ─────────────────────────────────
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !track) return;
-    audio.pause();
-    audio.src = track.liveUrl;
-    audio.load();
-    setCT(0);
-    setDur(track.duration || 0);
-  }, [idx, tracks]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── ducking: ramp on isSpeaking changes only ────────────────────────────
-  const volumeRef = useRef(volume);
-  const mutedRef  = useRef(muted);
-  useEffect(() => { volumeRef.current = volume; }, [volume]);
-  useEffect(() => { mutedRef.current  = muted;  }, [muted]);
-
-  useEffect(() => {
+  // ── Core loop (uses only refs — no stale closure issues) ─────────────────
+  const advanceLoop = useCallback(async () => {
     const audio = audioRef.current;
     if (!audio) return;
-    cancelRampRef.current?.();
-    if (moderator.isSpeaking) {
-      // Duck down over 1 s
-      cancelRampRef.current = rampVolume(audio, DUCK_LEVEL, DUCK_DOWN_MS);
-    } else {
-      // Fade back to user volume over 2 s
-      const target = mutedRef.current ? 0 : volumeRef.current;
-      cancelRampRef.current = rampVolume(audio, target, FADE_BACK_MS);
-    }
-    return () => cancelRampRef.current?.();
-  }, [moderator.isSpeaking]);
 
-  // ── volume/mute changes (only when not ducked) ───────────────────────────
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || moderator.isSpeaking) return;
-    cancelRampRef.current?.();
-    audio.volume = muted ? 0 : volume;
-  }, [volume, muted, moderator.isSpeaking]);
+    while (runningRef.current) {
+      const tracks = tracksRef.current;
+      if (!tracks.length) break;
 
-  // ── core loop: plays one track, then decides what happens next ───────────
-  const playTrack = useCallback(async (trackIdx: number): Promise<void> => {
-    const audio = audioRef.current;
-    if (!audio || !runningRef.current) return;
+      const currentIdx = idxRef.current;
+      const t = tracks[currentIdx];
+      if (!t) break;
 
-    const t = tracks[trackIdx];
-    if (!t) return;
+      // Load & play current track
+      audio.pause();
+      audio.src = t.liveUrl;
+      audio.load();
+      setCT(0);
+      setDur(t.duration || 0);
+      setIdx(currentIdx);
 
-    // Update UI index
-    setIdx(trackIdx);
-    idxRef.current = trackIdx;
-
-    // Load & play
-    audio.pause();
-    audio.src = t.liveUrl;
-    audio.load();
-    setCT(0);
-    setDur(t.duration || 0);
-
-    try {
-      await audio.play();
-    } catch {
-      // Autoplay blocked — loop stalls gracefully
-      return;
-    }
-
-    // Wait for track to finish
-    await new Promise<void>(resolve => {
-      const onEnd  = () => { cleanup(); resolve(); };
-      const onStop = () => { cleanup(); resolve(); };
-      function cleanup() {
-        audio.removeEventListener('ended', onEnd);
-        audio.removeEventListener('pause', onStop);
+      try {
+        await audio.play();
+      } catch {
+        // Autoplay blocked or src error — stop loop
+        runningRef.current = false;
+        break;
       }
-      audio.addEventListener('ended', onEnd);
-      audio.addEventListener('pause', onStop);
-    });
 
-    if (!runningRef.current) return; // user paused — stop the loop
+      // Wait for 'ended' — the loop's heartbeat
+      // 'pause' resolves immediately so we can exit cleanly on user pause
+      const endedNaturally = await new Promise<boolean>(resolve => {
+        const onEnded = () => { cleanup(); resolve(true); };
+        const onPause = () => { cleanup(); resolve(false); };
+        function cleanup() {
+          audio.removeEventListener('ended', onEnded);
+          audio.removeEventListener('pause', onPause);
+        }
+        audio.addEventListener('ended', onEnded);
+        audio.addEventListener('pause', onPause);
+      });
 
-    // Record this track as recently played
-    recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
-    silentCountRef.current++;
+      if (!runningRef.current) break; // user paused
 
-    const nextIdx = (trackIdx + 1) % tracks.length;
-    const nextTrack = tracks[nextIdx];
-    if (!nextTrack) return;
+      if (endedNaturally) {
+        // Accumulate for moderator review
+        recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
+        silentCountRef.current++;
 
-    if (silentCountRef.current >= silentBudgetRef.current) {
-      // Time for a moderation break
-      silentCountRef.current  = 0;
-      silentBudgetRef.current = randInt(1, 2); // pick new budget for next run
+        const nextIdx   = (currentIdx + 1) % tracks.length;
+        const nextTrack = tracks[nextIdx];
+        idxRef.current  = nextIdx;
 
-      const played = recentTracksRef.current;
-      recentTracksRef.current = [];
-
-      // Duck starts automatically when isSpeaking → true
-      await moderator.speakReviewAndIntro(played, nextTrack);
-
-      // After speech: 800 ms breathing room before music comes back
-      await sleep(800);
+        if (nextTrack && silentCountRef.current >= silentBudgetRef.current) {
+          silentCountRef.current  = 0;
+          silentBudgetRef.current = randInt(1, 2);
+          const played = recentTracksRef.current;
+          recentTracksRef.current = [];
+          await moderatorRef.current.speakReviewAndIntro(played, nextTrack);
+          await sleep(800);
+        } else {
+          idxRef.current = nextIdx;
+        }
+      }
+      // loop continues — next iteration picks up idxRef.current
     }
+  }, []); // stable — reads everything via refs
 
-    if (!runningRef.current) return;
-
-    // Continue loop
-    await playTrack(nextIdx);
-  }, [tracks, moderator]);
-
-  // ── start: opening greeting → first track intro → loop ──────────────────
+  // ── Start radio (called on first Play press) ──────────────────────────────
   const startRadio = useCallback(async () => {
-    if (!tracks.length || runningRef.current) return;
+    if (!tracksRef.current.length) return;
+    initAudioContext();
     runningRef.current = true;
-
-    const firstTrack = tracks[0];
+    idxRef.current = 0;
 
     if (!greetedRef.current) {
       greetedRef.current = true;
-      await moderator.speakGreeting(name);
+      const first = tracksRef.current[0];
+      await moderatorRef.current.speakGreeting(nameRef.current);
       await sleep(400);
-      await moderator.speakTrackIntro(firstTrack);
-      await sleep(600);
+      await moderatorRef.current.speakTrackIntro(first);
+      await sleep(500);
     }
 
-    recentTracksRef.current = [];
-    await playTrack(0);
-  }, [tracks, name, moderator, playTrack]);
+    await advanceLoop();
+  }, [initAudioContext, advanceLoop]);
 
-  // ── public controls ──────────────────────────────────────────────────────
+  // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    if (!greetedRef.current || !runningRef.current) {
+    if (runningRef.current) return; // already running
+    if (!greetedRef.current) {
       startRadio();
     } else {
+      initAudioContext();
       runningRef.current = true;
-      audio.play().catch(() => {});
+      audioRef.current?.play().catch(() => {});
+      // re-attach loop from current position
+      advanceLoop();
     }
-  }, [startRadio]);
+  }, [startRadio, initAudioContext, advanceLoop]);
 
   const handlePause = useCallback(() => {
     runningRef.current = false;
-    moderator.stop();
+    moderatorRef.current.stop();
     audioRef.current?.pause();
-  }, [moderator]);
+  }, []);
 
-  const handlePrev = useCallback(() => {
-    const prev = (idxRef.current - 1 + tracks.length) % tracks.length;
-    setIdx(prev);
-    if (runningRef.current) setTimeout(() => playTrack(prev), 200);
-  }, [tracks.length, playTrack]);
+  const jumpTo = useCallback((newIdx: number) => {
+    const wasRunning = runningRef.current;
+    // pause current track — this resolves the loop's 'pause' promise
+    audioRef.current?.pause();
+    idxRef.current = newIdx;
+    setIdx(newIdx);
+    if (wasRunning) {
+      runningRef.current = true;
+      setTimeout(() => advanceLoop(), 100);
+    }
+  }, [advanceLoop]);
 
-  const handleNext = useCallback(() => {
-    const next = (idxRef.current + 1) % tracks.length;
-    setIdx(next);
-    if (runningRef.current) setTimeout(() => playTrack(next), 200);
-  }, [tracks.length, playTrack]);
-
-  const handleSelect = useCallback((i: number) => {
-    setIdx(i);
-    if (runningRef.current) setTimeout(() => playTrack(i), 200);
-  }, [playTrack]);
+  const handlePrev   = useCallback(() => jumpTo((idxRef.current - 1 + tracksRef.current.length) % tracksRef.current.length), [jumpTo]);
+  const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length), [jumpTo]);
+  const handleSelect = useCallback((i: number) => jumpTo(i), [jumpTo]);
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     const audio = audioRef.current;
@@ -264,7 +267,7 @@ export function RadioPage() {
     audio.currentTime = Math.max(0, Math.min(1, r)) * duration;
   };
 
-  // ── derived UI state ─────────────────────────────────────────────────────
+  const track        = tracks[idx];
   const pct          = duration > 0 ? (currentTime / duration) * 100 : 0;
   const isModerating = moderator.isSpeaking || moderator.isGenerating;
   const statusLabel  = moderator.isGenerating ? 'WRITING' : moderator.isSpeaking ? 'ON AIR' : buffering ? 'BUFFERING' : playing ? 'LIVE' : 'PAUSED';
@@ -355,7 +358,7 @@ export function RadioPage() {
             ))}
           </div>
 
-          {/* Seek bar */}
+          {/* Seek */}
           <div className="mb-5">
             <div className="w-full h-1.5 bg-white/10 rounded-full cursor-pointer group" onClick={handleSeek}>
               <div className="h-full rounded-full progress-bar-inner relative" style={{ width: `${pct}%` }}>
