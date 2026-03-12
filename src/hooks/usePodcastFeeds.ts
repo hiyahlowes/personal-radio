@@ -83,29 +83,27 @@ export interface PodcastFeed {
 }
 
 // ── Verified working feed URLs (tested 2026-03-12) ───────────────────────────
-// All four original URLs were dead:
-//   - whatbitcoindid.com/feed        → Squarespace homepage HTML (200 OK, but no RSS)
-//   - feeds.fountain.fm/...          → "Object Not Found"
-//   - secularbuddhism.com/feed/...   → server unreachable
-//   - feeds.simplecast.com/pZrFHAMR → S3 404 NoSuchKey
-//
-// Replaced with confirmed live Libsyn / Megaphone feeds:
+// User-supplied URLs, verified live via curl before use.
+// Note: feeds.pippa.io/shows/6359a8448c5fe9001207c0ac returns a Cloudflare
+// DNS error — the canonical Acast URL for the same show ID is used instead.
 export const DEFAULT_FEEDS: PodcastFeed[] = [
   {
-    url: 'https://whatbitcoindid.libsyn.com/rss',
+    url: 'https://feeds.fountain.fm/UZSKQcrOnhqYS1JopxGg',
     title: 'What Bitcoin Did',
   },
   {
-    url: 'https://feeds.megaphone.fm/hubermanlab',
-    title: 'Huberman Lab',
+    url: 'https://feeds.fountain.fm/40huHEEF6JMPGYctMuUI',
+    title: 'This Week in Bitcoin',
   },
   {
-    url: 'https://feeds.megaphone.fm/WWO3519750118',
-    title: 'The Dan Bongino Show',
+    url: 'https://feeds.simplecast.com/mDS2jisg',
+    title: 'A Bit of Optimism',
   },
   {
-    url: 'https://feeds.megaphone.fm/TBIEA4386204774',
-    title: 'Tech Won\'t Save Us',
+    // feeds.pippa.io/shows/6359a8448c5fe9001207c0ac → Cloudflare DNS error;
+    // same show ID resolves correctly on Acast's CDN.
+    url: 'https://feeds.acast.com/public/shows/6359a8448c5fe9001207c0ac',
+    title: 'Secular Buddhism',
   },
 ];
 
