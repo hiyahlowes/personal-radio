@@ -1,6 +1,64 @@
 import { useQuery } from '@tanstack/react-query';
 
-const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
+// ── CORS proxy cascade ────────────────────────────────────────────────────────
+// Tried in order; first successful XML response wins.
+// The last entry is a direct fetch (no proxy) — works for feeds with open CORS.
+const FETCH_TIMEOUT_MS = 15_000;
+
+interface ProxyStrategy {
+  name: string;
+  buildUrl: (feedUrl: string) => string;
+}
+
+const PROXY_STRATEGIES: ProxyStrategy[] = [
+  {
+    name: 'corsproxy.io',
+    buildUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'codetabs',
+    buildUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  },
+  {
+    name: 'direct',
+    buildUrl: (url) => url,
+  },
+];
+
+/** Attempt a single fetch with a hard timeout; throws on non-OK or timeout. */
+async function attemptFetch(url: string): Promise<string> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+/**
+ * Fetch raw RSS/XML for `feedUrl`, trying each proxy strategy in sequence.
+ * Returns the raw text from the first strategy that succeeds.
+ */
+async function fetchRawFeed(feedUrl: string): Promise<string> {
+  const errors: string[] = [];
+
+  for (const strategy of PROXY_STRATEGIES) {
+    const proxyUrl = strategy.buildUrl(feedUrl);
+    try {
+      console.log(`[Podcast] trying ${strategy.name} for ${feedUrl}`);
+      const text = await attemptFetch(proxyUrl);
+      // Sanity-check: must look like XML / RSS
+      if (!text.trim().startsWith('<')) {
+        throw new Error('Response is not XML');
+      }
+      console.log(`[Podcast] ✓ ${strategy.name} succeeded for ${feedUrl}`);
+      return text;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Podcast] ✗ ${strategy.name} failed for ${feedUrl}: ${msg}`);
+      errors.push(`${strategy.name}: ${msg}`);
+    }
+  }
+
+  throw new Error(`All strategies failed for ${feedUrl} — ${errors.join(' | ')}`);
+}
 
 export interface PodcastEpisode {
   id: string;           // guid or generated
@@ -62,11 +120,8 @@ function getText(el: Element | null, tag: string): string {
 }
 
 async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
-  const url     = `${CORS_PROXY}${encodeURIComponent(feedUrl)}`;
-  const res     = await fetch(url, { signal: AbortSignal.timeout(12000) });
-  if (!res.ok) throw new Error(`Feed fetch failed: ${res.status}`);
-  const text    = await res.text();
-  const parser  = new DOMParser();
+  const text   = await fetchRawFeed(feedUrl);
+  const parser = new DOMParser();
   const doc     = parser.parseFromString(text, 'application/xml');
 
   // Get podcast title from channel
