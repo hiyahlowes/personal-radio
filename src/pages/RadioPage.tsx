@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { useWavlakeTracks, type WavlakeTrack } from '@/hooks/useWavlakeTracks';
+import { useWavlakeTracks, type WavlakeTrack, GENRES } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
+import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { Skeleton } from '@/components/ui/skeleton';
 
 // ─── RadioItem union ─────────────────────────────────────────────────────────
@@ -55,7 +56,8 @@ export function RadioPage() {
   const name      = params.get('name') || 'Listener';
   const firstName = name.split(' ')[0];
 
-  const { data: tracks = [], isLoading, isError } = useWavlakeTracks();
+  const { selectedIds, toggle, selectAll, isAllSelected } = useGenreSelection();
+  const { data: tracks = [], isLoading, isError } = useWavlakeTracks(selectedIds);
   const { data: episodes = [] } = usePodcastEpisodes(getStoredFeeds());
   const moderator = useRadioModerator();
 
@@ -707,6 +709,40 @@ export function RadioPage() {
             ))}
           </div>
         )}
+
+        {/* Genre selector */}
+        <div className="fade-in-up-delay-3 space-y-3">
+          <div className="flex items-center justify-between px-1">
+            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Genres</h3>
+            {!isAllSelected && (
+              <button
+                onClick={selectAll}
+                className="text-xs text-purple-400 hover:text-purple-300 transition-colors"
+              >
+                All
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {GENRES.map(genre => {
+              const active = selectedIds.includes(genre.id);
+              return (
+                <button
+                  key={genre.id}
+                  onClick={() => toggle(genre.id)}
+                  aria-pressed={active}
+                  className={`px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide border transition-all duration-150 select-none
+                    ${active
+                      ? 'bg-purple-600/30 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
+                      : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
+                    }`}
+                >
+                  {genre.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         {/* Playlist */}
         <div className="fade-in-up-delay-3 space-y-3">

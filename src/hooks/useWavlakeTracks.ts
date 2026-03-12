@@ -34,8 +34,31 @@ interface WavlakeSearchResponse {
 
 const WAVLAKE_BASE = 'https://catalog.wavlake.com/v1';
 
-// Search terms to build a varied, listenable radio playlist
-const SEARCH_QUERIES = ['ambient', 'lofi', 'chill', 'acoustic', 'electronic'];
+// ── Genre catalogue ───────────────────────────────────────────────────────────
+// Wavlake has no /genres endpoint — genre filtering works by using the genre
+// name as the `term` search query. Each entry maps a display label to the
+// search term(s) that retrieve tracks of that style. Multiple terms per genre
+// are fanned out and merged so we get a fuller result set.
+export interface Genre {
+  id: string;        // stable key for localStorage / queryKey
+  label: string;     // display name shown in the UI
+  terms: string[];   // search terms sent to the Wavlake API
+}
+
+export const GENRES: Genre[] = [
+  { id: 'ambient',     label: 'Ambient',     terms: ['ambient'] },
+  { id: 'electronic',  label: 'Electronic',  terms: ['electronic', 'synth'] },
+  { id: 'lofi',        label: 'Lo-Fi',       terms: ['lofi', 'lo-fi', 'chill'] },
+  { id: 'rock',        label: 'Rock',        terms: ['rock'] },
+  { id: 'folk',        label: 'Folk',        terms: ['folk', 'acoustic'] },
+  { id: 'jazz',        label: 'Jazz',        terms: ['jazz'] },
+  { id: 'classical',   label: 'Classical',   terms: ['classical', 'piano'] },
+  { id: 'hiphop',      label: 'Hip-Hop',     terms: ['hip hop', 'rap', 'beats'] },
+];
+
+export const ALL_GENRE_IDS = GENRES.map(g => g.id);
+
+// ── Fetching ──────────────────────────────────────────────────────────────────
 
 async function fetchTracksForQuery(query: string): Promise<WavlakeTrack[]> {
   const url = `${WAVLAKE_BASE}/search?term=${encodeURIComponent(query)}&limit=20`;
@@ -84,14 +107,25 @@ function dedupeAndShuffle(tracks: WavlakeTrack[]): WavlakeTrack[] {
   return unique;
 }
 
-export function useWavlakeTracks() {
+/**
+ * Fetch tracks from Wavlake for the given genre IDs.
+ *
+ * @param selectedGenreIds  Array of Genre.id strings. Defaults to all genres.
+ */
+export function useWavlakeTracks(selectedGenreIds: string[] = ALL_GENRE_IDS) {
+  // Resolve selected genres → deduplicated list of search terms
+  const activeGenres = GENRES.filter(g => selectedGenreIds.includes(g.id));
+  // Fall back to all genres if nothing is selected (shouldn't happen via UI,
+  // but guards against an empty array producing zero tracks)
+  const genresToFetch = activeGenres.length > 0 ? activeGenres : GENRES;
+  const terms = [...new Set(genresToFetch.flatMap(g => g.terms))];
+
   return useQuery({
-    queryKey: ['wavlake-tracks'],
+    // Include the sorted genre IDs in the key so switching genres refetches
+    queryKey: ['wavlake-tracks', [...selectedGenreIds].sort().join(',')],
     queryFn: async (): Promise<WavlakeTrack[]> => {
-      // Fan out to multiple genre queries in parallel
-      const results = await Promise.allSettled(
-        SEARCH_QUERIES.map((q) => fetchTracksForQuery(q))
-      );
+      // Fan out all terms in parallel
+      const results = await Promise.allSettled(terms.map(fetchTracksForQuery));
 
       const allTracks: WavlakeTrack[] = [];
       for (const result of results) {
@@ -101,7 +135,7 @@ export function useWavlakeTracks() {
       }
 
       if (allTracks.length === 0) {
-        throw new Error('No tracks available from Wavlake');
+        throw new Error('No tracks available from Wavlake for selected genres');
       }
 
       return dedupeAndShuffle(allTracks).slice(0, 30); // cap at 30 tracks
