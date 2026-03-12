@@ -11,7 +11,38 @@
  * it's just the *elements* and *persistent refs* that need to outlive the page.
  */
 
-import React, { createContext, useContext, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+
+// ── RadioItem type (duplicated here to avoid a circular import) ──────────────
+// This is the minimal shape needed by RadioContext. RadioPage casts it properly.
+export interface RadioItemMusic {
+  kind: 'music';
+  track: {
+    id: string;
+    name: string;
+    artist: string;
+    albumTitle: string;
+    artworkUrl: string;
+    liveUrl: string;
+    duration: number;
+    artistId: string;
+    albumId: string;
+    avatarUrl: string;
+  };
+}
+export interface RadioItemPodcast {
+  kind: 'podcast';
+  episode: {
+    id: string;
+    feedTitle: string;
+    title: string;
+    audioUrl: string;
+    duration: number;
+    description: string;
+    pubDate: string;
+  };
+}
+export type RadioItem = RadioItemMusic | RadioItemPodcast;
 
 export interface RadioContextValue {
   /** Main music <audio> element. NO crossOrigin — Wavlake CDN has no CORS. */
@@ -26,6 +57,13 @@ export interface RadioContextValue {
   idxRef: React.RefObject<number>;
   /** Generation counter — incremented each loop iteration to cancel stale listeners. */
   loopGenRef: React.RefObject<number>;
+  /**
+   * The currently-playing item (music or podcast), stored in context so it
+   * survives navigation to Settings and back. RadioPage keeps this in sync.
+   */
+  nowPlayingRef: React.RefObject<RadioItem | null>;
+  nowPlaying: RadioItem | null;
+  setNowPlaying: (item: RadioItem | null) => void;
 }
 
 const RadioContext = createContext<RadioContextValue | null>(null);
@@ -40,6 +78,16 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
   const greetedRef  = useRef(false);
   const idxRef      = useRef(0);
   const loopGenRef  = useRef(0);
+
+  // nowPlaying: stored in context so it survives route changes.
+  // Both the ref (read by the loop) and the state (triggers React re-renders) live here.
+  const nowPlayingRef = useRef<RadioItem | null>(null);
+  const [nowPlaying, setNowPlayingState] = useState<RadioItem | null>(null);
+
+  const setNowPlaying = useCallback((item: RadioItem | null) => {
+    nowPlayingRef.current = item;
+    setNowPlayingState(item);
+  }, []);
 
   // Create the audio elements exactly once on mount.
   useEffect(() => {
@@ -68,6 +116,9 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
     greetedRef,
     idxRef,
     loopGenRef,
+    nowPlayingRef,
+    nowPlaying,
+    setNowPlaying,
   };
 
   return (

@@ -1,11 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
   DragDropContext,
   Droppable,
   Draggable,
   type DropResult,
+  type DraggableStateSnapshot,
+  type DraggableProvided,
 } from '@hello-pangea/dnd';
+
 import { useWavlakeTracks, type WavlakeTrack, GENRES } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
@@ -57,6 +61,37 @@ function fmt(s: number) {
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 }
 
+// ─── Portal-aware drag clone helper ──────────────────────────────────────────
+// backdrop-filter on .glass-card creates a new stacking context that traps
+// position:fixed elements — which is exactly how @hello-pangea/dnd positions
+// the drag clone. We escape by portalling the dragging element into document.body.
+//
+// Usage: wrap the content div that gets provided.draggableProps and provided.innerRef
+// with this component. Pass dragHandleProps separately to whichever child element
+// should be the handle (usually a grip icon).
+function PortalAware({
+  provided,
+  snapshot,
+  className,
+  children,
+}: {
+  provided: DraggableProvided;
+  snapshot: DraggableStateSnapshot;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const el = (
+    <div
+      ref={provided.innerRef}
+      {...provided.draggableProps}
+      className={className}
+    >
+      {children}
+    </div>
+  );
+  return snapshot.isDragging ? createPortal(el, document.body) : el;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 export function RadioPage() {
   const [params]  = useSearchParams();
@@ -83,10 +118,6 @@ export function RadioPage() {
   const [orderedTracks, setOrderedTracks] = useState<WavlakeTrack[]>([]);
   const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>([]);
 
-  // ── Stable refs ───────────────────────────────────────────────────────────
-  const [nowPlaying, setNowPlaying] = useState<RadioItem | null>(null);
-  const nowPlayingRef = useRef<RadioItem | null>(null);
-
   const segmenter = usePodcastSegmenter();
   const radioCtx  = useRadioContext();
 
@@ -98,6 +129,11 @@ export function RadioPage() {
   const greetedRef  = radioCtx.greetedRef;
   const idxRef      = radioCtx.idxRef;
   const loopGenRef  = radioCtx.loopGenRef;
+
+  // nowPlaying lives in RadioContext so it survives navigation to Settings and back.
+  const nowPlaying    = radioCtx.nowPlaying;
+  const setNowPlaying = radioCtx.setNowPlaying;
+  const nowPlayingRef = radioCtx.nowPlayingRef;
 
   const cancelRampRef    = useRef<(() => void) | null>(null);
   const tracksRef        = useRef<WavlakeTrack[]>([]);
@@ -112,14 +148,15 @@ export function RadioPage() {
   const mutedRef         = useRef(false);
 
   // Sync refs to latest state/props
-  useEffect(() => { tracksRef.current    = tracks;    }, [tracks]);
-  useEffect(() => { episodesRef.current  = episodes;  }, [episodes]);
   useEffect(() => { moderatorRef.current = moderator; }, [moderator]);
   useEffect(() => { nameRef.current      = name;      }, [name]);
   useEffect(() => { volumeRef.current    = volume;    }, [volume]);
   useEffect(() => { mutedRef.current     = muted;     }, [muted]);
 
-  // Seed ordered arrays when fresh data arrives from the query
+  // Seed ordered arrays when fresh data arrives from the query.
+  // Only seed once (when going from empty → populated) so user reorders survive
+  // a re-render. If the genre selection changes we get a brand-new tracks array
+  // from React Query and we do want to reset.
   useEffect(() => {
     if (tracks.length > 0) setOrderedTracks(tracks);
   }, [tracks]);
@@ -127,9 +164,16 @@ export function RadioPage() {
     if (episodes.length > 0) setOrderedEpisodes(episodes);
   }, [episodes]);
 
-  // Keep refs in sync with ordered arrays (so the loop reads the user's order)
+  // Keep refs in sync with ordered arrays (so the loop reads the user's order).
+  // These are the authoritative refs used by advanceLoop.
   useEffect(() => { tracksRef.current   = orderedTracks;   }, [orderedTracks]);
   useEffect(() => { episodesRef.current = orderedEpisodes; }, [orderedEpisodes]);
+
+  // On mount: sync local idx state from the persistent idxRef so the playlist
+  // highlight is correct when returning from Settings while audio plays.
+  useEffect(() => {
+    setIdx(idxRef.current);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Wire UI state listeners to the persistent audio elements ─────────────
   // The <audio> elements live in RadioContext (above the router) so they
@@ -617,7 +661,7 @@ export function RadioPage() {
   const statusColor  = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
 
   return (
-    <div className="min-h-screen gradient-bg text-white relative overflow-hidden">
+    <div className="min-h-screen gradient-bg text-white relative overflow-x-hidden">
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-0 left-1/3 w-96 h-96 bg-purple-900/20 rounded-full blur-3xl" />
         <div className="absolute bottom-0 right-1/3 w-80 h-80 bg-violet-900/20 rounded-full blur-3xl" />
@@ -837,43 +881,43 @@ export function RadioPage() {
                     {...provided.droppableProps}
                     className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
                   >
-                    {orderedEpisodes.slice(0, 5).map((ep, i) => (
-                      <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
-                        {(drag, dragSnapshot) => (
-                          <div
-                            ref={drag.innerRef}
-                            {...drag.draggableProps}
-                            className={`glass-card rounded-2xl p-4 flex items-start gap-4 transition-all
-                              ${dragSnapshot.isDragging ? 'shadow-2xl shadow-amber-900/30 scale-[1.02] ring-1 ring-amber-500/30' : ''}
-                            `}
-                          >
-                            {/* Drag handle */}
-                            <div
-                              {...drag.dragHandleProps}
-                              className="flex-shrink-0 flex items-center justify-center w-5 self-center cursor-grab active:cursor-grabbing text-white/20 hover:text-white/50 transition-colors"
-                              aria-label="Drag to reorder"
-                            >
-                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
-                              </svg>
-                            </div>
-                            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-0.5">
-                                <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
-                                {ep.duration > 0 && <>
-                                  <span className="text-xs text-white/25">·</span>
-                                  <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
-                                </>}
-                                {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
-                              </div>
-                              <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
-                              <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
-                            </div>
-                          </div>
-                        )}
-                      </Draggable>
-                    ))}
+                     {orderedEpisodes.slice(0, 5).map((ep, i) => (
+                       <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
+                         {(drag, dragSnapshot) => (
+                           <PortalAware
+                             provided={drag}
+                             snapshot={dragSnapshot}
+                             className={`glass-card rounded-2xl p-4 flex items-start gap-4 transition-all
+                               ${dragSnapshot.isDragging ? 'shadow-2xl shadow-amber-900/30 ring-1 ring-amber-500/30 opacity-95' : ''}
+                             `}
+                           >
+                             {/* Drag handle */}
+                             <div
+                               {...drag.dragHandleProps}
+                               className="flex-shrink-0 flex items-center justify-center w-5 self-center cursor-grab active:cursor-grabbing text-white/20 hover:text-white/50 transition-colors"
+                               aria-label="Drag to reorder"
+                             >
+                               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                                 <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
+                               </svg>
+                             </div>
+                             <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
+                             <div className="flex-1 min-w-0">
+                               <div className="flex items-center gap-2 mb-0.5">
+                                 <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
+                                 {ep.duration > 0 && <>
+                                   <span className="text-xs text-white/25">·</span>
+                                   <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
+                                 </>}
+                                 {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
+                               </div>
+                               <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
+                               <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
+                             </div>
+                           </PortalAware>
+                         )}
+                       </Draggable>
+                     ))}
                     {provided.placeholder}
                   </div>
                 )}
@@ -887,7 +931,7 @@ export function RadioPage() {
               <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Playlist</h3>
               <span className="text-xs text-purple-400">{isLoading ? '…' : `${orderedTracks.length || tracks.length} tracks`}</span>
             </div>
-            <div className="glass-card rounded-2xl overflow-hidden">
+            <div className="glass-card rounded-2xl">
               {isLoading ? (
                 <div className="divide-y divide-white/5">
                   {Array.from({ length: 6 }).map((_, i) => (
@@ -908,56 +952,56 @@ export function RadioPage() {
                       {...provided.droppableProps}
                       className={`divide-y divide-white/5 transition-colors ${snapshot.isDraggingOver ? 'bg-purple-900/10' : ''}`}
                     >
-                      {orderedTracks.map((t, i) => (
-                        <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
-                          {(drag, dragSnapshot) => (
-                            <div
-                              ref={drag.innerRef}
-                              {...drag.draggableProps}
-                              className={`flex items-center gap-3 px-4 py-3.5 transition-all
-                                ${i === idx ? 'bg-purple-900/20' : 'hover:bg-white/5'}
-                                ${dragSnapshot.isDragging ? 'shadow-xl shadow-purple-900/30 scale-[1.01] bg-white/5 ring-1 ring-purple-500/30 rounded-xl' : ''}
-                              `}
-                            >
-                              {/* Drag handle */}
-                              <div
-                                {...drag.dragHandleProps}
-                                className="flex-shrink-0 w-5 flex items-center justify-center cursor-grab active:cursor-grabbing text-white/15 hover:text-white/40 transition-colors"
-                                aria-label="Drag to reorder"
-                              >
-                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
-                                  <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
-                                </svg>
-                              </div>
+                       {orderedTracks.map((t, i) => (
+                         <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
+                           {(drag, dragSnapshot) => (
+                             <PortalAware
+                               provided={drag}
+                               snapshot={dragSnapshot}
+                               className={`flex items-center gap-3 px-4 py-3.5 transition-all
+                                 ${i === idx ? 'bg-purple-900/20' : 'hover:bg-white/5'}
+                                 ${dragSnapshot.isDragging ? 'shadow-xl shadow-purple-900/40 bg-[rgba(30,20,60,0.95)] ring-1 ring-purple-500/40 rounded-xl opacity-95' : ''}
+                               `}
+                             >
+                               {/* Drag handle */}
+                               <div
+                                 {...drag.dragHandleProps}
+                                 className="flex-shrink-0 w-5 flex items-center justify-center cursor-grab active:cursor-grabbing text-white/15 hover:text-white/40 transition-colors"
+                                 aria-label="Drag to reorder"
+                               >
+                                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                                   <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
+                                 </svg>
+                               </div>
 
-                              {/* Track number / playing indicator */}
-                              <button
-                                onClick={() => handleSelect(i)}
-                                className="w-6 flex items-center justify-center flex-shrink-0"
-                                aria-label={i === idx ? 'Currently playing' : `Play ${t.name}`}
-                              >
-                                {i === idx
-                                  ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                                  : <span className="text-white/30 text-xs hover:text-white/60">{i + 1}</span>
-                                }
-                              </button>
+                               {/* Track number / playing indicator */}
+                               <button
+                                 onClick={() => handleSelect(i)}
+                                 className="w-6 flex items-center justify-center flex-shrink-0"
+                                 aria-label={i === idx ? 'Currently playing' : `Play ${t.name}`}
+                               >
+                                 {i === idx
+                                   ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
+                                   : <span className="text-white/30 text-xs hover:text-white/60">{i + 1}</span>
+                                 }
+                               </button>
 
-                              {/* Artwork */}
-                              <button onClick={() => handleSelect(i)} className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5 flex-shrink-0">
-                                <img src={t.artworkUrl} alt={t.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
-                              </button>
+                               {/* Artwork */}
+                               <button onClick={() => handleSelect(i)} className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
+                                 <img src={t.artworkUrl} alt={t.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
+                               </button>
 
-                              {/* Info */}
-                              <button onClick={() => handleSelect(i)} className="flex-1 min-w-0 text-left">
-                                <p className={`text-sm font-medium truncate ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>{t.name}</p>
-                                <p className="text-xs text-white/40 truncate">{t.artist}</p>
-                              </button>
+                               {/* Info */}
+                               <button onClick={() => handleSelect(i)} className="flex-1 min-w-0 text-left">
+                                 <p className={`text-sm font-medium truncate ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>{t.name}</p>
+                                 <p className="text-xs text-white/40 truncate">{t.artist}</p>
+                               </button>
 
-                              <span className="text-xs text-white/30 flex-shrink-0 pr-1">{fmt(t.duration)}</span>
-                            </div>
-                          )}
-                        </Draggable>
-                      ))}
+                               <span className="text-xs text-white/30 flex-shrink-0 pr-1">{fmt(t.duration)}</span>
+                             </PortalAware>
+                           )}
+                         </Draggable>
+                       ))}
                       {provided.placeholder}
                     </div>
                   )}
