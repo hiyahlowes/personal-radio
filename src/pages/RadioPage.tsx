@@ -350,6 +350,7 @@ export function RadioPage() {
                 pod,
                 episode.title,
                 episode.feedTitle,
+                episode.chapters,
                 {
                   isRunning: () => runningRef.current,
 

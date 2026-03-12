@@ -67,6 +67,11 @@ async function fetchRawFeed(feedUrl: string): Promise<string> {
   throw new Error(`All strategies failed for ${feedUrl} — ${errors.join(' | ')}`);
 }
 
+export interface PodcastChapter {
+  startTime: number; // seconds
+  title: string;
+}
+
 export interface PodcastEpisode {
   id: string;           // guid or generated
   feedTitle: string;    // podcast show name
@@ -75,6 +80,7 @@ export interface PodcastEpisode {
   duration: number;     // seconds (0 if not parseable)
   description: string;
   pubDate: string;
+  chapters?: PodcastChapter[]; // Podcast 2.0 chapter markers, if available
 }
 
 export interface PodcastFeed {
@@ -174,6 +180,35 @@ function getItunesText(item: Element, localName: string): string {
   return '';
 }
 
+// ── Podcast 2.0 chapters ─────────────────────────────────────────────────────
+
+const PODCAST_NS = 'https://podcastindex.org/namespace/1.0';
+
+function getPodcastChaptersUrl(item: Element): string | null {
+  const byNS = item.getElementsByTagNameNS(PODCAST_NS, 'chapters');
+  if (byNS.length > 0) return byNS[0].getAttribute('url');
+
+  const byPrefixed = item.getElementsByTagName('podcast:chapters');
+  if (byPrefixed.length > 0) return byPrefixed[0].getAttribute('url');
+
+  return null;
+}
+
+async function fetchChapters(chaptersUrl: string): Promise<PodcastChapter[]> {
+  try {
+    const res = await fetch(chaptersUrl, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data?.chapters)) return [];
+    return (data.chapters as Record<string, unknown>[])
+      .filter(c => typeof c?.startTime === 'number')
+      .map(c => ({ startTime: c.startTime as number, title: String(c.title ?? '') }));
+  } catch (err) {
+    console.warn('[Podcast] Failed to fetch chapters:', err);
+    return [];
+  }
+}
+
 async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
   const text   = await fetchRawFeed(feedUrl);
   const parser = new DOMParser();
@@ -224,7 +259,18 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
 
     const pubDate = getText(item, 'pubDate') || getText(item, 'published') || '';
 
-    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, pubDate });
+    // Podcast 2.0 chapters
+    let chapters: PodcastChapter[] | undefined;
+    const chaptersUrl = getPodcastChaptersUrl(item);
+    if (chaptersUrl) {
+      const fetched = await fetchChapters(chaptersUrl);
+      if (fetched.length > 0) {
+        chapters = fetched;
+        console.log(`[Podcast] "${title}" — ${chapters.length} chapters loaded`);
+      }
+    }
+
+    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, pubDate, chapters });
   }
 
   console.log(`[Podcast] "${feedTitle}" — ${episodes.length} episodes parsed`);

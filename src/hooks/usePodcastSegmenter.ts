@@ -25,6 +25,7 @@
  */
 
 import { useRef, useCallback } from 'react';
+import type { PodcastChapter } from './usePodcastFeeds';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -198,6 +199,7 @@ export function usePodcastSegmenter() {
     audio: HTMLAudioElement,
     episodeTitle: string,
     episodeFeedTitle: string,
+    chapters: PodcastChapter[] | undefined,
     callbacks: SegmenterCallbacks,
   ): Promise<void> => {
     teardown(); // clean slate
@@ -263,19 +265,28 @@ export function usePodcastSegmenter() {
     while (callbacks.isRunning()) {
 
       const segmentStartTime = audio.currentTime; // seconds into the episode
-      const segmentStart     = Date.now();         // wall-clock for timing
 
-      let silenceStart: number | null = null; // wall-clock when silence began
-      let splitTriggered  = false;
+      // If chapters are available, find the first chapter boundary at least
+      // SPLIT_WINDOW_MIN into this segment; otherwise use silence detection.
+      let targetChapterTime: number | null = null;
+      if (chapters && chapters.length > 0) {
+        const next = chapters
+          .filter(c => c.startTime >= segmentStartTime + SPLIT_WINDOW_MIN)
+          .sort((a, b) => a.startTime - b.startTime)[0];
+        if (next) {
+          targetChapterTime = next.startTime;
+          console.log(`[Segmenter] Chapter split target: "${next.title}" @ ${next.startTime}s`);
+        }
+      }
+
+      let splitTriggered = false;
 
       // Promise that resolves true on natural end, false on split or pause
       const result = await new Promise<'ended' | 'split' | 'paused'>((resolve) => {
         let pollId: ReturnType<typeof setInterval>;
-        let forceId: ReturnType<typeof setTimeout>;
 
         function cleanup() {
           clearInterval(pollId);
-          clearTimeout(forceId);
           audio.removeEventListener('ended', onEnded);
           audio.removeEventListener('pause', onPause);
         }
@@ -296,40 +307,42 @@ export function usePodcastSegmenter() {
         audio.addEventListener('ended', onEnded);
         audio.addEventListener('pause', onPause);
 
-        // Force-split at SPLIT_WINDOW_MAX regardless of silence
-        const remainingToMax = SPLIT_WINDOW_MAX * 1000 - (Date.now() - segmentStart);
-        if (remainingToMax > 0) {
-          forceId = setTimeout(() => {
-            console.log('[Segmenter] Force-split at 15 min mark');
-            triggerSplit();
-          }, remainingToMax);
-        } else {
-          // Already past 15 min — split immediately
-          triggerSplit();
-          return;
-        }
+        let silenceStart: number | null = null;
 
-        // Poll analyser for silence
         pollId = setInterval(() => {
           if (!callbacks.isRunning()) { cleanup(); resolve('paused'); return; }
 
-          const elapsed = Date.now() - segmentStart;
+          const elapsedAudio = audio.currentTime - segmentStartTime;
 
-          // Only look for silence after SPLIT_WINDOW_MIN
-          if (elapsed < SPLIT_WINDOW_MIN * 1000) return;
+          // Force-split at SPLIT_WINDOW_MAX regardless of method
+          if (elapsedAudio >= SPLIT_WINDOW_MAX) {
+            console.log('[Segmenter] Force-split at 15 min mark');
+            triggerSplit();
+            return;
+          }
 
-          const db = getRmsDb(analyser);
-          const isSilent = db < SILENCE_THRESHOLD_DB;
-
-          if (isSilent) {
-            if (silenceStart === null) silenceStart = Date.now();
-            const silenceDuration = (Date.now() - silenceStart) / 1000;
-            if (silenceDuration >= SILENCE_MIN_DURATION) {
-              console.log(`[Segmenter] Silence detected (${silenceDuration.toFixed(1)}s @ ${db.toFixed(1)} dB) — triggering split`);
+          if (targetChapterTime !== null) {
+            // Chapter-based split: trigger when playhead reaches chapter boundary
+            if (audio.currentTime >= targetChapterTime) {
+              console.log(`[Segmenter] Chapter boundary reached at ${audio.currentTime.toFixed(1)}s`);
               triggerSplit();
             }
           } else {
-            silenceStart = null; // reset on any sound
+            // Silence-based split: only after SPLIT_WINDOW_MIN
+            if (elapsedAudio >= SPLIT_WINDOW_MIN) {
+              const db = getRmsDb(analyser);
+              const isSilent = db < SILENCE_THRESHOLD_DB;
+              if (isSilent) {
+                if (silenceStart === null) silenceStart = Date.now();
+                const silenceDuration = (Date.now() - silenceStart) / 1000;
+                if (silenceDuration >= SILENCE_MIN_DURATION) {
+                  console.log(`[Segmenter] Silence detected (${silenceDuration.toFixed(1)}s @ ${db.toFixed(1)} dB) — triggering split`);
+                  triggerSplit();
+                }
+              } else {
+                silenceStart = null;
+              }
+            }
           }
         }, POLL_INTERVAL);
       });
