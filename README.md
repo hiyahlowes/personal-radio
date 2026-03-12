@@ -1,4 +1,5 @@
-# PR – Personal Radio
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)]
+[![Bitcoin Lightning](https://img.shields.io/badge/payments-Lightning-orange)]# PR – Personal Radio
 
 **Your personal AI radio station, powered by Bitcoin Lightning & Nostr**
 
