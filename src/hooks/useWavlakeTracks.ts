@@ -50,7 +50,8 @@ async function fetchTracksForQuery(query: string): Promise<WavlakeTrack[]> {
         typeof item.liveUrl === 'string' &&
         item.liveUrl.length > 0 &&
         typeof item.duration === 'number' &&
-        item.duration > 30 && // skip very short clips
+        item.duration > 30 &&   // skip very short clips
+        item.duration <= 300 && // skip tracks longer than 5 minutes
         typeof item.artist === 'string'
     )
     .map((item) => ({
