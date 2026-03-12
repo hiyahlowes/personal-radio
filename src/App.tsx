@@ -12,6 +12,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { NostrLoginProvider } from '@nostrify/react/login';
 import { AppProvider } from '@/components/AppProvider';
 import { NWCProvider } from '@/contexts/NWCContext';
+import { RadioProvider } from '@/contexts/RadioContext';
 import { AppConfig } from '@/contexts/AppContext';
 import AppRouter from './AppRouter';
 
@@ -54,9 +55,11 @@ export function App() {
               <NWCProvider>
                 <TooltipProvider>
                   <Toaster />
-                  <Suspense>
-                    <AppRouter />
-                  </Suspense>
+                  <RadioProvider>
+                    <Suspense>
+                      <AppRouter />
+                    </Suspense>
+                  </RadioProvider>
                 </TooltipProvider>
               </NWCProvider>
             </NostrProvider>

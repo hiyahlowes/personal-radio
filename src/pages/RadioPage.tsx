@@ -5,6 +5,7 @@ import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
+import { useRadioContext } from '@/contexts/RadioContext';
 import { Skeleton } from '@/components/ui/skeleton';
 
 // ─── RadioItem union ─────────────────────────────────────────────────────────
@@ -74,17 +75,17 @@ export function RadioPage() {
   const [nowPlaying, setNowPlaying] = useState<RadioItem | null>(null);
   const nowPlayingRef = useRef<RadioItem | null>(null);
 
-  const audioRef         = useRef<HTMLAudioElement | null>(null);
-  // Separate audio element for podcasts — needs crossOrigin='anonymous' for
-  // Web Audio API (AnalyserNode / MediaRecorder). Music CDN (Wavlake) has no
-  // CORS headers so the music element must stay untouched.
-  const podAudioRef      = useRef<HTMLAudioElement | null>(null);
+  // Audio elements and core loop refs come from RadioContext so they survive
+  // route changes (e.g. navigating to Settings and back).
+  const audioRef    = radioCtx.audioRef;
+  const podAudioRef = radioCtx.podAudioRef;
+  const runningRef  = radioCtx.runningRef;
+  const greetedRef  = radioCtx.greetedRef;
+  const idxRef      = radioCtx.idxRef;
+  const loopGenRef  = radioCtx.loopGenRef;
+
   const cancelRampRef    = useRef<(() => void) | null>(null);
-  const loopGenRef       = useRef(0);  // incremented each iteration to cancel stale listeners
   const tracksRef        = useRef<WavlakeTrack[]>([]);
-  const runningRef       = useRef(false);
-  const greetedRef       = useRef(false);
-  const idxRef           = useRef(0);
   const silentCountRef   = useRef(0);
   const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
@@ -95,7 +96,8 @@ export function RadioPage() {
   const volumeRef        = useRef(0.9);
   const mutedRef         = useRef(false);
 
-  const segmenter = usePodcastSegmenter();
+  const segmenter   = usePodcastSegmenter();
+  const radioCtx    = useRadioContext();
 
   // Sync refs to latest state/props
   useEffect(() => { tracksRef.current    = tracks;    }, [tracks]);
@@ -105,41 +107,71 @@ export function RadioPage() {
   useEffect(() => { volumeRef.current    = volume;    }, [volume]);
   useEffect(() => { mutedRef.current     = muted;     }, [muted]);
 
-  // ── Audio elements — created once ─────────────────────────────────────────
+  // ── Wire UI state listeners to the persistent audio elements ─────────────
+  // The <audio> elements live in RadioContext (above the router) so they
+  // survive navigations. We attach/detach event listeners on each mount so
+  // this page's setState callbacks stay fresh. The elements themselves are
+  // never paused or destroyed here.
   useEffect(() => {
-    // Music audio: NO crossOrigin — Wavlake CDN has no CORS headers.
-    const audio      = new Audio();
-    audio.preload    = 'metadata';
-    audioRef.current = audio;
+    const audio = audioRef.current;
+    const pod   = podAudioRef.current;
+    if (!audio || !pod) return;
 
-    audio.addEventListener('timeupdate',     () => setCT(audio.currentTime));
-    audio.addEventListener('durationchange', () => setDur(audio.duration || 0));
-    audio.addEventListener('play',           () => { console.log('[Music] play'); setPlaying(true); });
-    audio.addEventListener('pause',          () => { console.log('[Music] pause'); setPlaying(false); });
-    audio.addEventListener('ended',          () => console.log('[Music] ended'));
-    audio.addEventListener('waiting',        () => setBuf(true));
-    audio.addEventListener('canplay',        () => setBuf(false));
-    audio.addEventListener('error',          () => { if (audio.src) console.error('[Music] error', audio.error?.message); });
+    const onMusicTime  = () => setCT(audio.currentTime);
+    const onMusicDur   = () => setDur(audio.duration || 0);
+    const onMusicPlay  = () => { console.log('[Music] play');  setPlaying(true);  setBuf(false); };
+    const onMusicPause = () => { console.log('[Music] pause'); setPlaying(false); };
+    const onMusicWait  = () => setBuf(true);
+    const onMusicCan   = () => setBuf(false);
+    const onMusicErr   = () => { if (audio.src) console.error('[Music] error', audio.error?.message); };
 
-    // Podcast audio: crossOrigin='anonymous' so Web Audio API can connect to it.
-    // Podcast CDNs (Libsyn, Fountain, Simplecast, Acast) all send CORS headers.
-    // Must set crossOrigin BEFORE src to ensure the CORS request is made.
-    const pod          = new Audio();
-    pod.preload        = 'metadata';
-    pod.crossOrigin    = 'anonymous';
-    podAudioRef.current = pod;
+    audio.addEventListener('timeupdate',     onMusicTime);
+    audio.addEventListener('durationchange', onMusicDur);
+    audio.addEventListener('play',           onMusicPlay);
+    audio.addEventListener('pause',          onMusicPause);
+    audio.addEventListener('waiting',        onMusicWait);
+    audio.addEventListener('canplay',        onMusicCan);
+    audio.addEventListener('error',          onMusicErr);
 
-    pod.addEventListener('timeupdate',     () => { if (nowPlayingRef.current?.kind === 'podcast') setCT(pod.currentTime); });
-    pod.addEventListener('durationchange', () => { if (nowPlayingRef.current?.kind === 'podcast') setDur(pod.duration || 0); });
-    pod.addEventListener('play',           () => { if (nowPlayingRef.current?.kind === 'podcast') { setPlaying(true);  setBuf(false); } });
-    pod.addEventListener('pause',          () => { if (nowPlayingRef.current?.kind === 'podcast')   setPlaying(false); });
-    pod.addEventListener('waiting',        () => { if (nowPlayingRef.current?.kind === 'podcast')   setBuf(true);  });
-    pod.addEventListener('canplay',        () => { if (nowPlayingRef.current?.kind === 'podcast')   setBuf(false); });
-    pod.addEventListener('error',          () => { if (pod.src) console.error('[Podcast] audio error', pod.error?.message); });
+    const onPodTime  = () => { if (nowPlayingRef.current?.kind === 'podcast') setCT(pod.currentTime); };
+    const onPodDur   = () => { if (nowPlayingRef.current?.kind === 'podcast') setDur(pod.duration || 0); };
+    const onPodPlay  = () => { if (nowPlayingRef.current?.kind === 'podcast') { setPlaying(true); setBuf(false); } };
+    const onPodPause = () => { if (nowPlayingRef.current?.kind === 'podcast') setPlaying(false); };
+    const onPodWait  = () => { if (nowPlayingRef.current?.kind === 'podcast') setBuf(true); };
+    const onPodCan   = () => { if (nowPlayingRef.current?.kind === 'podcast') setBuf(false); };
+    const onPodErr   = () => { if (pod.src) console.error('[Podcast] audio error', pod.error?.message); };
+
+    pod.addEventListener('timeupdate',     onPodTime);
+    pod.addEventListener('durationchange', onPodDur);
+    pod.addEventListener('play',           onPodPlay);
+    pod.addEventListener('pause',          onPodPause);
+    pod.addEventListener('waiting',        onPodWait);
+    pod.addEventListener('canplay',        onPodCan);
+    pod.addEventListener('error',          onPodErr);
+
+    // Sync UI state with whatever the elements are currently doing (handles
+    // returning to RadioPage while audio was already playing).
+    if (!audio.paused) { setPlaying(true); }
+    if (audio.currentTime) setCT(audio.currentTime);
+    if (audio.duration)    setDur(audio.duration);
 
     return () => {
-      audio.pause(); audio.src = '';
-      pod.pause();   pod.src   = '';
+      // Detach listeners only — do NOT pause or clear src.
+      audio.removeEventListener('timeupdate',     onMusicTime);
+      audio.removeEventListener('durationchange', onMusicDur);
+      audio.removeEventListener('play',           onMusicPlay);
+      audio.removeEventListener('pause',          onMusicPause);
+      audio.removeEventListener('waiting',        onMusicWait);
+      audio.removeEventListener('canplay',        onMusicCan);
+      audio.removeEventListener('error',          onMusicErr);
+
+      pod.removeEventListener('timeupdate',     onPodTime);
+      pod.removeEventListener('durationchange', onPodDur);
+      pod.removeEventListener('play',           onPodPlay);
+      pod.removeEventListener('pause',          onPodPause);
+      pod.removeEventListener('waiting',        onPodWait);
+      pod.removeEventListener('canplay',        onPodCan);
+      pod.removeEventListener('error',          onPodErr);
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -468,6 +500,8 @@ export function RadioPage() {
 
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
+    // If the loop is already running (e.g. we navigated away and came back),
+    // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
     if (!greetedRef.current) {
       startRadio();
@@ -688,30 +722,7 @@ export function RadioPage() {
           </div>
         </div>
 
-        {/* Coming Up — next 3 podcast episodes in queue */}
-        {episodes.length > 0 && (
-          <div className="fade-in-up-delay-3 space-y-3">
-            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest px-1">Coming Up · Podcasts</h3>
-            {episodes.slice(0, 3).map((ep) => (
-              <div key={ep.id} className="glass-card rounded-2xl p-4 flex items-start gap-4">
-                <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-xl">🎙️</div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
-                    {ep.duration > 0 && <>
-                      <span className="text-xs text-white/25">·</span>
-                      <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
-                    </>}
-                  </div>
-                  <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
-                  <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Genre selector */}
+        {/* Genre selector — directly below player, above podcasts */}
         <div className="fade-in-up-delay-3 space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Genres</h3>
@@ -744,6 +755,29 @@ export function RadioPage() {
             })}
           </div>
         </div>
+
+        {/* Coming Up — next 3 podcast episodes in queue */}
+        {episodes.length > 0 && (
+          <div className="fade-in-up-delay-3 space-y-3">
+            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest px-1">Coming Up · Podcasts</h3>
+            {episodes.slice(0, 3).map((ep) => (
+              <div key={ep.id} className="glass-card rounded-2xl p-4 flex items-start gap-4">
+                <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-xl">🎙️</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
+                    {ep.duration > 0 && <>
+                      <span className="text-xs text-white/25">·</span>
+                      <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
+                    </>}
+                  </div>
+                  <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
+                  <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Playlist */}
         <div className="fade-in-up-delay-3 space-y-3">
