@@ -69,6 +69,7 @@ export function RadioPage() {
   // ── Stable refs ───────────────────────────────────────────────────────────
   const audioRef         = useRef<HTMLAudioElement | null>(null);
   const cancelRampRef    = useRef<(() => void) | null>(null);
+  const loopGenRef       = useRef(0);  // incremented each iteration to cancel stale listeners
   const tracksRef        = useRef<WavlakeTrack[]>([]);
   const runningRef       = useRef(false);
   const greetedRef       = useRef(false);
@@ -116,7 +117,7 @@ export function RadioPage() {
     cancelRampRef.current?.();
 
     if (moderator.isSpeaking) {
-      console.log('[Duck] duckDown() → 0.15 over 1000ms');
+      console.log(`[Duck] duckDown() → ${DUCK_LEVEL} over 1000ms`);
       cancelRampRef.current = rampVolume(audio, DUCK_LEVEL, 1000);
     } else {
       const target = mutedRef.current ? 0 : volumeRef.current;
@@ -155,7 +156,7 @@ export function RadioPage() {
 
       console.log(`[Loop] loading track ${currentIdx}: "${t.name}" by ${t.artist}`);
 
-      // 1. Load and start track at duck level — speech will play over it
+      loopGenRef.current++; // invalidate any listeners from the previous iteration
       audio.pause();
       audio.src    = t.liveUrl;
       audio.volume = DUCK_LEVEL; // always start ducked; fade restored after speech
@@ -200,30 +201,26 @@ export function RadioPage() {
 
       if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
 
-      // 3. Wait for track to finish naturally, or user pause.
-      //    Browsers fire 'pause' before 'ended' on natural end — guard with settled flag
-      //    and always clean up the listener so it doesn't leak into the next iteration.
+      // 3. Wait for the track to end naturally or for the user to pause.
+      //    Each iteration gets a unique generation number. Any listener that
+      //    fires after loopGenRef has moved on (stale) simply ignores itself.
+      const myGen = ++loopGenRef.current;
       const endedNaturally = await new Promise<boolean>(resolve => {
-        let settled = false;
         const onEnded = () => {
-          if (settled) return;
-          settled = true;
+          if (loopGenRef.current !== myGen) return; // stale — a new iteration started
           cleanup();
-          console.log(`[Loop] onEnded — track ${currentIdx} finished`);
+          console.log(`[Loop] ended naturally (gen ${myGen})`);
           resolve(true);
         };
         const onPause = () => {
-          console.log(`[Loop] onPause — runningRef: ${runningRef.current}, settled: ${settled}`);
-          if (settled) return;
+          if (loopGenRef.current !== myGen) return; // stale
           if (!runningRef.current) {
-            // handlePause sets runningRef=false before audio.pause(), so this is user-initiated
-            settled = true;
+            // handlePause() sets runningRef=false then calls audio.pause()
             cleanup();
-            console.log('[Loop] paused by user');
+            console.log(`[Loop] paused by user (gen ${myGen})`);
             resolve(false);
           }
-          // else: natural-end pause fires before ended — do NOT cleanup here,
-          // onEnded will fire next and resolve correctly
+          // else: browser fires pause just before ended on natural end — wait for ended
         };
         function cleanup() {
           audio.removeEventListener('ended', onEnded);
