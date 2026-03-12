@@ -75,6 +75,9 @@ export function RadioPage() {
   const [nowPlaying, setNowPlaying] = useState<RadioItem | null>(null);
   const nowPlayingRef = useRef<RadioItem | null>(null);
 
+  const segmenter = usePodcastSegmenter();
+  const radioCtx  = useRadioContext();
+
   // Audio elements and core loop refs come from RadioContext so they survive
   // route changes (e.g. navigating to Settings and back).
   const audioRef    = radioCtx.audioRef;
@@ -95,9 +98,6 @@ export function RadioPage() {
   const nameRef          = useRef(name);
   const volumeRef        = useRef(0.9);
   const mutedRef         = useRef(false);
-
-  const segmenter   = usePodcastSegmenter();
-  const radioCtx    = useRadioContext();
 
   // Sync refs to latest state/props
   useEffect(() => { tracksRef.current    = tracks;    }, [tracks]);
