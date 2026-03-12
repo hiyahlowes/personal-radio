@@ -148,8 +148,10 @@ export function RadioPage() {
       const next = (i + delta + tracks.length) % tracks.length;
       const nextTrack = tracks[next];
       if (nextTrack && greetedRef.current) {
-        // brief delay so the audio src swap settles
-        setTimeout(() => runSequence(nextTrack, false), 300);
+        // Wait for the post-speech pause + fade-back to clear before running
+        // the next sequence. POST_SPEECH_PAUSE_MS (900) + fade duration (~600)
+        // = ~1500 ms; use 1600 to be safe.
+        setTimeout(() => runSequence(nextTrack, false), 1600);
       }
       return next;
     });
@@ -158,7 +160,7 @@ export function RadioPage() {
   const handlePause  = () => { moderator.stop(); audioRef.current?.pause(); };
   const handlePrev   = () => advance(-1);
   const handleNext   = () => advance(1);
-  const handleSelect = (i: number) => { setIdx(i); setTimeout(() => runSequence(tracks[i], false), 300); };
+  const handleSelect = (i: number) => { setIdx(i); setTimeout(() => runSequence(tracks[i], false), 400); };
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     const audio = audioRef.current;
