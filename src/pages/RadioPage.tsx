@@ -172,6 +172,10 @@ export function RadioPage() {
       setDur(t.duration || 0);
       setIdx(currentIdx);
 
+      // Keep Now Playing showing the current music track
+      nowPlayingRef.current = { kind: 'music', track: t };
+      setNowPlaying({ kind: 'music', track: t });
+
       try {
         await audio.play();
         console.log('[Loop] audio.play() resolved at duck level');
@@ -192,12 +196,15 @@ export function RadioPage() {
         await sleep(400);
         await moderatorRef.current.speakTrackIntro(t);
       } else if (silentCountRef.current >= silentBudgetRef.current && recentTracksRef.current.length > 0) {
-        silentCountRef.current  = 0;
-        silentBudgetRef.current = randInt(1, 2);
+        // Time for a DJ break — review recent tracks and intro this one
         const played = recentTracksRef.current;
         recentTracksRef.current = [];
         console.log('[Loop] moderation — speakReviewAndIntro over music');
         await moderatorRef.current.speakReviewAndIntro(played, t);
+        // Reset the silent counter AFTER speaking so the podcast check below
+        // still has access to the accumulated count before we cleared it.
+        silentCountRef.current  = 0;
+        silentBudgetRef.current = randInt(1, 2);
       } else {
         // No speech this track — fade up immediately
         console.log('[Loop] no speech — fading up now');
@@ -240,15 +247,20 @@ export function RadioPage() {
       if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
 
       if (endedNaturally) {
+        // Accumulate this track in the recents list and increment the silent counter
         recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
         silentCountRef.current++;
+
         const nextMusicIdx = (currentIdx + 1) % tracks.length;
         idxRef.current     = nextMusicIdx;
         console.log(`[Loop] index advanced ${currentIdx} → ${nextMusicIdx}`);
+        console.log(`[Loop] silentCount=${silentCountRef.current} / budget=${silentBudgetRef.current}, episodes=${episodesRef.current.length}`);
 
         // ── Podcast slot every 2–3 music tracks ──────────────────────────────
         const eps = episodesRef.current;
         if (silentCountRef.current >= silentBudgetRef.current && eps.length > 0) {
+          // Reset counters BEFORE entering podcast block so the next music
+          // cycle starts fresh regardless of what happens inside.
           silentCountRef.current  = 0;
           silentBudgetRef.current = randInt(2, 3);
 
@@ -260,11 +272,13 @@ export function RadioPage() {
 
           console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
 
-          // Intro over (already-quiet) audio
+          // ── Transition: moderator introduces the podcast episode ────────────
+          // speakPodcastTransition takes (podcastTitle, hostName) — we pass
+          // the episode title as the segment name and the show name as "host".
           await moderatorRef.current.speakPodcastTransition(episode.title, episode.feedTitle);
           if (!runningRef.current) break;
 
-          // Play the episode
+          // ── Load and play the podcast episode ─────────────────────────────
           loopGenRef.current++;
           audio.pause();
           audio.src    = episode.audioUrl;
@@ -272,7 +286,8 @@ export function RadioPage() {
           audio.load();
           setCT(0);
           setDur(episode.duration || 0);
-          // Show podcast info in Now Playing via a synthetic RadioItem stored in a ref
+
+          // Update Now Playing to show podcast info
           nowPlayingRef.current = { kind: 'podcast', episode };
           setNowPlaying({ kind: 'podcast', episode });
 
@@ -281,12 +296,21 @@ export function RadioPage() {
             console.log('[Loop] podcast playing');
           } catch (e) {
             console.error('[Loop] podcast play failed:', e);
+            // On failure, skip this podcast slot and return to music
+            nowPlayingRef.current = { kind: 'music', track: t };
+            setNowPlaying({ kind: 'music', track: t });
           }
 
+          // ── Wait for podcast to finish (or user to pause) ─────────────────
           if (runningRef.current) {
             const podGen = ++loopGenRef.current;
             await new Promise<boolean>(resolve => {
-              const onEnded = () => { if (loopGenRef.current !== podGen) return; cleanup(); resolve(true); };
+              const onEnded = () => {
+                if (loopGenRef.current !== podGen) return;
+                cleanup();
+                console.log('[Loop] podcast ended naturally');
+                resolve(true);
+              };
               const onPause = () => {
                 if (loopGenRef.current !== podGen) return;
                 if (!runningRef.current) { cleanup(); resolve(false); }
@@ -300,19 +324,17 @@ export function RadioPage() {
             });
           }
 
-          // Outro back to music
+          // ── Outro: bridge back to music ───────────────────────────────────
           if (runningRef.current && nextMusicTrack) {
-            nowPlayingRef.current = null;
-            setNowPlaying(null);
             await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
           }
-          recentTracksRef.current = []; // reset so review doesn't mention old tracks
-        } else {
-          nowPlayingRef.current = null;
-          setNowPlaying(null);
+
+          // Clear the recent-tracks buffer so the review after a podcast
+          // doesn't reference stale pre-podcast tracks.
+          recentTracksRef.current = [];
         }
+        // loop continues — next iteration picks up idxRef.current
       }
-      // loop continues — next iteration reads idxRef.current
     }
 
     console.log('[Loop] advanceLoop() exited');
@@ -433,21 +455,34 @@ export function RadioPage() {
         <div className="fade-in-up-delay-2 glass-card rounded-3xl p-6">
           <div className="flex items-center gap-5 mb-6">
             <div className="relative flex-shrink-0">
-              <div className={`w-24 h-24 rounded-full overflow-hidden border-4 border-gray-700 shadow-2xl bg-gray-800 ${(playing && !isModerating) ? 'vinyl-spin' : 'vinyl-spin paused'}`}>
-                {track?.artworkUrl && <img src={track.artworkUrl} alt={track.name} className="w-full h-full object-cover" onError={e => (e.currentTarget.style.display = 'none')} />}
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="w-6 h-6 rounded-full bg-black/60 border-2 border-white/20" />
+              {nowPlaying?.kind === 'podcast' ? (
+                /* Podcast: static icon disc — no spin */
+                <div className="w-24 h-24 rounded-full overflow-hidden border-4 border-amber-700/60 shadow-2xl bg-amber-900/30 flex items-center justify-center text-4xl select-none">
+                  🎙️
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="w-6 h-6 rounded-full bg-black/40 border-2 border-amber-400/20" />
+                  </div>
                 </div>
-              </div>
-              {(playing && !isModerating) && <div className="absolute inset-0 rounded-full bg-purple-600/15 blur-xl animate-pulse pointer-events-none" />}
+              ) : (
+                /* Music: spinning vinyl */
+                <div className={`w-24 h-24 rounded-full overflow-hidden border-4 border-gray-700 shadow-2xl bg-gray-800 ${(playing && !isModerating) ? 'vinyl-spin' : 'vinyl-spin paused'}`}>
+                  {track?.artworkUrl && <img src={track.artworkUrl} alt={track.name} className="w-full h-full object-cover" onError={e => (e.currentTarget.style.display = 'none')} />}
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="w-6 h-6 rounded-full bg-black/60 border-2 border-white/20" />
+                  </div>
+                </div>
+              )}
+              {(playing && !isModerating) && (
+                <div className={`absolute inset-0 rounded-full blur-xl animate-pulse pointer-events-none ${nowPlaying?.kind === 'podcast' ? 'bg-amber-500/15' : 'bg-purple-600/15'}`} />
+              )}
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
                 <span className={`text-xs font-semibold uppercase tracking-widest ${nowPlaying?.kind === 'podcast' ? 'text-amber-400' : 'text-purple-400'}`}>
                   {nowPlaying?.kind === 'podcast' ? 'Now Playing · Podcast' : 'Now Playing'}
                 </span>
-                {track && !nowPlaying && (
-                  <a href={`https://wavlake.com/track/${track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
+                {nowPlaying?.kind === 'music' && nowPlaying.track && (
+                  <a href={`https://wavlake.com/track/${nowPlaying.track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
                     <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                   </a>
                 )}
@@ -462,7 +497,14 @@ export function RadioPage() {
                   <p className="text-white/60 text-sm truncate">{nowPlaying.episode.feedTitle}</p>
                   <span className="inline-block mt-2 text-xs text-amber-400/80 bg-amber-900/20 border border-amber-700/30 rounded-full px-3 py-0.5">🎙️ Podcast</span>
                 </>
+              ) : nowPlaying?.kind === 'music' ? (
+                <>
+                  <h3 className="text-xl font-bold truncate">{nowPlaying.track.name}</h3>
+                  <p className="text-white/60 text-sm truncate">{nowPlaying.track.artist}</p>
+                  {nowPlaying.track.albumTitle && <span className="inline-block mt-2 text-xs text-purple-300/70 bg-purple-900/30 border border-purple-700/30 rounded-full px-3 py-0.5">{nowPlaying.track.albumTitle}</span>}
+                </>
               ) : track ? (
+                /* Fallback before loop starts */
                 <>
                   <h3 className="text-xl font-bold truncate">{track.name}</h3>
                   <p className="text-white/60 text-sm truncate">{track.artist}</p>
