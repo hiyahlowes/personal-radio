@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react';
 import { useElevenLabs } from './useElevenLabs';
 import type { WavlakeTrack } from './useWavlakeTracks';
+import type { PodcastEpisode } from './usePodcastFeeds';
 
 // ─── Time-of-day helpers ──────────────────────────────────────────────────────
 type TimeOfDay = 'morning' | 'afternoon' | 'evening' | 'night';
@@ -207,10 +208,54 @@ export function useRadioModerator() {
     [buildAndSpeak]
   );
 
+  /**
+   * Transition from music into a podcast episode.
+   * Called just before the podcast audio starts playing.
+   */
+  const speakPodcastIntro = useCallback(
+    async (episode: PodcastEpisode): Promise<void> => {
+      const prompt =
+        `You're a radio host transitioning from music to a podcast segment. ` +
+        `Introduce the following podcast episode on air: ` +
+        `Show: "${episode.feedTitle}". Episode title: "${episode.title}". ` +
+        `Brief description: "${episode.description.slice(0, 120)}". ` +
+        `Sound warm and natural — 1 to 2 sentences. Don't say "here's" at the start.`;
+
+      const fallback =
+        `Coming up — a podcast episode for you. From ${episode.feedTitle}: "${episode.title}". ` +
+        `Sit back and enjoy.`;
+
+      await buildAndSpeak(prompt, fallback);
+    },
+    [buildAndSpeak]
+  );
+
+  /**
+   * Bridge back from podcast to music.
+   */
+  const speakPodcastOutro = useCallback(
+    async (episode: PodcastEpisode, nextTrack: WavlakeTrack): Promise<void> => {
+      const prompt =
+        `You're a radio host transitioning back from a podcast segment to music. ` +
+        `The podcast was "${episode.title}" from ${episode.feedTitle}. ` +
+        `Now you're going back to music — next up: "${nextTrack.name}" by ${nextTrack.artist}. ` +
+        `Keep it to 1–2 sentences. Sound natural.`;
+
+      const fallback =
+        `That was "${episode.title}" from ${episode.feedTitle}. ` +
+        `Back to music now — here's ${nextTrack.artist} with "${nextTrack.name}".`;
+
+      await buildAndSpeak(prompt, fallback);
+    },
+    [buildAndSpeak]
+  );
+
   return {
     speakGreeting,
     speakTrackIntro,
     speakReviewAndIntro,
+    speakPodcastIntro,
+    speakPodcastOutro,
     speakPodcastTransition,
     stop,
     isSpeaking,

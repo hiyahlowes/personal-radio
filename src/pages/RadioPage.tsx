@@ -1,8 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useWavlakeTracks, type WavlakeTrack } from '@/hooks/useWavlakeTracks';
+import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { Skeleton } from '@/components/ui/skeleton';
+
+// ─── RadioItem union ─────────────────────────────────────────────────────────
+type RadioItem =
+  | { kind: 'music';   track:   WavlakeTrack    }
+  | { kind: 'podcast'; episode: PodcastEpisode  };
 
 // ─── Ducking via audio.volume + setInterval ───────────────────────────────────
 // Note: Web Audio API MediaElementAudioSourceNode requires CORS headers on the
@@ -41,12 +47,6 @@ function fmt(s: number) {
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 }
 
-const UPCOMING = [
-  { type: 'podcast', title: 'Deep Focus: The Science of Flow States', host: 'Dr. Maya Chen', duration: '18 min', icon: '🎙️' },
-  { type: 'music',   title: 'Curated: Late Night Vibes',             host: 'AI DJ',        duration: '45 min', icon: '🎵' },
-  { type: 'podcast', title: 'Tech Horizons: AI in Creative Work',    host: 'Sam & Priya',  duration: '32 min', icon: '🎙️' },
-];
-
 // ─── Component ────────────────────────────────────────────────────────────────
 export function RadioPage() {
   const [params]  = useSearchParams();
@@ -55,6 +55,7 @@ export function RadioPage() {
   const firstName = name.split(' ')[0];
 
   const { data: tracks = [], isLoading, isError } = useWavlakeTracks();
+  const { data: episodes = [] } = usePodcastEpisodes(getStoredFeeds());
   const moderator = useRadioModerator();
 
   // ── UI state ──────────────────────────────────────────────────────────────
@@ -67,6 +68,9 @@ export function RadioPage() {
   const [muted, setMuted]     = useState(false);
 
   // ── Stable refs ───────────────────────────────────────────────────────────
+  const [nowPlaying, setNowPlaying] = useState<RadioItem | null>(null);
+  const nowPlayingRef = useRef<RadioItem | null>(null);
+
   const audioRef         = useRef<HTMLAudioElement | null>(null);
   const cancelRampRef    = useRef<(() => void) | null>(null);
   const loopGenRef       = useRef(0);  // incremented each iteration to cancel stale listeners
@@ -75,8 +79,10 @@ export function RadioPage() {
   const greetedRef       = useRef(false);
   const idxRef           = useRef(0);
   const silentCountRef   = useRef(0);
-  const silentBudgetRef  = useRef(randInt(1, 2));
+  const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
+  const episodesRef      = useRef<PodcastEpisode[]>([]);
+  const podcastIdxRef    = useRef(0); // cycles through episodes
   const moderatorRef     = useRef(moderator);
   const nameRef          = useRef(name);
   const volumeRef        = useRef(0.9);
@@ -84,6 +90,7 @@ export function RadioPage() {
 
   // Sync refs to latest state/props
   useEffect(() => { tracksRef.current    = tracks;    }, [tracks]);
+  useEffect(() => { episodesRef.current  = episodes;  }, [episodes]);
   useEffect(() => { moderatorRef.current = moderator; }, [moderator]);
   useEffect(() => { nameRef.current      = name;      }, [name]);
   useEffect(() => { volumeRef.current    = volume;    }, [volume]);
@@ -235,9 +242,75 @@ export function RadioPage() {
       if (endedNaturally) {
         recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
         silentCountRef.current++;
-        const nextIdx  = (currentIdx + 1) % tracks.length;
-        idxRef.current = nextIdx;
-        console.log(`[Loop] index advanced ${currentIdx} → ${nextIdx}`);
+        const nextMusicIdx = (currentIdx + 1) % tracks.length;
+        idxRef.current     = nextMusicIdx;
+        console.log(`[Loop] index advanced ${currentIdx} → ${nextMusicIdx}`);
+
+        // ── Podcast slot every 2–3 music tracks ──────────────────────────────
+        const eps = episodesRef.current;
+        if (silentCountRef.current >= silentBudgetRef.current && eps.length > 0) {
+          silentCountRef.current  = 0;
+          silentBudgetRef.current = randInt(2, 3);
+
+          const epIdx   = podcastIdxRef.current % eps.length;
+          const episode = eps[epIdx];
+          podcastIdxRef.current++;
+
+          const nextMusicTrack = tracksRef.current[nextMusicIdx];
+
+          console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
+
+          // Intro over (already-quiet) audio
+          await moderatorRef.current.speakPodcastTransition(episode.title, episode.feedTitle);
+          if (!runningRef.current) break;
+
+          // Play the episode
+          loopGenRef.current++;
+          audio.pause();
+          audio.src    = episode.audioUrl;
+          audio.volume = mutedRef.current ? 0 : volumeRef.current;
+          audio.load();
+          setCT(0);
+          setDur(episode.duration || 0);
+          // Show podcast info in Now Playing via a synthetic RadioItem stored in a ref
+          nowPlayingRef.current = { kind: 'podcast', episode };
+          setNowPlaying({ kind: 'podcast', episode });
+
+          try {
+            await audio.play();
+            console.log('[Loop] podcast playing');
+          } catch (e) {
+            console.error('[Loop] podcast play failed:', e);
+          }
+
+          if (runningRef.current) {
+            const podGen = ++loopGenRef.current;
+            await new Promise<boolean>(resolve => {
+              const onEnded = () => { if (loopGenRef.current !== podGen) return; cleanup(); resolve(true); };
+              const onPause = () => {
+                if (loopGenRef.current !== podGen) return;
+                if (!runningRef.current) { cleanup(); resolve(false); }
+              };
+              function cleanup() {
+                audio.removeEventListener('ended', onEnded);
+                audio.removeEventListener('pause', onPause);
+              }
+              audio.addEventListener('ended', onEnded);
+              audio.addEventListener('pause', onPause);
+            });
+          }
+
+          // Outro back to music
+          if (runningRef.current && nextMusicTrack) {
+            nowPlayingRef.current = null;
+            setNowPlaying(null);
+            await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
+          }
+          recentTracksRef.current = []; // reset so review doesn't mention old tracks
+        } else {
+          nowPlayingRef.current = null;
+          setNowPlaying(null);
+        }
       }
       // loop continues — next iteration reads idxRef.current
     }
@@ -326,9 +399,14 @@ export function RadioPage() {
             </button>
             <h2 className="text-2xl font-bold mt-1">Hey, <span className="text-purple-300">{firstName}</span> 👋</h2>
           </div>
-          <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-2">
-            <div className={`w-2 h-2 rounded-full ${statusColor}`} />
-            <span className="text-xs font-semibold tracking-wider text-white/60">{statusLabel}</span>
+          <div className="flex items-center gap-3">
+            <button onClick={() => navigate('/settings')} className="w-9 h-9 rounded-full flex items-center justify-center text-white/30 hover:text-white/70 hover:bg-white/10 transition-all" aria-label="Settings">
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+            </button>
+            <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-2">
+              <div className={`w-2 h-2 rounded-full ${statusColor}`} />
+              <span className="text-xs font-semibold tracking-wider text-white/60">{statusLabel}</span>
+            </div>
           </div>
         </header>
 
@@ -365,8 +443,10 @@ export function RadioPage() {
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-xs font-semibold text-purple-400 uppercase tracking-widest">Now Playing</span>
-                {track && (
+                <span className={`text-xs font-semibold uppercase tracking-widest ${nowPlaying?.kind === 'podcast' ? 'text-amber-400' : 'text-purple-400'}`}>
+                  {nowPlaying?.kind === 'podcast' ? 'Now Playing · Podcast' : 'Now Playing'}
+                </span>
+                {track && !nowPlaying && (
                   <a href={`https://wavlake.com/track/${track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
                     <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                   </a>
@@ -376,6 +456,12 @@ export function RadioPage() {
                 <div className="space-y-2"><Skeleton className="h-5 w-36 bg-white/10"/><Skeleton className="h-3.5 w-24 bg-white/10"/></div>
               ) : isError ? (
                 <p className="text-red-400 text-sm">Couldn't load tracks</p>
+              ) : nowPlaying?.kind === 'podcast' ? (
+                <>
+                  <h3 className="text-xl font-bold truncate">{nowPlaying.episode.title}</h3>
+                  <p className="text-white/60 text-sm truncate">{nowPlaying.episode.feedTitle}</p>
+                  <span className="inline-block mt-2 text-xs text-amber-400/80 bg-amber-900/20 border border-amber-700/30 rounded-full px-3 py-0.5">🎙️ Podcast</span>
+                </>
               ) : track ? (
                 <>
                   <h3 className="text-xl font-bold truncate">{track.name}</h3>
@@ -445,24 +531,28 @@ export function RadioPage() {
           </div>
         </div>
 
-        {/* Coming Up */}
-        <div className="fade-in-up-delay-3 space-y-3">
-          <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest px-1">Coming Up</h3>
-          {UPCOMING.map((seg, i) => (
-            <div key={i} className="glass-card rounded-2xl p-4 flex items-start gap-4">
-              <div className="w-11 h-11 rounded-xl bg-white/5 flex items-center justify-center flex-shrink-0 text-xl">{seg.icon}</div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className={`text-xs font-bold uppercase tracking-wider ${seg.type === 'podcast' ? 'text-amber-400' : 'text-purple-400'}`}>{seg.type === 'podcast' ? 'Podcast' : 'Music Set'}</span>
-                  <span className="text-xs text-white/25">·</span>
-                  <span className="text-xs text-white/40">{seg.duration}</span>
+        {/* Coming Up — next 3 podcast episodes in queue */}
+        {episodes.length > 0 && (
+          <div className="fade-in-up-delay-3 space-y-3">
+            <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest px-1">Coming Up · Podcasts</h3>
+            {episodes.slice(0, 3).map((ep) => (
+              <div key={ep.id} className="glass-card rounded-2xl p-4 flex items-start gap-4">
+                <div className="w-11 h-11 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-xl">🎙️</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
+                    {ep.duration > 0 && <>
+                      <span className="text-xs text-white/25">·</span>
+                      <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
+                    </>}
+                  </div>
+                  <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
+                  <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
                 </div>
-                <p className="text-sm font-semibold text-white truncate">{seg.title}</p>
-                <p className="text-xs text-white/40 mt-0.5">{seg.host}</p>
               </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
         {/* Playlist */}
         <div className="fade-in-up-delay-3 space-y-3">
