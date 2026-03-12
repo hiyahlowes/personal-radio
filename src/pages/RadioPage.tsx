@@ -103,7 +103,7 @@ export function RadioPage() {
     audio.addEventListener('ended',          () => console.log('[Music] ended'));
     audio.addEventListener('waiting',        () => setBuf(true));
     audio.addEventListener('canplay',        () => setBuf(false));
-    audio.addEventListener('error',          () => console.error('[Music] error', audio.error?.message));
+    audio.addEventListener('error',          () => { if (audio.src) console.error('[Music] error', audio.error?.message); });
 
     return () => { audio.pause(); audio.src = ''; };
   }, []);
