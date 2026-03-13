@@ -129,34 +129,37 @@ async function generateScript(prompt: string, longForm = false): Promise<string 
     ? 'Be a bit more elaborate this time: use 3 to 4 sentences.'
     : 'Keep it to 1 to 2 sentences.';
   try {
-    const response = await fetch('https://ai.shakespeare.diy/v1/chat/completions', {
+    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined;
+    if (!apiKey) { console.warn('[Moderator] VITE_ANTHROPIC_API_KEY not set'); return null; }
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
       body: JSON.stringify({
-        model: 'tybalt',
+        model: 'claude-haiku-4-5-20251001',
+        system:
+          `You are a warm, natural-sounding AI radio host for PR, Personal Radio. ` +
+          `You MUST respond exclusively in ${language}. Never use any other language. ` +
+          'Speak exactly as you would on air: no stage directions, no quotation marks around spoken titles, no asterisks, ' +
+          'no parenthetical notes. Just pure, natural radio speech. No emojis. ' +
+          'RULES: ' +
+          '(1) Never read out dates, times, episode numbers, or version tags. ' +
+          '(2) For podcast episodes where the title is just a date or timestamp, ignore it and use the show name only. ' +
+          '(3) For music, drop parenthetical suffixes like acoustic version or feat X, just say the clean title and artist. ' +
+          '(4) Sound like a real DJ who knows what is worth saying on air.',
         messages: [
-          {
-            role: 'system',
-            content:
-              `You are a warm, natural-sounding AI radio host for PR, Personal Radio. ` +
-              `You MUST respond exclusively in ${language}. Never use any other language. ` +
-              'Speak exactly as you would on air: no stage directions, no quotation marks around spoken titles, no asterisks, ' +
-              'no parenthetical notes. Just pure, natural radio speech. No emojis. ' +
-              'RULES: ' +
-              '(1) Never read out dates, times, episode numbers, or version tags. ' +
-              '(2) For podcast episodes where the title is just a date or timestamp, ignore it and use the show name only. ' +
-              '(3) For music, drop parenthetical suffixes like acoustic version or feat X, just say the clean title and artist. ' +
-              '(4) Sound like a real DJ who knows what is worth saying on air.',
-          },
           { role: 'user', content: `${prompt}\n${lengthInstruction}` },
         ],
         max_tokens: longForm ? 200 : 120,
-        temperature: 0.85,
       }),
     });
-    if (!response.ok) return null;
+    if (!response.ok) { console.warn('[Moderator] Anthropic API error:', response.status); return null; }
     const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content;
+    const text = data?.content?.[0]?.text;
     return typeof text === 'string' && text.trim() ? text.trim() : null;
   } catch {
     return null;
