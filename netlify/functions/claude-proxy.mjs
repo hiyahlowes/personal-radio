@@ -53,6 +53,9 @@ export default async function handler(req) {
 
   const { system, messages, model, max_tokens } = body;
 
+  const requestBody = JSON.stringify({ system, messages, model, max_tokens });
+  console.log('[Claude Proxy] Sending body:', requestBody);
+
   const upstream = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -60,8 +63,17 @@ export default async function handler(req) {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({ system, messages, model, max_tokens }),
+    body: requestBody,
   });
+
+  if (!upstream.ok) {
+    const errorText = await upstream.text();
+    console.log('[Claude Proxy] Error response:', errorText);
+    return new Response(errorText, {
+      status: upstream.status,
+      headers: { ...corsHeaders(), 'Content-Type': 'text/plain' },
+    });
+  }
 
   const json = await upstream.json();
 
