@@ -121,7 +121,31 @@ export function RadioPage() {
 
   const { selectedIds, toggle, selectAll, isAllSelected, isTopCharts } = useGenreSelection();
   const { data: tracks = [], isLoading, isError } = useWavlakeTracks(selectedIds);
-  const { data: episodes = [] } = usePodcastEpisodes(getStoredFeeds());
+
+  // ── Podcast feeds — re-read from localStorage on visibility change ─────────
+  // getStoredFeeds() is called once at mount; we keep it in state so that
+  // returning from the Settings page (visibilitychange / focus) causes the
+  // queryKey to update and React Query to re-fetch with the new feed list.
+  const [storedFeeds, setStoredFeeds] = useState(getStoredFeeds);
+  useEffect(() => {
+    const refresh = () => setStoredFeeds(getStoredFeeds());
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
+    // Also listen for the custom event dispatched by SettingsPage on feed save
+    window.addEventListener('pr:feeds-updated', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('pr:feeds-updated', refresh);
+    };
+  }, []);
+
+  const {
+    data: episodes = [],
+    refetch: refetchEpisodes,
+    isFetching: episodesFetching,
+  } = usePodcastEpisodes(storedFeeds);
+
   const moderator = useRadioModerator();
 
   // ── UI state ──────────────────────────────────────────────────────────────
@@ -210,15 +234,29 @@ export function RadioPage() {
     if (!audio || !pod) return;
 
     // ── Music element listeners ───────────────────────────────────────────────
-    // Always update currentTime/duration from whichever element is not paused.
-    // Music takes precedence when both are somehow playing (shouldn't happen).
-    const onMusicTime  = () => { if (!audio.paused) setCT(audio.currentTime); };
-    const onMusicDur   = () => { if (!audio.paused) setDur(isFinite(audio.duration) ? audio.duration : 0); };
-    const onMusicMeta  = () => { if (!audio.paused) setDur(isFinite(audio.duration) ? audio.duration : 0); };
+    // Unconditionally forward time/duration — no !paused guard.
+    // The guard was the bug: during buffering stalls the browser briefly marks
+    // the element as paused even while conceptually playing, silently dropping
+    // every timeupdate and freezing the bar at 0:00.
+    // When both elements fire simultaneously (crossfade), pod wins via the
+    // nowPlayingRef tiebreaker only in onMusicTime.
+    const onMusicTime  = () => {
+      // If pod is the active element, let its listener take precedence
+      if (nowPlayingRef.current?.kind === 'podcast') return;
+      setCT(audio.currentTime);
+    };
+    const onMusicDur   = () => {
+      if (nowPlayingRef.current?.kind === 'podcast') return;
+      setDur(isFinite(audio.duration) ? audio.duration : 0);
+    };
+    const onMusicMeta  = () => {
+      if (nowPlayingRef.current?.kind === 'podcast') return;
+      setDur(isFinite(audio.duration) ? audio.duration : 0);
+    };
     const onMusicPlay  = () => { console.log('[Music] play');  setPlaying(true);  setBuf(false); };
     const onMusicPause = () => { console.log('[Music] pause'); setPlaying(false); };
-    const onMusicWait  = () => setBuf(true);
-    const onMusicCan   = () => setBuf(false);
+    const onMusicWait  = () => { if (nowPlayingRef.current?.kind !== 'podcast') setBuf(true); };
+    const onMusicCan   = () => { if (nowPlayingRef.current?.kind !== 'podcast') setBuf(false); };
     const onMusicErr   = () => { if (audio.src) console.error('[Music] error', audio.error?.message); };
 
     audio.addEventListener('timeupdate',     onMusicTime);
@@ -231,13 +269,12 @@ export function RadioPage() {
     audio.addEventListener('error',          onMusicErr);
 
     // ── Podcast element listeners ─────────────────────────────────────────────
-    // No nowPlayingRef guard — always forward time/duration from pod when it's
-    // the active element (i.e. not paused). The nowPlayingRef check was fragile:
-    // durationchange and timeupdate can fire before setNowPlaying('podcast') runs,
-    // causing the progress bar to stay frozen at 0:00.
-    const onPodTime  = () => { if (!pod.paused) setCT(pod.currentTime); };
-    const onPodDur   = () => { if (!pod.paused) setDur(isFinite(pod.duration) ? pod.duration : 0); };
-    const onPodMeta  = () => { if (!pod.paused) setDur(isFinite(pod.duration) ? pod.duration : 0); };
+    // Also unconditional — always forward time/duration from pod.
+    // The old nowPlayingRef guard caused durationchange + timeupdate to be
+    // dropped when they fired before setNowPlaying('podcast') was called.
+    const onPodTime  = () => setCT(pod.currentTime);
+    const onPodDur   = () => setDur(isFinite(pod.duration) ? pod.duration : 0);
+    const onPodMeta  = () => setDur(isFinite(pod.duration) ? pod.duration : 0);
     const onPodPlay  = () => { console.log('[Podcast] play'); setPlaying(true);  setBuf(false); };
     const onPodPause = () => { console.log('[Podcast] pause'); setPlaying(false); };
     const onPodWait  = () => setBuf(true);
@@ -253,8 +290,8 @@ export function RadioPage() {
     pod.addEventListener('canplay',        onPodCan);
     pod.addEventListener('error',          onPodErr);
 
-    // Sync UI state with whatever the elements are currently doing (handles
-    // returning to RadioPage while audio was already playing).
+    // Sync UI state immediately on mount — handles returning from Settings
+    // while audio was already playing in RadioContext.
     if (!pod.paused) {
       setPlaying(true);
       setCT(pod.currentTime);
@@ -1087,11 +1124,26 @@ export function RadioPage() {
         <DragDropContext onDragEnd={handleDragEnd}>
 
           {/* Coming Up — podcast queue (draggable) */}
-          {orderedEpisodes.length > 0 && (
+          {(orderedEpisodes.length > 0 || storedFeeds.length > 0) && (
             <div className="fade-in-up-delay-3 space-y-3">
               <div className="flex items-center justify-between px-1">
                 <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up · Podcasts</h3>
-                <span className="text-xs text-amber-400/60">drag to reorder</span>
+                <div className="flex items-center gap-3">
+                  {orderedEpisodes.length > 0 && (
+                    <span className="text-xs text-amber-400/60">drag to reorder</span>
+                  )}
+                  <button
+                    onClick={() => { setStoredFeeds(getStoredFeeds()); refetchEpisodes(); }}
+                    disabled={episodesFetching}
+                    className="flex items-center gap-1 text-xs text-amber-400/70 hover:text-amber-300 transition-colors disabled:opacity-40"
+                    aria-label="Refresh podcast queue"
+                  >
+                    <svg className={`w-3 h-3 ${episodesFetching ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/>
+                    </svg>
+                    {episodesFetching ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
               </div>
               <Droppable droppableId="podcast-queue">
                 {(provided, snapshot) => (
@@ -1100,6 +1152,21 @@ export function RadioPage() {
                     {...provided.droppableProps}
                     className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
                   >
+                     {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
+                       <div className="glass-card rounded-2xl px-5 py-6 text-center">
+                         <p className="text-sm text-white/40">
+                           {episodesFetching ? 'Loading episodes…' : 'No episodes loaded yet.'}
+                         </p>
+                         {!episodesFetching && (
+                           <button
+                             onClick={() => refetchEpisodes()}
+                             className="mt-2 text-xs text-amber-400 hover:text-amber-300 transition-colors underline underline-offset-2"
+                           >
+                             Tap to refresh
+                           </button>
+                         )}
+                       </div>
+                     )}
                      {orderedEpisodes.slice(0, 5).map((ep, i) => (
                        <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
                          {(drag, dragSnapshot) => (

@@ -141,6 +141,8 @@ export function SettingsPage() {
     setStoredFeeds(next);
     setFeedSaved(true);
     setTimeout(() => setFeedSaved(false), 2000);
+    // Notify RadioPage to refresh its podcast query
+    window.dispatchEvent(new Event('pr:feeds-updated'));
   };
 
   const addFeedByUrl = (url: string, title: string) => {
