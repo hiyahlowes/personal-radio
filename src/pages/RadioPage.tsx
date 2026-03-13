@@ -709,6 +709,17 @@ export function RadioPage() {
           const episode = eps[epIdx];
           podcastIdxRef.current++;
 
+          // ── Guard: skip episodes with no playable audio URL ───────────────
+          // An empty audioUrl causes MEDIA_ELEMENT_ERROR and freezes the loop.
+          // Mark it played (removes from queue) and fall through to the next
+          // music track immediately — the radio never stops for a bad URL.
+          if (!episode.audioUrl || !episode.audioUrl.trim()) {
+            console.warn(`[Loop] skipping episode with empty audioUrl: "${episode.title}" from ${episode.feedTitle}`);
+            markPlayedRef.current(episode.id);
+            setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
+            // Don't break — fall through so music continues immediately.
+          } else {
+
           const nextMusicTrack = tracksRef.current[nextMusicIdx];
 
           console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
@@ -868,6 +879,8 @@ export function RadioPage() {
           // Clear the recent-tracks buffer so the review after a podcast
           // doesn't reference stale pre-podcast tracks.
           recentTracksRef.current = [];
+
+          } // end: else (episode has a valid audioUrl)
         }
         // loop continues — next iteration picks up idxRef.current
       }

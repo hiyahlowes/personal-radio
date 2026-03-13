@@ -170,10 +170,13 @@ export function useElevenLabs() {
     } catch (err) {
       if ((err as { name?: string }).name === 'AbortError') {
         console.log('[ElevenLabs] Fetch aborted (AbortController)');
+        // Aborted intentionally (e.g. user skip) — not an error, just return.
         return;
       }
       const msg = err instanceof Error ? err.message : 'TTS failed';
-      console.error('[ElevenLabs] speak() caught error:', msg, err);
+      // Log but DO NOT rethrow. speak() must never reject — a failed TTS call
+      // must be a silent no-op so the radio loop continues without interruption.
+      console.error('[ElevenLabs] speak() swallowing error to keep loop alive:', msg, err);
       setError(msg);
     } finally {
       console.log('[ElevenLabs] isSpeaking → FALSE');
