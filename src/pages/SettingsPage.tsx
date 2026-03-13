@@ -57,6 +57,21 @@ export function SettingsPage() {
     setTimeout(() => setNameSaved(false), 2000);
   };
 
+  // ── Language ──────────────────────────────────────────────────────────────
+  const LANGUAGE_KEY = 'pr:language';
+  const LANGUAGES = [
+    { value: 'English',  label: 'English',  flag: '🇬🇧' },
+    { value: 'Deutsch',  label: 'Deutsch',  flag: '🇩🇪' },
+    { value: 'Français', label: 'Français', flag: '🇫🇷' },
+  ];
+  const [language, setLanguage] = useState(
+    () => localStorage.getItem(LANGUAGE_KEY) || 'English'
+  );
+  const selectLanguage = (lang: string) => {
+    setLanguage(lang);
+    localStorage.setItem(LANGUAGE_KEY, lang);
+  };
+
   // ── Genre selection ───────────────────────────────────────────────────────
   const [selectedGenres, setSelectedGenres] = useState<string[]>(loadStoredGenres);
   const [genresSaved, setGenresSaved]       = useState(false);
@@ -226,6 +241,31 @@ export function SettingsPage() {
             >
               Save
             </button>
+          </div>
+        </section>
+
+        {/* ── Language ───────────────────────────────────────────────────── */}
+        <section className="fade-in-up space-y-3">
+          <div>
+            <h2 className="text-lg font-bold">Language</h2>
+            <p className="text-sm text-white/40 mt-0.5">Language your AI host speaks</p>
+          </div>
+          <div className="glass-card rounded-2xl p-4 flex gap-2">
+            {LANGUAGES.map(lang => (
+              <button
+                key={lang.value}
+                onClick={() => selectLanguage(lang.value)}
+                aria-pressed={language === lang.value}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl border text-sm font-semibold transition-all duration-150 select-none
+                  ${language === lang.value
+                    ? 'bg-purple-600/25 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
+                    : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
+                  }`}
+              >
+                <span>{lang.flag}</span>
+                {lang.label}
+              </button>
+            ))}
           </div>
         </section>
 

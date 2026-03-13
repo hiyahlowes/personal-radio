@@ -114,9 +114,16 @@ function fallbackPodcastTransition(showName: string, episodeTitle: string): stri
   return templates[showName.charCodeAt(0) % templates.length];
 }
 
+// Language helper
+
+function getStoredLanguage(): string {
+  try { return localStorage.getItem('pr:language') || 'English'; } catch { return 'English'; }
+}
+
 // Shakespeare AI script generator
 
 async function generateScript(prompt: string, longForm = false): Promise<string | null> {
+  const language = getStoredLanguage();
   const lengthInstruction = longForm
     ? 'Be a bit more elaborate this time: use 3 to 4 sentences.'
     : 'Keep it to 1 to 2 sentences.';
@@ -139,7 +146,7 @@ async function generateScript(prompt: string, longForm = false): Promise<string 
               '(3) For music, drop parenthetical suffixes like acoustic version or feat X, just say the clean title and artist. ' +
               '(4) Sound like a real DJ who knows what is worth saying on air.',
           },
-          { role: 'user', content: `${prompt}\n${lengthInstruction}` },
+          { role: 'user', content: `${prompt}\n${lengthInstruction}\nRespond in ${language}.` },
         ],
         max_tokens: longForm ? 200 : 120,
         temperature: 0.85,
