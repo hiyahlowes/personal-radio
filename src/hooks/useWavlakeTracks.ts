@@ -10,7 +10,8 @@ export interface WavlakeTrack {
   artworkUrl: string;
   avatarUrl: string;
   liveUrl: string;
-  duration: number; // seconds
+  duration: number;    // seconds
+  isTopChart?: boolean; // true when fetched from the Top 40 chart
 }
 
 interface WavlakeSearchResult {
@@ -32,7 +33,26 @@ interface WavlakeSearchResponse {
   data: WavlakeSearchResult[];
 }
 
+// Shape returned by the /top endpoint (different from /search)
+interface WavlakeTopTrack {
+  id: string;
+  title: string;          // note: "title" not "name" on this endpoint
+  artist: string;
+  artistId?: string;
+  albumTitle?: string;
+  albumId?: string;
+  artworkUrl: string;
+  avatarUrl?: string;
+  liveUrl: string;
+  duration: number;       // seconds
+  msat_total?: number;    // total Lightning sats earned (msats)
+}
+
 const WAVLAKE_BASE = 'https://catalog.wavlake.com/v1';
+
+// ── Special mode ID ───────────────────────────────────────────────────────────
+/** Sentinel value stored in localStorage to indicate Top Charts mode. */
+export const TOP_CHARTS_ID = '__top_charts__';
 
 // ── Genre catalogue ───────────────────────────────────────────────────────────
 // Wavlake has no /genres endpoint — genre filtering works by using the genre
@@ -91,6 +111,36 @@ async function fetchTracksForQuery(query: string): Promise<WavlakeTrack[]> {
     }));
 }
 
+/** Fetch the Wavlake Top 40 — tracks ranked by Lightning tips from listeners. */
+export async function fetchTopTracks(limit = 40): Promise<WavlakeTrack[]> {
+  const res = await fetch(`${WAVLAKE_BASE}/top?limit=${limit}`);
+  if (!res.ok) throw new Error(`Wavlake Top Charts fetch failed: ${res.status}`);
+
+  const data: WavlakeTopTrack[] = await res.json();
+
+  return data
+    .filter(
+      (t) =>
+        typeof t.liveUrl === 'string' &&
+        t.liveUrl.length > 0 &&
+        typeof t.duration === 'number' &&
+        t.duration <= 300, // same 5-minute cap as genre search
+    )
+    .map((t) => ({
+      id: t.id,
+      name: t.title,          // /top uses "title" instead of "name"
+      artist: t.artist,
+      artistId: t.artistId ?? '',
+      albumTitle: t.albumTitle ?? '',
+      albumId: t.albumId ?? '',
+      artworkUrl: t.artworkUrl,
+      avatarUrl: t.avatarUrl ?? '',
+      liveUrl: t.liveUrl,
+      duration: t.duration,
+      isTopChart: true,       // mark every track from this endpoint
+    }));
+}
+
 /** Deduplicate tracks by ID and shuffle */
 function dedupeAndShuffle(tracks: WavlakeTrack[]): WavlakeTrack[] {
   const seen = new Set<string>();
@@ -108,37 +158,43 @@ function dedupeAndShuffle(tracks: WavlakeTrack[]): WavlakeTrack[] {
 }
 
 /**
- * Fetch tracks from Wavlake for the given genre IDs.
+ * Fetch tracks from Wavlake.
  *
- * @param selectedGenreIds  Array of Genre.id strings. Defaults to all genres.
+ * If `selectedGenreIds` contains only `TOP_CHARTS_ID`, fetches the Top 40.
+ * Otherwise fetches by genre search terms as before.
+ *
+ * @param selectedGenreIds  Array of Genre.id strings, or [TOP_CHARTS_ID].
  */
 export function useWavlakeTracks(selectedGenreIds: string[] = ALL_GENRE_IDS) {
-  // Resolve selected genres → deduplicated list of search terms
-  const activeGenres = GENRES.filter(g => selectedGenreIds.includes(g.id));
-  // Fall back to all genres if nothing is selected (shouldn't happen via UI,
-  // but guards against an empty array producing zero tracks)
-  const genresToFetch = activeGenres.length > 0 ? activeGenres : GENRES;
-  const terms = [...new Set(genresToFetch.flatMap(g => g.terms))];
+  const isTopChartsMode = selectedGenreIds.includes(TOP_CHARTS_ID);
 
   return useQuery({
-    // Include the sorted genre IDs in the key so switching genres refetches
-    queryKey: ['wavlake-tracks', [...selectedGenreIds].sort().join(',')],
+    // Distinct cache key for top-charts vs genre queries
+    queryKey: ['wavlake-tracks', isTopChartsMode ? 'top-charts' : [...selectedGenreIds].sort().join(',')],
     queryFn: async (): Promise<WavlakeTrack[]> => {
-      // Fan out all terms in parallel
-      const results = await Promise.allSettled(terms.map(fetchTracksForQuery));
+      if (isTopChartsMode) {
+        const tracks = await fetchTopTracks(40);
+        if (tracks.length === 0) throw new Error('No tracks returned from Wavlake Top Charts');
+        // Top Charts preserves chart order (no shuffle) — positions matter
+        return tracks;
+      }
 
+      // ── Genre mode (unchanged from original) ──────────────────────────────
+      const activeGenres = GENRES.filter(g => selectedGenreIds.includes(g.id));
+      const genresToFetch = activeGenres.length > 0 ? activeGenres : GENRES;
+      const terms = [...new Set(genresToFetch.flatMap(g => g.terms))];
+
+      const results = await Promise.allSettled(terms.map(fetchTracksForQuery));
       const allTracks: WavlakeTrack[] = [];
       for (const result of results) {
-        if (result.status === 'fulfilled') {
-          allTracks.push(...result.value);
-        }
+        if (result.status === 'fulfilled') allTracks.push(...result.value);
       }
 
       if (allTracks.length === 0) {
         throw new Error('No tracks available from Wavlake for selected genres');
       }
 
-      return dedupeAndShuffle(allTracks).slice(0, 30); // cap at 30 tracks
+      return dedupeAndShuffle(allTracks).slice(0, 30);
     },
     staleTime: 1000 * 60 * 10, // 10 minutes
     retry: 2,

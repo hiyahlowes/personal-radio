@@ -11,7 +11,7 @@ import {
   searchPodcasts,
   type PodcastIndexFeed,
 } from '@/hooks/usePodcastIndex';
-import { GENRES, ALL_GENRE_IDS } from '@/hooks/useWavlakeTracks';
+import { GENRES, ALL_GENRE_IDS, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import {
   getStoredName,
   setStoredName,
@@ -61,14 +61,28 @@ export function SettingsPage() {
 
   const toggleGenre = (id: string) => {
     setSelectedGenres(prev => {
-      const next = prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id];
-      // Save immediately
-      localStorage.setItem(GENRES_KEY, JSON.stringify(next.length > 0 ? next : ALL_GENRE_IDS));
+      let next: string[];
+      if (id === TOP_CHARTS_ID) {
+        // Exclusive: selecting Top Charts clears genres, deselecting restores all
+        next = prev.includes(TOP_CHARTS_ID) ? ALL_GENRE_IDS : [TOP_CHARTS_ID];
+      } else {
+        // Any genre click exits Top Charts mode
+        const withoutTop = prev.filter(g => g !== TOP_CHARTS_ID);
+        if (withoutTop.includes(id)) {
+          if (withoutTop.length === 1) return prev; // don't deselect the last genre
+          next = withoutTop.filter(g => g !== id);
+        } else {
+          next = [...withoutTop, id];
+        }
+      }
+      localStorage.setItem(GENRES_KEY, JSON.stringify(next));
       setGenresSaved(true);
       setTimeout(() => setGenresSaved(false), 1500);
-      return next.length > 0 ? next : prev; // don't allow deselecting the last one
+      return next;
     });
   };
+
+  const isTopChartsSelected = selectedGenres.includes(TOP_CHARTS_ID);
 
   const selectAllGenres = () => {
     setSelectedGenres(ALL_GENRE_IDS);
@@ -213,7 +227,7 @@ export function SettingsPage() {
                   Saved
                 </span>
               )}
-              {selectedGenres.length !== ALL_GENRE_IDS.length && (
+              {!isTopChartsSelected && selectedGenres.length !== ALL_GENRE_IDS.length && (
                 <button
                   onClick={selectAllGenres}
                   className="text-xs text-purple-400 hover:text-purple-300 transition-colors"
@@ -226,8 +240,23 @@ export function SettingsPage() {
 
           <div className="glass-card rounded-2xl p-4">
             <div className="flex flex-wrap gap-2">
+              {/* ⚡ Top Charts — shown first, exclusive mode */}
+              <button
+                onClick={() => toggleGenre(TOP_CHARTS_ID)}
+                aria-pressed={isTopChartsSelected}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl border transition-all duration-150 text-sm font-semibold select-none
+                  ${isTopChartsSelected
+                    ? 'bg-amber-500/20 border-amber-400/60 text-amber-200 shadow-sm shadow-amber-900/40'
+                    : 'bg-white/5 border-white/10 text-white/40 hover:border-amber-500/40 hover:text-amber-300/70'
+                  }`}
+              >
+                <span>⚡</span>
+                Top Charts
+              </button>
+
+              {/* Standard genres */}
               {GENRES.map(genre => {
-                const active = selectedGenres.includes(genre.id);
+                const active = !isTopChartsSelected && selectedGenres.includes(genre.id);
                 return (
                   <button
                     key={genre.id}
@@ -237,7 +266,7 @@ export function SettingsPage() {
                       ${active
                         ? 'bg-purple-600/25 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
                         : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
-                      }`}
+                      } ${isTopChartsSelected ? 'opacity-40' : ''}`}
                   >
                     <span>{genreEmoji[genre.id] ?? '🎵'}</span>
                     {genre.label}

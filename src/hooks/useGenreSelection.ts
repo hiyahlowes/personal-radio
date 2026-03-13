@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { ALL_GENRE_IDS } from './useWavlakeTracks';
+import { ALL_GENRE_IDS, TOP_CHARTS_ID } from './useWavlakeTracks';
 
 const STORAGE_KEY = 'pr:selected-genres';
 
@@ -29,16 +29,32 @@ function saveToStorage(ids: string[]): void {
 export function useGenreSelection() {
   const [selectedIds, setSelectedIds] = useState<string[]>(loadFromStorage);
 
+  const isTopCharts = selectedIds.includes(TOP_CHARTS_ID);
+
   const toggle = useCallback((id: string) => {
     setSelectedIds(prev => {
       let next: string[];
-      if (prev.includes(id)) {
-        // Don't allow deselecting the last genre
-        if (prev.length === 1) return prev;
-        next = prev.filter(g => g !== id);
+
+      if (id === TOP_CHARTS_ID) {
+        // Top Charts is exclusive — selecting it clears all genres
+        if (prev.includes(TOP_CHARTS_ID)) {
+          // Already in Top Charts mode — deselect and fall back to all genres
+          next = ALL_GENRE_IDS;
+        } else {
+          next = [TOP_CHARTS_ID];
+        }
       } else {
-        next = [...prev, id];
+        // Selecting a genre always exits Top Charts mode first
+        const withoutTopCharts = prev.filter(g => g !== TOP_CHARTS_ID);
+        if (withoutTopCharts.includes(id)) {
+          // Deselect — but don't allow deselecting the last genre
+          if (withoutTopCharts.length === 1) return prev;
+          next = withoutTopCharts.filter(g => g !== id);
+        } else {
+          next = [...withoutTopCharts, id];
+        }
       }
+
       saveToStorage(next);
       return next;
     });
@@ -49,7 +65,8 @@ export function useGenreSelection() {
     setSelectedIds(ALL_GENRE_IDS);
   }, []);
 
-  const isAllSelected = selectedIds.length === ALL_GENRE_IDS.length;
+  const isAllSelected =
+    !isTopCharts && selectedIds.length === ALL_GENRE_IDS.length;
 
-  return { selectedIds, toggle, selectAll, isAllSelected };
+  return { selectedIds, toggle, selectAll, isAllSelected, isTopCharts };
 }

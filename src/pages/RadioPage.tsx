@@ -10,7 +10,7 @@ import {
   type DraggableProvided,
 } from '@hello-pangea/dnd';
 
-import { useWavlakeTracks, type WavlakeTrack, GENRES } from '@/hooks/useWavlakeTracks';
+import { useWavlakeTracks, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
@@ -118,7 +118,7 @@ export function RadioPage() {
     };
   }, []);
 
-  const { selectedIds, toggle, selectAll, isAllSelected } = useGenreSelection();
+  const { selectedIds, toggle, selectAll, isAllSelected, isTopCharts } = useGenreSelection();
   const { data: tracks = [], isLoading, isError } = useWavlakeTracks(selectedIds);
   const { data: episodes = [] } = usePodcastEpisodes(getStoredFeeds());
   const moderator = useRadioModerator();
@@ -339,13 +339,13 @@ export function RadioPage() {
         console.log('[Loop] greeting + track intro over music');
         await moderatorRef.current.speakGreeting(nameRef.current);
         await sleep(400);
-        await moderatorRef.current.speakTrackIntro(t);
+        await moderatorRef.current.speakTrackIntro(t, t.isTopChart);
       } else if (silentCountRef.current >= silentBudgetRef.current && recentTracksRef.current.length > 0) {
         // Time for a DJ break — review recent tracks and intro this one
         const played = recentTracksRef.current;
         recentTracksRef.current = [];
         console.log('[Loop] moderation — speakReviewAndIntro over music');
-        await moderatorRef.current.speakReviewAndIntro(played, t);
+        await moderatorRef.current.speakReviewAndIntro(played, t, t.isTopChart);
         // Reset the silent counter AFTER speaking so the podcast check below
         // still has access to the accumulated count before we cleared it.
         silentCountRef.current  = 0;
@@ -748,13 +748,23 @@ export function RadioPage() {
                 </div>
               )}
               {(playing && !isModerating) && (
-                <div className={`absolute inset-0 rounded-full blur-xl animate-pulse pointer-events-none ${nowPlaying?.kind === 'podcast' ? 'bg-amber-500/15' : 'bg-purple-600/15'}`} />
+                <div className={`absolute inset-0 rounded-full blur-xl animate-pulse pointer-events-none ${
+                  nowPlaying?.kind === 'podcast'
+                    ? 'bg-amber-500/15'
+                    : nowPlaying?.kind === 'music' && nowPlaying.track.isTopChart
+                      ? 'bg-amber-500/15'
+                      : 'bg-purple-600/15'
+                }`} />
               )}
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
-                <span className={`text-xs font-semibold uppercase tracking-widest ${nowPlaying?.kind === 'podcast' ? 'text-amber-400' : 'text-purple-400'}`}>
-                  {nowPlaying?.kind === 'podcast' ? 'Now Playing · Podcast' : 'Now Playing'}
+                <span className={`text-xs font-semibold uppercase tracking-widest ${nowPlaying?.kind === 'podcast' ? 'text-amber-400' : nowPlaying?.kind === 'music' && nowPlaying.track.isTopChart ? 'text-amber-400' : 'text-purple-400'}`}>
+                  {nowPlaying?.kind === 'podcast'
+                    ? 'Now Playing · Podcast'
+                    : nowPlaying?.kind === 'music' && nowPlaying.track.isTopChart
+                      ? 'Now Playing · Top Charts'
+                      : 'Now Playing'}
                 </span>
                 {nowPlaying?.kind === 'music' && nowPlaying.track && (
                   <a href={`https://wavlake.com/track/${nowPlaying.track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
@@ -776,14 +786,28 @@ export function RadioPage() {
                 <>
                   <h3 className="text-xl font-bold truncate">{nowPlaying.track.name}</h3>
                   <p className="text-white/60 text-sm truncate">{nowPlaying.track.artist}</p>
-                  {nowPlaying.track.albumTitle && <span className="inline-block mt-2 text-xs text-purple-300/70 bg-purple-900/30 border border-purple-700/30 rounded-full px-3 py-0.5">{nowPlaying.track.albumTitle}</span>}
+                  <div className="flex items-center gap-2 mt-2 flex-wrap">
+                    {nowPlaying.track.isTopChart && (
+                      <span className="text-xs text-amber-300 bg-amber-900/30 border border-amber-500/40 rounded-full px-3 py-0.5">⚡ Top Charts</span>
+                    )}
+                    {nowPlaying.track.albumTitle && !nowPlaying.track.isTopChart && (
+                      <span className="text-xs text-purple-300/70 bg-purple-900/30 border border-purple-700/30 rounded-full px-3 py-0.5">{nowPlaying.track.albumTitle}</span>
+                    )}
+                  </div>
                 </>
               ) : track ? (
                 /* Fallback before loop starts */
                 <>
                   <h3 className="text-xl font-bold truncate">{track.name}</h3>
                   <p className="text-white/60 text-sm truncate">{track.artist}</p>
-                  {track.albumTitle && <span className="inline-block mt-2 text-xs text-purple-300/70 bg-purple-900/30 border border-purple-700/30 rounded-full px-3 py-0.5">{track.albumTitle}</span>}
+                  <div className="flex items-center gap-2 mt-2 flex-wrap">
+                    {track.isTopChart && (
+                      <span className="text-xs text-amber-300 bg-amber-900/30 border border-amber-500/40 rounded-full px-3 py-0.5">⚡ Top Charts</span>
+                    )}
+                    {track.albumTitle && !track.isTopChart && (
+                      <span className="text-xs text-purple-300/70 bg-purple-900/30 border border-purple-700/30 rounded-full px-3 py-0.5">{track.albumTitle}</span>
+                    )}
+                  </div>
                 </>
               ) : null}
             </div>
@@ -852,7 +876,7 @@ export function RadioPage() {
         <div className="fade-in-up-delay-3 space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Genres</h3>
-            {!isAllSelected && (
+            {(!isAllSelected && !isTopCharts) && (
               <button
                 onClick={selectAll}
                 className="text-xs text-purple-400 hover:text-purple-300 transition-colors"
@@ -862,8 +886,22 @@ export function RadioPage() {
             )}
           </div>
           <div className="flex flex-wrap gap-2">
+            {/* ⚡ Top Charts — exclusive mode, always shown first */}
+            <button
+              onClick={() => toggle(TOP_CHARTS_ID)}
+              aria-pressed={isTopCharts}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide border transition-all duration-150 select-none
+                ${isTopCharts
+                  ? 'bg-amber-500/25 border-amber-400/70 text-amber-200 shadow-sm shadow-amber-900/40'
+                  : 'bg-white/5 border-white/10 text-white/40 hover:border-amber-500/40 hover:text-amber-300/70'
+                }`}
+            >
+              ⚡ Top Charts
+            </button>
+
+            {/* Standard genre pills */}
             {GENRES.map(genre => {
-              const active = selectedIds.includes(genre.id);
+              const active = !isTopCharts && selectedIds.includes(genre.id);
               return (
                 <button
                   key={genre.id}
@@ -873,7 +911,7 @@ export function RadioPage() {
                     ${active
                       ? 'bg-purple-600/30 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
                       : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
-                    }`}
+                    } ${isTopCharts ? 'opacity-40' : ''}`}
                 >
                   {genre.label}
                 </button>
@@ -946,8 +984,12 @@ export function RadioPage() {
           {/* Playlist (draggable) */}
           <div className="fade-in-up-delay-3 space-y-3">
             <div className="flex items-center justify-between px-1">
-              <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Playlist</h3>
-              <span className="text-xs text-purple-400">{isLoading ? '…' : `${orderedTracks.length || tracks.length} tracks`}</span>
+              <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">
+                {isTopCharts ? '⚡ Top Charts' : 'Playlist'}
+              </h3>
+              <span className={`text-xs ${isTopCharts ? 'text-amber-400' : 'text-purple-400'}`}>
+                {isLoading ? '…' : isTopCharts ? `Top ${orderedTracks.length || tracks.length}` : `${orderedTracks.length || tracks.length} tracks`}
+              </span>
             </div>
             <div className="glass-card rounded-2xl">
               {isLoading ? (
@@ -1011,7 +1053,12 @@ export function RadioPage() {
 
                                {/* Info */}
                                <button onClick={() => handleSelect(i)} className="flex-1 min-w-0 text-left">
-                                 <p className={`text-sm font-medium truncate ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>{t.name}</p>
+                                 <p className={`text-sm font-medium truncate flex items-center gap-1.5 ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>
+                                   {t.isTopChart && (
+                                     <span className="flex-shrink-0 text-amber-400 text-xs" title="Top Charts — Lightning-boosted hit">⚡</span>
+                                   )}
+                                   <span className="truncate">{t.name}</span>
+                                 </p>
                                  <p className="text-xs text-white/40 truncate">{t.artist}</p>
                                </button>
 

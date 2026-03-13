@@ -148,13 +148,19 @@ export function useRadioModerator() {
   /**
    * Introduce a track before it plays.
    * Called whenever the current track changes and music is about to start.
+   * @param isTopChart  When true, the Claude prompt includes Lightning chart context.
    */
   const speakTrackIntro = useCallback(
-    async (track: WavlakeTrack): Promise<void> => {
+    async (track: WavlakeTrack, isTopChart = false): Promise<void> => {
+      const chartContext = isTopChart
+        ? `This track is one of the top-earning songs on Wavlake, ranked by Bitcoin Lightning tips from listeners. Mention this naturally — something like it's a listener favourite or topping the Lightning charts. `
+        : '';
+
       const prompt =
         `Introduce the next song on air. ` +
         `Song title: "${track.name}". Artist: "${track.artist}". ` +
         `Album: "${track.albumTitle || 'their latest work'}". ` +
+        chartContext +
         `Sound like a natural radio DJ handing off to the track. Keep it to 1–2 sentences. ` +
         `Don't say "here's" at the start — vary your phrasing.`;
 
@@ -166,17 +172,23 @@ export function useRadioModerator() {
   /**
    * Comment on one or two tracks that just played, then introduce the next one.
    * Called after 1–2 silent tracks as a natural mid-set break.
+   * @param isNextTopChart  When true, the Claude prompt includes Lightning chart context for the next track.
    */
   const speakReviewAndIntro = useCallback(
-    async (played: WavlakeTrack[], next: WavlakeTrack): Promise<void> => {
+    async (played: WavlakeTrack[], next: WavlakeTrack, isNextTopChart = false): Promise<void> => {
       const playedList = played
         .map(t => `"${t.name}" by ${t.artist}`)
         .join(' and then ');
+
+      const chartContext = isNextTopChart
+        ? `The next track is one of the top-earning songs on Wavlake, ranked by Bitcoin Lightning tips from listeners. Work that in naturally. `
+        : '';
 
       const prompt =
         `You just played ${playedList} on air without commentary. ` +
         `Give a brief, warm reaction to that music — one sentence. ` +
         `Then introduce the next track: "${next.name}" by ${next.artist}. ` +
+        chartContext +
         `Keep the whole thing to 2–3 sentences. Sound like a natural radio DJ, not a robot.`;
 
       const fallback = played.length > 1

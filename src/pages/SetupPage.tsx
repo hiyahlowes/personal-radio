@@ -13,7 +13,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { GENRES, ALL_GENRE_IDS } from '@/hooks/useWavlakeTracks';
+import { GENRES, ALL_GENRE_IDS, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import {
   getStoredFeeds,
   setStoredFeeds,
@@ -105,10 +105,18 @@ export function SetupPage() {
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   const toggleGenre = (id: string) => {
-    setSelectedGenres(prev =>
-      prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id]
-    );
+    setSelectedGenres(prev => {
+      if (id === TOP_CHARTS_ID) {
+        // Exclusive toggle — clears genres when selected, falls back to empty when deselected
+        return prev.includes(TOP_CHARTS_ID) ? [] : [TOP_CHARTS_ID];
+      }
+      // Any genre click exits Top Charts mode
+      const withoutTop = prev.filter(g => g !== TOP_CHARTS_ID);
+      return withoutTop.includes(id) ? withoutTop.filter(g => g !== id) : [...withoutTop, id];
+    });
   };
+
+  const isTopChartsSelected = selectedGenres.includes(TOP_CHARTS_ID);
 
   const addPodcast = (feed: PodcastIndexFeed) => {
     if (addedFeeds.find(f => f.url === feed.url)) return;
@@ -269,8 +277,31 @@ export function SetupPage() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
+                {/* ⚡ Top Charts — spans full width, always first */}
+                <button
+                  onClick={() => toggleGenre(TOP_CHARTS_ID)}
+                  aria-pressed={isTopChartsSelected}
+                  className={`col-span-2 flex items-center gap-3 px-4 py-3.5 rounded-xl border-2 transition-all duration-150 text-left
+                    ${isTopChartsSelected
+                      ? 'bg-amber-500/20 border-amber-400/70 text-white shadow-sm shadow-amber-900/40'
+                      : 'bg-white/5 border-white/10 text-white/50 hover:border-amber-500/40 hover:text-amber-200/80 hover:bg-amber-900/10'
+                    }`}
+                >
+                  <span className="text-xl select-none">⚡</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-sm font-semibold block">Top Charts</span>
+                    <span className="text-xs text-white/40">Wavlake Top 40 — ranked by Lightning tips</span>
+                  </div>
+                  {isTopChartsSelected && (
+                    <svg className="w-4 h-4 ml-auto text-amber-400 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                    </svg>
+                  )}
+                </button>
+
+                {/* Standard genre cards */}
                 {GENRES.map(genre => {
-                  const active = selectedGenres.includes(genre.id);
+                  const active = !isTopChartsSelected && selectedGenres.includes(genre.id);
                   const emoji = genreEmoji[genre.id] ?? '🎵';
                   return (
                     <button
@@ -281,7 +312,7 @@ export function SetupPage() {
                         ${active
                           ? 'bg-purple-600/25 border-purple-500/70 text-white shadow-sm shadow-purple-900/40'
                           : 'bg-white/5 border-white/10 text-white/50 hover:border-white/25 hover:text-white/70 hover:bg-white/8'
-                        }`}
+                        } ${isTopChartsSelected ? 'opacity-40' : ''}`}
                     >
                       <span className="text-xl select-none">{emoji}</span>
                       <span className="text-sm font-semibold">{genre.label}</span>
@@ -297,10 +328,15 @@ export function SetupPage() {
 
               {selectedGenres.length === 0 && (
                 <p className="text-xs text-amber-400/80 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2 text-center">
-                  Select at least one genre to continue
+                  Select Top Charts or at least one genre to continue
                 </p>
               )}
-              {selectedGenres.length > 0 && (
+              {isTopChartsSelected && (
+                <p className="text-xs text-amber-300/70 text-center">
+                  ⚡ Top 40 — listener-ranked hits on Wavlake
+                </p>
+              )}
+              {!isTopChartsSelected && selectedGenres.length > 0 && (
                 <p className="text-xs text-purple-300/70 text-center">
                   {selectedGenres.length} genre{selectedGenres.length !== 1 ? 's' : ''} selected
                 </p>
