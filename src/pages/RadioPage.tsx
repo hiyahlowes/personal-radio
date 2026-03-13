@@ -488,9 +488,13 @@ export function RadioPage() {
   // ducking fade-back ramp started above is not immediately cancelled.
   useEffect(() => {
     const audio = audioRef.current;
+    const pod   = podAudioRef.current;
     if (!audio || moderator.isSpeaking) return;
     cancelRampRef.current?.();
-    audio.volume = muted ? 0 : volume;
+    const target = muted ? 0 : volume;
+    audio.volume = target;
+    // Apply to podcast element too — keeps slider in sync when a podcast is playing
+    if (pod) pod.volume = target;
     // nextAudio: only force-mute if the user mutes; otherwise let the crossfade
     // ramp manage it (so we don't cancel a crossfade-in mid-flight).
     if (muted && nextAudioRef.current) {
@@ -656,6 +660,11 @@ export function RadioPage() {
         const onTimeUpdate = () => {
           if (loopGenRef.current !== myGen) return;
           if (crossfadeStarted) return;
+          // Never start a crossfade while the moderator is speaking or generating —
+          // music is ducked and fading in the next track would be inaudible/jarring.
+          // onTimeUpdate fires every ~250ms so when speech ends the crossfade will
+          // start on the very next tick (provided we're still in the window).
+          if (moderatorRef.current.isSpeaking || moderatorRef.current.isGenerating) return;
           const dur = audio.duration;
           const ct  = audio.currentTime;
           // Only crossfade if: duration is known, track is longer than 2× crossfade,
@@ -1487,9 +1496,27 @@ export function RadioPage() {
               <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">
                 {isTopCharts ? '⚡ Top Charts' : 'Playlist'}
               </h3>
-              <span className={`text-xs ${isTopCharts ? 'text-amber-400' : 'text-purple-400'}`}>
-                {isLoading ? '…' : isTopCharts ? `Top ${orderedTracks.length || tracks.length}` : `${orderedTracks.length || tracks.length} tracks`}
-              </span>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setOrderedTracks(prev => {
+                    const shuffled = fisherYates([...prev]);
+                    tracksRef.current = shuffled;
+                    return shuffled;
+                  })}
+                  disabled={isLoading || orderedTracks.length === 0}
+                  aria-label="Shuffle playlist"
+                  title="Shuffle"
+                  className="text-white/30 hover:text-purple-400 transition-colors disabled:opacity-20"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
+                    <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/>
+                  </svg>
+                </button>
+                <span className={`text-xs ${isTopCharts ? 'text-amber-400' : 'text-purple-400'}`}>
+                  {isLoading ? '…' : isTopCharts ? `Top ${orderedTracks.length || tracks.length}` : `${orderedTracks.length || tracks.length} tracks`}
+                </span>
+              </div>
             </div>
             <div className="glass-card rounded-2xl">
               {isLoading ? (
