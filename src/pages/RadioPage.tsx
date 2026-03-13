@@ -16,6 +16,7 @@ import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
+import { usePodcastHistory } from '@/hooks/usePodcastHistory';
 import { useRadioContext } from '@/contexts/RadioContext';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getStoredName } from '@/pages/SetupPage';
@@ -61,6 +62,33 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 function fmt(s: number) {
   if (!isFinite(s) || s < 0) return '0:00';
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+}
+
+// ─── Queue persistence ────────────────────────────────────────────────────────
+const QUEUE_TRACKS_KEY   = 'pr:queue-tracks';
+const QUEUE_EPISODES_KEY = 'pr:queue-episodes';
+const QUEUE_IDX_KEY      = 'pr:queue-idx';
+
+function saveQueue(tracks: WavlakeTrack[], episodes: PodcastEpisode[], idx: number) {
+  try {
+    localStorage.setItem(QUEUE_TRACKS_KEY,   JSON.stringify(tracks));
+    localStorage.setItem(QUEUE_EPISODES_KEY, JSON.stringify(episodes));
+    localStorage.setItem(QUEUE_IDX_KEY,      String(idx));
+  } catch { /* quota exceeded — ignore */ }
+}
+
+function loadQueue(): { tracks: WavlakeTrack[]; episodes: PodcastEpisode[]; idx: number } {
+  try {
+    const t  = localStorage.getItem(QUEUE_TRACKS_KEY);
+    const e  = localStorage.getItem(QUEUE_EPISODES_KEY);
+    const i  = localStorage.getItem(QUEUE_IDX_KEY);
+    const tracks   = t ? (JSON.parse(t) as WavlakeTrack[])   : [];
+    const episodes = e ? (JSON.parse(e) as PodcastEpisode[]) : [];
+    const idx      = i ? Math.max(0, parseInt(i, 10))         : 0;
+    return { tracks: Array.isArray(tracks) ? tracks : [], episodes: Array.isArray(episodes) ? episodes : [], idx };
+  } catch {
+    return { tracks: [], episodes: [], idx: 0 };
+  }
 }
 
 // ─── Portal-aware drag clone helper ──────────────────────────────────────────
@@ -148,7 +176,8 @@ export function RadioPage() {
   } = usePodcastEpisodes(storedFeeds);
 
   const moderator = useRadioModerator();
-  const likedTracks = useLikedTracks();
+  const likedTracks    = useLikedTracks();
+  const podcastHistory = usePodcastHistory();
 
   // ── UI state ──────────────────────────────────────────────────────────────
   const [idx, setIdx]         = useState(0);
@@ -160,8 +189,10 @@ export function RadioPage() {
   const [muted, setMuted]     = useState(false);
 
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
-  const [orderedTracks, setOrderedTracks] = useState<WavlakeTrack[]>([]);
-  const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>([]);
+  // Initialise from persisted queue so content appears instantly on page return,
+  // before the Wavlake / RSS queries resolve. API data overwrites these on load.
+  const [orderedTracks, setOrderedTracks] = useState<WavlakeTrack[]>(() => loadQueue().tracks);
+  const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>(() => loadQueue().episodes);
 
   // ── Episode management panel ──────────────────────────────────────────────
   const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
@@ -199,12 +230,19 @@ export function RadioPage() {
   const nameRef          = useRef(name);
   const volumeRef        = useRef(0.9);
   const mutedRef         = useRef(false);
+  // Set to true by jumpTo() so the next loop iteration knows to say a brief
+  // "skipping ahead" line instead of the full track intro sequence.
+  const skipRef          = useRef(false);
+  // Ref-stable callback used inside advanceLoop (stable closure) to mark
+  // episodes as played without adding podcastHistory to its dependency array.
+  const markPlayedRef    = useRef<(id: string) => void>(() => {});
 
   // Sync refs to latest state/props
-  useEffect(() => { moderatorRef.current = moderator; }, [moderator]);
-  useEffect(() => { nameRef.current      = name;      }, [name]);
-  useEffect(() => { volumeRef.current    = volume;    }, [volume]);
-  useEffect(() => { mutedRef.current     = muted;     }, [muted]);
+  useEffect(() => { moderatorRef.current  = moderator;                   }, [moderator]);
+  useEffect(() => { nameRef.current       = name;                        }, [name]);
+  useEffect(() => { volumeRef.current     = volume;                      }, [volume]);
+  useEffect(() => { mutedRef.current      = muted;                       }, [muted]);
+  useEffect(() => { markPlayedRef.current = podcastHistory.markPlayed;   }, [podcastHistory.markPlayed]);
 
   // Seed ordered arrays when fresh data arrives from the query.
   // Apply liked-track 2x weighting immediately on seed. If the genre
@@ -230,18 +268,48 @@ export function RadioPage() {
   }, [likedTracks.liked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (episodes.length > 0) setOrderedEpisodes(episodes);
-  }, [episodes]);
+    if (episodes.length > 0) {
+      // Filter out already-played episodes so the queue always feels fresh.
+      // If all episodes have been played (e.g. only one feed), show them all
+      // again rather than an empty queue.
+      const fresh = episodes.filter(ep => !podcastHistory.hasPlayed(ep.id));
+      setOrderedEpisodes(fresh.length > 0 ? fresh : episodes);
+    }
+  }, [episodes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep refs in sync with ordered arrays (so the loop reads the user's order).
   // These are the authoritative refs used by advanceLoop.
   useEffect(() => { tracksRef.current   = orderedTracks;   }, [orderedTracks]);
   useEffect(() => { episodesRef.current = orderedEpisodes; }, [orderedEpisodes]);
 
+  // Persist queue to localStorage whenever the ordered lists or current index
+  // change. This lets us restore the queue instantly on page return without
+  // waiting for the API to resolve again.
+  useEffect(() => {
+    if (orderedTracks.length > 0) {
+      saveQueue(orderedTracks, orderedEpisodes, idxRef.current);
+    }
+  }, [orderedTracks, orderedEpisodes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Also persist the index whenever it changes (idx state mirrors idxRef).
+  useEffect(() => {
+    if (orderedTracks.length > 0) {
+      saveQueue(orderedTracks, orderedEpisodes, idx);
+    }
+  }, [idx]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // On mount: sync local idx state from the persistent idxRef so the playlist
   // highlight is correct when returning from Settings while audio plays.
+  // Also restore the persisted queue index when the radio hasn't started yet
+  // (greetedRef false = first visit or after a hard refresh).
   useEffect(() => {
-    setIdx(idxRef.current);
+    if (!greetedRef.current) {
+      const { idx: savedIdx } = loadQueue();
+      idxRef.current = savedIdx;
+      setIdx(savedIdx);
+    } else {
+      setIdx(idxRef.current);
+    }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Wire UI state listeners to the persistent audio elements ─────────────
@@ -293,9 +361,16 @@ export function RadioPage() {
     // Also unconditional — always forward time/duration from pod.
     // The old nowPlayingRef guard caused durationchange + timeupdate to be
     // dropped when they fired before setNowPlaying('podcast') was called.
-    const onPodTime  = () => setCT(pod.currentTime);
-    const onPodDur   = () => setDur(isFinite(pod.duration) ? pod.duration : 0);
-    const onPodMeta  = () => setDur(isFinite(pod.duration) ? pod.duration : 0);
+    const onPodTime  = () => {
+      console.log(`[Podcast] timeupdate ct=${pod.currentTime.toFixed(1)} dur=${pod.duration}`);
+      setCT(pod.currentTime);
+      // When the browser streams a podcast, duration may be Infinity or NaN
+      // until enough data is buffered. Update it opportunistically here so
+      // the seek bar fills in as soon as the browser knows the duration.
+      if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration);
+    };
+    const onPodDur   = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
+    const onPodMeta  = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
     const onPodPlay  = () => { console.log('[Podcast] play'); setPlaying(true);  setBuf(false); };
     const onPodPause = () => { console.log('[Podcast] pause'); setPlaying(false); };
     const onPodWait  = () => setBuf(true);
@@ -452,7 +527,12 @@ export function RadioPage() {
 
       // 2. Speak over the playing music; when isSpeaking flips false the
       //    ducking useEffect automatically fades volume back to target.
-      if (!greetedRef.current) {
+      if (skipRef.current) {
+        // User just skipped — say a brief "skipping ahead" line then carry on.
+        skipRef.current = false;
+        console.log('[Loop] skip transition — speakSkipTransition');
+        await moderatorRef.current.speakSkipTransition(t);
+      } else if (!greetedRef.current) {
         greetedRef.current = true;
         console.log('[Loop] greeting + track intro over music');
         await moderatorRef.current.speakGreeting(nameRef.current);
@@ -772,6 +852,13 @@ export function RadioPage() {
             pod.pause();
             pod.src = '';
 
+            // Mark this episode as played so it won't re-appear in the queue
+            // on next refresh (unless all episodes have been played).
+            markPlayedRef.current(episode.id);
+
+            // Also remove it from orderedEpisodes state so the UI updates.
+            setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
+
             // ── Outro: bridge back to music ───────────────────────────────
             if (runningRef.current && nextMusicTrack) {
               await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
@@ -821,24 +908,44 @@ export function RadioPage() {
     audioRef.current?.pause();
   }, []);
 
-  const jumpTo = useCallback((newIdx: number) => {
-    console.log('[JumpTo]', newIdx);
+  const jumpTo = useCallback((newIdx: number, userSkipped = false) => {
+    console.log('[JumpTo]', newIdx, userSkipped ? '(user skip)' : '');
     const wasRunning = runningRef.current;
-    runningRef.current = false;            // break the loop's pause listener
-    audioRef.current?.pause();             // fires 'pause' → resolves inner promise
+
+    // Stop the loop and interrupt any in-progress speech immediately.
+    // moderator.stop() aborts the ElevenLabs fetch/playback so the awaited
+    // speakXxx() promises resolve right away rather than after the full clip.
+    runningRef.current = false;
+    moderatorRef.current.stop();
+
+    // Stop both audio elements so no stale 'pause' event lingers on the wrong
+    // element (e.g. podcast playing while we skip music).
+    audioRef.current?.pause();
+    podAudioRef.current?.pause();
+    if (podAudioRef.current) podAudioRef.current.src = '';
+
     idxRef.current = newIdx;
     setIdx(newIdx);
+
+    // Flag the next loop iteration to emit a skip-aware intro instead of the
+    // normal greeting/review sequence. Only set when the user explicitly skips.
+    if (userSkipped && wasRunning) {
+      skipRef.current = true;
+    }
+
     if (wasRunning) {
+      // Brief delay so the 'pause' event from audio.pause() fires and clears
+      // any lingering inner-promise listeners before we restart the loop.
       setTimeout(() => {
         runningRef.current = true;
         advanceLoop();
       }, 150);
     }
-  }, [advanceLoop]);
+  }, [advanceLoop]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handlePrev   = useCallback(() => jumpTo((idxRef.current - 1 + tracksRef.current.length) % tracksRef.current.length), [jumpTo]);
-  const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length), [jumpTo]);
-  const handleSelect = useCallback((i: number) => jumpTo(i), [jumpTo]);
+  const handlePrev   = useCallback(() => jumpTo((idxRef.current - 1 + tracksRef.current.length) % tracksRef.current.length, true), [jumpTo]);
+  const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length, true), [jumpTo]);
+  const handleSelect = useCallback((i: number) => jumpTo(i, false), [jumpTo]);
 
   // ── Drag-and-drop handlers ─────────────────────────────────────────────────
   const handleDragEnd = useCallback((result: DropResult) => {
@@ -893,8 +1000,16 @@ export function RadioPage() {
 
   // ── Derived UI ────────────────────────────────────────────────────────────
   // Use orderedTracks so the displayed track matches what the loop is playing
-  const track        = (orderedTracks.length > 0 ? orderedTracks : tracks)[idx];
-  const pct          = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const track = (orderedTracks.length > 0 ? orderedTracks : tracks)[idx];
+  // For streaming podcasts duration may be 0/Infinity even while playing.
+  // Fall through to the RSS episode.duration as a best-effort estimate.
+  const effectiveDuration =
+    duration > 0 && isFinite(duration)
+      ? duration
+      : nowPlaying?.kind === 'podcast'
+        ? (nowPlaying.episode.duration || 0)
+        : (track?.duration || 0);
+  const pct = effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
   const isModerating = moderator.isSpeaking || moderator.isGenerating;
   const statusLabel  = moderator.isGenerating ? 'WRITING' : moderator.isSpeaking ? 'ON AIR' : buffering ? 'BUFFERING' : playing ? 'LIVE' : 'PAUSED';
   const statusColor  = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
@@ -1061,7 +1176,7 @@ export function RadioPage() {
             </div>
             <div className="flex justify-between mt-1.5 text-xs text-white/30">
               <span>{fmt(currentTime)}</span>
-              <span>{fmt(duration || track?.duration || 0)}</span>
+              <span>{effectiveDuration > 0 ? fmt(effectiveDuration) : '—'}</span>
             </div>
           </div>
 

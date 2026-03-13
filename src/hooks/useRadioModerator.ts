@@ -352,6 +352,36 @@ export function useRadioModerator() {
     [buildAndSpeak]
   );
 
+  /**
+   * Brief "skipping ahead" line spoken after the user presses ⏭ while the
+   * moderator was speaking. Interrupts gracefully and introduces the next item.
+   */
+  const speakSkipTransition = useCallback(
+    async (next: WavlakeTrack | PodcastEpisode): Promise<void> => {
+      let nextLabel: string;
+      if ('name' in next) {
+        nextLabel = `${next.artist} with ${cleanTrackTitle(next.name)}`;
+      } else {
+        nextLabel = next.feedTitle;
+      }
+      const prompts = [
+        `Skipping ahead — here's ${nextLabel}.`,
+        `Sure, let's move on. Here's ${nextLabel}.`,
+        `Alright, jumping to ${nextLabel}.`,
+        `Moving right along — ${nextLabel} is up.`,
+      ];
+      const fallback = prompts[Math.floor(Math.random() * prompts.length)];
+      const aiScript = await generateScript(
+        `You are a radio host. The listener just skipped the current track. ` +
+        `Say something very brief (one short sentence) acknowledging the skip ` +
+        `and introducing the next item: ${nextLabel}. ` +
+        `Sound natural and unbothered, not apologetic. No stage directions.`,
+      );
+      await sayScript(aiScript ?? fallback);
+    },
+    [sayScript],
+  );
+
   return {
     speakGreeting,
     speakTrackIntro,
@@ -361,6 +391,7 @@ export function useRadioModerator() {
     speakPodcastTransition,
     speakPodcastSegmentCommentary,
     speakPodcastReturn,
+    speakSkipTransition,
     stop,
     isSpeaking,
     isGenerating,

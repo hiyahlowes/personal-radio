@@ -13,6 +13,7 @@ import {
 } from '@/hooks/usePodcastIndex';
 import { GENRES, ALL_GENRE_IDS, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
+import { usePodcastHistory } from '@/hooks/usePodcastHistory';
 import {
   getStoredName,
   setStoredName,
@@ -163,6 +164,15 @@ export function SettingsPage() {
 
   // ── Liked tracks ───────────────────────────────────────────────────────────
   const { liked, unlike } = useLikedTracks();
+
+  // ── Podcast history ────────────────────────────────────────────────────────
+  const { played: playedEpisodes, clearHistory } = usePodcastHistory();
+  const [historyClearedMsg, setHistoryClearedMsg] = useState(false);
+  const handleClearHistory = () => {
+    clearHistory();
+    setHistoryClearedMsg(true);
+    setTimeout(() => setHistoryClearedMsg(false), 2000);
+  };
 
   return (
     <div className="min-h-screen gradient-bg text-white">
@@ -420,6 +430,27 @@ export function SettingsPage() {
             <div className="pt-2 border-t border-white/5">
               <PasteUrlForm feeds={feeds} onAdd={addFeedByUrl} error={error} setError={setError} />
             </div>
+          </div>
+        </section>
+
+        {/* ── Podcast History ─────────────────────────────────────────────── */}
+        <section className="fade-in-up-delay-2">
+          <div className="glass-card rounded-2xl p-5 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-white">Podcast history</p>
+              <p className="text-xs text-white/40 mt-0.5">
+                {playedEpisodes.size === 0
+                  ? 'No episodes played yet'
+                  : `${playedEpisodes.size} episode${playedEpisodes.size !== 1 ? 's' : ''} played — these are skipped when rebuilding the queue`}
+              </p>
+            </div>
+            <button
+              onClick={handleClearHistory}
+              disabled={playedEpisodes.size === 0}
+              className="flex-shrink-0 px-4 py-2 rounded-xl text-sm font-semibold text-white/60 border border-white/15 hover:border-amber-500/40 hover:text-amber-300 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              {historyClearedMsg ? '✓ Cleared' : 'Clear history'}
+            </button>
           </div>
         </section>
 
