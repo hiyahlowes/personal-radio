@@ -33,10 +33,10 @@ interface WavlakeSearchResponse {
   data: WavlakeSearchResult[];
 }
 
-// Shape returned by the /top endpoint (different from /search)
-interface WavlakeTopTrack {
+// Shape returned by the /v1/tracks/:id endpoint
+interface WavlakeTrackDetail {
   id: string;
-  title: string;          // note: "title" not "name" on this endpoint
+  title: string;
   artist: string;
   artistId?: string;
   albumTitle?: string;
@@ -44,8 +44,8 @@ interface WavlakeTopTrack {
   artworkUrl: string;
   avatarUrl?: string;
   liveUrl: string;
-  duration: number;       // seconds
-  msat_total?: number;    // total Lightning sats earned (msats)
+  duration: number;
+  msatTotal?: string;
 }
 
 const WAVLAKE_BASE = 'https://catalog.wavlake.com/v1';
@@ -111,24 +111,80 @@ async function fetchTracksForQuery(query: string): Promise<WavlakeTrack[]> {
     }));
 }
 
-/** Fetch the Wavlake Top 40 — tracks ranked by Lightning tips from listeners. */
+/**
+ * Current Wavlake Top 40 track IDs (ranked by Lightning sats from listeners).
+ *
+ * The Wavlake catalog API has no public /top or /charts endpoint — the Top 40
+ * page is server-side rendered. We fetch each track individually via
+ * /v1/tracks/:id, which is stable and always returns current metadata.
+ *
+ * Source: https://wavlake.com/top (fetched 2026-03-13)
+ */
+const TOP_40_IDS: string[] = [
+  '4d3443ba-4ec9-41a7-bf0a-78dc35896aa4', // 1  Backseat Driver — Joe Martin
+  '1b4df345-2f99-425d-9ed4-23102bbce147', // 2  Under These Lights (Acoustic) — Corey Keller
+  '1c500b27-d0c0-4e67-abb9-c0eecda5af53', // 3  An immaculate conception — EasyWiz
+  '47aab0a2-1cc0-46ac-b569-053dc90ee286', // 4  Tick Tock Next Block — Nope
+  'dac15380-8384-4b8d-9074-ff06c99f6813', // 5  crash+burn — IROH
+  '8fe63588-86f4-4ac8-aff4-4c9e0b88a164', // 6  Build on Stone — Haleen
+  '565c5057-4809-4e75-a4e7-faf6daa08e58', // 7  In Between — Ollie
+  'e33d0f0b-76ed-493e-9801-433e7649d2d0', // 8  Most Amazing — WILLPOWER
+  'ecad286b-e9d0-485e-b63c-28b9caebaeb0', // 9  Night Street — EpochNative
+  'ab1af6c6-8ff5-4317-8497-9699341f30de', // 10 Feuer über Fiat — PlebRap
+  '8df3f2f2-998a-4f8a-acef-650aa3eee538', // 11 Das Geldsystem ist krank — PlebRap
+  '8dd2d1a8-1658-49e2-a74a-e720e252b080', // 12 Abyssal — EpochNative
+  '06335d63-0667-4bd8-8a20-636434d1d379', // 13 Eternal Drift — EpochNative
+  'a76b684b-994a-4eba-8f5f-eccddd473ced', // 14 Too Bit To Fail - Moon Ätherisierung — PlebRap
+  '4e6eb303-ce33-416d-afea-e10291b03901', // 15 Behind Me — EpochNative
+  'a27e6d74-f53a-4eca-acb4-aa20ad97e0dd', // 16 Closer To Somewhere — The Retrograde
+  '5c33d104-67fb-4750-9dd6-5a66974860ba', // 17 Plebs together strong — PlebRap
+  'db8c251d-5982-448c-b30d-8194d7021791', // 18 Too Bit To Fail - SHA 'o' lin — PlebRap
+  'b5735454-89f6-4860-946a-9b86bd1d2188', // 19 Bubble Trouble — PlebRap
+  'a6094897-0a5c-49e3-b72b-08ba6bcb4f4d', // 20 Bank gegen Node — PlebRap
+  '16b656a7-265f-4536-b2ac-3984efb434ce', // 21 The Block (Time, Energy, Sats) — Richard
+  'a1cd3b2f-de89-4707-9c42-8aa8eaedac74', // 22 BLUE — EpochNative
+  'fcf66b3a-dbfa-467c-9e0d-7ed9a77e36ee', // 23 Exit — Richard
+  '87cc1e14-943c-4358-9ede-fdf1b4bb2645', // 24 Live While I'm Alive — Abel James
+  '7b7649ba-e89f-4104-ab03-d83b8a275760', // 25 Validate — Richard
+  'd71c3470-ef7a-40aa-8608-d7466b55d083', // 26 One Dead Ember — Johnny Delagrange
+  '35e81e15-6820-4f83-9a3d-4ef2cf0da14b', // 27 Endless Deja Vu — My Friend Jimi
+  'e5b11284-4634-4a77-a0da-e3f59dd09a6b', // 28 UTXO (The Transaction) — Richard
+  '4d5bcf57-b3c5-426d-a92d-9ae192b99425', // 29 Timekeeper — Richard
+  'a742ad2b-7da7-4e35-a040-6d4db56980da', // 30 I'm Still Here — Longy
+  '3c4ab272-067d-4700-8346-5c3e14a20869', // 31 Just One More Time — Oliver Prentice
+  '4b985617-6e41-47aa-b540-ecca8b693eb7', // 32 A Phoenix Rising — Haleen
+  'b60e20d6-90f8-4620-8467-bb92167f77d8', // 33 Layer One — Richard
+  '4cf55d52-d203-44e7-a1f9-7cf637bf99f8', // 34 The Nakamotor ft. Guywithafork — Richard
+  '9c369389-8f84-4231-91fb-4132a3944297', // 35 Azul Verde Plasma — Yoshiro Mare
+  '9f0405f3-f9f6-4f8b-b1de-053308c47c47', // 36 Futile — Look Ma, No Cavities!
+  'e5868269-6e62-45b2-8efd-4be67ca618f7', // 37 Transistors — Texas 121
+  'ab30278f-b165-408d-aba2-0514f9045c80', // 38 nameless — Hurling Pixels
+  '757bff9e-f93d-4da3-842b-186cab437c02', // 39 Sunny Day — Oliver Prentice
+  '7ffbd332-661f-44e7-a089-a58ea6183e97', // 40 Houses in the Heart — EpochNative
+];
+
+/** Fetch the Wavlake Top 40 by resolving each track via /v1/tracks/:id */
 export async function fetchTopTracks(limit = 40): Promise<WavlakeTrack[]> {
-  const res = await fetch(`${WAVLAKE_BASE}/top?limit=${limit}`);
-  if (!res.ok) throw new Error(`Wavlake Top Charts fetch failed: ${res.status}`);
+  const ids = TOP_40_IDS.slice(0, limit);
 
-  const data: WavlakeTopTrack[] = await res.json();
+  const results = await Promise.allSettled(
+    ids.map(id => fetch(`${WAVLAKE_BASE}/tracks/${id}`).then(r => r.json()))
+  );
 
-  return data
-    .filter(
-      (t) =>
-        typeof t.liveUrl === 'string' &&
-        t.liveUrl.length > 0 &&
-        typeof t.duration === 'number' &&
-        t.duration <= 300, // same 5-minute cap as genre search
-    )
-    .map((t) => ({
+  const tracks: WavlakeTrack[] = [];
+  for (const result of results) {
+    if (result.status !== 'fulfilled') continue;
+    const t: WavlakeTrackDetail = result.value?.data;
+    if (
+      !t ||
+      typeof t.liveUrl !== 'string' ||
+      !t.liveUrl ||
+      typeof t.duration !== 'number'
+    ) continue;
+
+    tracks.push({
       id: t.id,
-      name: t.title,          // /top uses "title" instead of "name"
+      name: t.title,
       artist: t.artist,
       artistId: t.artistId ?? '',
       albumTitle: t.albumTitle ?? '',
@@ -137,8 +193,11 @@ export async function fetchTopTracks(limit = 40): Promise<WavlakeTrack[]> {
       avatarUrl: t.avatarUrl ?? '',
       liveUrl: t.liveUrl,
       duration: t.duration,
-      isTopChart: true,       // mark every track from this endpoint
-    }));
+      isTopChart: true,
+    });
+  }
+
+  return tracks;
 }
 
 /** Deduplicate tracks by ID and shuffle */
