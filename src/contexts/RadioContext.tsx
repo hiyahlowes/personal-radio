@@ -45,8 +45,10 @@ export interface RadioItemPodcast {
 export type RadioItem = RadioItemMusic | RadioItemPodcast;
 
 export interface RadioContextValue {
-  /** Main music <audio> element. NO crossOrigin — Wavlake CDN has no CORS. */
+  /** Main music <audio> element (currently playing). NO crossOrigin — Wavlake CDN has no CORS. */
   audioRef: React.RefObject<HTMLAudioElement | null>;
+  /** Second music <audio> element used for crossfade pre-loading of the next track. */
+  nextAudioRef: React.RefObject<HTMLAudioElement | null>;
   /** Podcast <audio> element. crossOrigin='anonymous' for Web Audio API. */
   podAudioRef: React.RefObject<HTMLAudioElement | null>;
   /** True while the radio loop is running (survives navigations). */
@@ -70,8 +72,9 @@ const RadioContext = createContext<RadioContextValue | null>(null);
 
 export function RadioProvider({ children }: { children: React.ReactNode }) {
   // Audio elements — created once, never destroyed while the app is mounted.
-  const audioRef    = useRef<HTMLAudioElement | null>(null);
-  const podAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef     = useRef<HTMLAudioElement | null>(null);
+  const nextAudioRef = useRef<HTMLAudioElement | null>(null);
+  const podAudioRef  = useRef<HTMLAudioElement | null>(null);
 
   // Persistent loop state
   const runningRef  = useRef(false);
@@ -91,10 +94,16 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
 
   // Create the audio elements exactly once on mount.
   useEffect(() => {
-    // Music audio — NO crossOrigin.
+    // Music audio (current) — NO crossOrigin.
     const audio   = new Audio();
     audio.preload = 'metadata';
     audioRef.current = audio;
+
+    // Music audio (next) — used for crossfade pre-loading. NO crossOrigin.
+    const nextAudio   = new Audio();
+    nextAudio.preload = 'auto'; // eager — we want it buffered before we need it
+    nextAudio.volume  = 0;      // always starts silent
+    nextAudioRef.current = nextAudio;
 
     // Podcast audio — crossOrigin must be set BEFORE src assignment.
     const pod        = new Audio();
@@ -104,13 +113,15 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
 
     // Only pause+clear on full app unmount (practically never in production).
     return () => {
-      audio.pause(); audio.src = '';
-      pod.pause();   pod.src   = '';
+      audio.pause();     audio.src = '';
+      nextAudio.pause(); nextAudio.src = '';
+      pod.pause();       pod.src   = '';
     };
   }, []);
 
   const value: RadioContextValue = {
     audioRef,
+    nextAudioRef,
     podAudioRef,
     runningRef,
     greetedRef,

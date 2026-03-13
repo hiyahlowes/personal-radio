@@ -24,11 +24,12 @@ type RadioItem =
   | { kind: 'music';   track:   WavlakeTrack    }
   | { kind: 'podcast'; episode: PodcastEpisode  };
 
-// ─── Ducking via audio.volume + setInterval ───────────────────────────────────
+// ─── Volume ramping via setInterval ──────────────────────────────────────────
 // Note: Web Audio API MediaElementAudioSourceNode requires CORS headers on the
 // media URL. Wavlake's CDN does not send them, so we use audio.volume directly.
-const DUCK_LEVEL  = 0.08;
-const TICK_MS     = 40;   // ~25 steps/s — smooth enough
+const DUCK_LEVEL     = 0.08;
+const CROSSFADE_SECS = 3;    // seconds before track end to begin crossfade
+const TICK_MS        = 40;   // ~25 steps/s — smooth enough
 
 function rampVolume(
   audio: HTMLAudioElement,
@@ -47,7 +48,7 @@ function rampVolume(
       : Math.max(0, Math.min(1, start + delta * count));
     if (count >= steps) { clearInterval(id); onDone?.(); }
   }, TICK_MS);
-  console.log(`[Duck] rampVolume ${start.toFixed(2)} → ${target.toFixed(2)} over ${durationMs}ms`);
+  console.log(`[Ramp] ${start.toFixed(2)} → ${target.toFixed(2)} over ${durationMs}ms`);
   return () => clearInterval(id);
 }
 
@@ -153,8 +154,13 @@ export function RadioPage() {
   const setNowPlaying = radioCtx.setNowPlaying;
   const nowPlayingRef = radioCtx.nowPlayingRef;
 
-  const cancelRampRef    = useRef<(() => void) | null>(null);
-  const tracksRef        = useRef<WavlakeTrack[]>([]);
+  const nextAudioRef     = radioCtx.nextAudioRef;
+
+  const cancelRampRef     = useRef<(() => void) | null>(null);
+  const cancelNextRampRef = useRef<(() => void) | null>(null);
+  // Set true after a crossfade completes so the loop top skips re-loading audio
+  const crossfadeActiveRef = useRef(false);
+  const tracksRef          = useRef<WavlakeTrack[]>([]);
   const silentCountRef   = useRef(0);
   const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
@@ -287,11 +293,18 @@ export function RadioPage() {
     if (!audio || moderator.isSpeaking) return;
     cancelRampRef.current?.();
     audio.volume = muted ? 0 : volume;
+    // nextAudio: only force-mute if the user mutes; otherwise let the crossfade
+    // ramp manage it (so we don't cancel a crossfade-in mid-flight).
+    if (muted && nextAudioRef.current) {
+      cancelNextRampRef.current?.();
+      nextAudioRef.current.volume = 0;
+    }
   }, [volume, muted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Core loop — stable, reads everything via refs ─────────────────────────
   const advanceLoop = useCallback(async () => {
-    const audio = audioRef.current;
+    const audio     = audioRef.current;
+    const nextAudio = nextAudioRef.current;
     if (!audio) return;
 
     console.log('[Loop] advanceLoop() started, idxRef:', idxRef.current);
@@ -309,25 +322,52 @@ export function RadioPage() {
       console.log(`[Loop] loading track ${currentIdx}: "${t.name}" by ${t.artist}`);
 
       loopGenRef.current++; // invalidate any listeners from the previous iteration
-      audio.pause();
-      audio.src    = t.liveUrl;
-      audio.volume = DUCK_LEVEL; // always start ducked; fade restored after speech
-      audio.load();
-      setCT(0);
-      setDur(t.duration || 0);
-      setIdx(currentIdx);
 
-      // Keep Now Playing showing the current music track
-      nowPlayingRef.current = { kind: 'music', track: t };
-      setNowPlaying({ kind: 'music', track: t });
+      const nextIdx   = (currentIdx + 1) % tracks.length;
+      const nextTrack = tracks[nextIdx];
 
-      try {
-        await audio.play();
-        console.log('[Loop] audio.play() resolved at duck level');
-      } catch (e) {
-        console.error('[Loop] audio.play() failed:', e);
-        runningRef.current = false;
-        break;
+      // ── If a crossfade already handed off this track, audio is playing it ──
+      // Skip the load/play so we don't interrupt the seamless transition.
+      if (crossfadeActiveRef.current) {
+        crossfadeActiveRef.current = false;
+        console.log('[Loop] crossfade handoff — skipping reload, audio already playing');
+        // Sync UI state
+        setCT(audio.currentTime);
+        setDur(audio.duration || t.duration || 0);
+        setIdx(currentIdx);
+        nowPlayingRef.current = { kind: 'music', track: t };
+        setNowPlaying({ kind: 'music', track: t });
+      } else {
+        // Normal load
+        audio.pause();
+        audio.src    = t.liveUrl;
+        audio.volume = DUCK_LEVEL; // always start ducked; speech/crossfade controls volume
+        audio.load();
+        setCT(0);
+        setDur(t.duration || 0);
+        setIdx(currentIdx);
+
+        nowPlayingRef.current = { kind: 'music', track: t };
+        setNowPlaying({ kind: 'music', track: t });
+
+        // Pre-load the next track into nextAudio at volume 0 so it's buffered.
+        // Do this early — before speech — so the browser has time to buffer.
+        if (nextAudio && nextTrack && nextTrack.id !== t.id) {
+          nextAudio.pause();
+          nextAudio.src    = nextTrack.liveUrl;
+          nextAudio.volume = 0;
+          nextAudio.load();
+          console.log(`[Crossfade] pre-loading next: "${nextTrack.name}"`);
+        }
+
+        try {
+          await audio.play();
+          console.log('[Loop] audio.play() resolved at duck level');
+        } catch (e) {
+          console.error('[Loop] audio.play() failed:', e);
+          runningRef.current = false;
+          break;
+        }
       }
 
       if (!runningRef.current) break;
@@ -360,45 +400,143 @@ export function RadioPage() {
 
       if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
 
-      // 3. Wait for the track to end naturally or for the user to pause.
-      //    Each iteration gets a unique generation number. Any listener that
-      //    fires after loopGenRef has moved on (stale) simply ignores itself.
+      // 3. Wait until CROSSFADE_SECS before the end, then crossfade to next track.
+      //    Falls back to waiting for 'ended' if duration is unknown or very short.
+      //    Each iteration gets a unique generation number to cancel stale listeners.
       const myGen = ++loopGenRef.current;
+
       const endedNaturally = await new Promise<boolean>(resolve => {
+        let crossfadeStarted = false;
+
+        // ── Crossfade logic ───────────────────────────────────────────────────
+        const startCrossfade = () => {
+          if (crossfadeStarted || !runningRef.current) return;
+          if (!nextAudio || !nextTrack) return;
+          // Don't crossfade during moderator speech (music is ducked) —
+          // let the track end naturally and advance cleanly after.
+          if (moderatorRef.current.isSpeaking || moderatorRef.current.isGenerating) return;
+
+          crossfadeStarted = true;
+          console.log(`[Crossfade] starting ${CROSSFADE_SECS}s crossfade → "${nextTrack.name}"`);
+
+          const fadeDurationMs = CROSSFADE_SECS * 1000;
+          const targetVol      = mutedRef.current ? 0 : volumeRef.current;
+
+          // Fade out current
+          cancelRampRef.current?.();
+          cancelRampRef.current = rampVolume(audio, 0, fadeDurationMs, () => {
+            // Current fully faded — stop it cleanly
+            audio.pause();
+            // nextAudio is now the active track; resolve so the loop advances
+            if (loopGenRef.current === myGen) {
+              cleanup();
+              console.log('[Crossfade] complete — advancing loop');
+              resolve(true);
+            }
+          });
+
+          // Fade in next (already at volume 0 from pre-load)
+          nextAudio.volume = 0;
+          cancelNextRampRef.current?.();
+          nextAudio.play().then(() => {
+            cancelNextRampRef.current = rampVolume(nextAudio, targetVol, fadeDurationMs);
+          }).catch(e => {
+            console.warn('[Crossfade] nextAudio.play() failed:', e);
+            // Crossfade failed — let ended event handle it
+            crossfadeStarted = false;
+          });
+        };
+
+        const onTimeUpdate = () => {
+          if (loopGenRef.current !== myGen) return;
+          if (crossfadeStarted) return;
+          const dur = audio.duration;
+          const ct  = audio.currentTime;
+          // Only crossfade if: duration is known, track is longer than 2× crossfade,
+          // and we're within the crossfade window
+          if (
+            isFinite(dur) &&
+            dur > CROSSFADE_SECS * 2 &&
+            ct >= dur - CROSSFADE_SECS
+          ) {
+            startCrossfade();
+          }
+        };
+
         const onEnded = () => {
-          if (loopGenRef.current !== myGen) return; // stale — a new iteration started
+          if (loopGenRef.current !== myGen) return;
           cleanup();
-          console.log(`[Loop] ended naturally (gen ${myGen})`);
+          console.log(`[Loop] ended naturally (no crossfade, gen ${myGen})`);
           resolve(true);
         };
+
         const onPause = () => {
-          if (loopGenRef.current !== myGen) return; // stale
+          if (loopGenRef.current !== myGen) return;
           if (!runningRef.current) {
-            // handlePause() sets runningRef=false then calls audio.pause()
             cleanup();
             console.log(`[Loop] paused by user (gen ${myGen})`);
             resolve(false);
           }
           // else: browser fires pause just before ended on natural end — wait for ended
         };
+
         function cleanup() {
-          audio.removeEventListener('ended', onEnded);
-          audio.removeEventListener('pause', onPause);
+          audio.removeEventListener('timeupdate', onTimeUpdate);
+          audio.removeEventListener('ended',      onEnded);
+          audio.removeEventListener('pause',      onPause);
         }
-        audio.addEventListener('ended', onEnded);
-        audio.addEventListener('pause', onPause);
+
+        audio.addEventListener('timeupdate', onTimeUpdate);
+        audio.addEventListener('ended',      onEnded);
+        audio.addEventListener('pause',      onPause);
       });
 
       if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
 
-      if (endedNaturally) {
-        // Accumulate this track in the recents list and increment the silent counter
+      // ── After crossfade: nextAudio faded in, audio faded out ─────────────────
+      // Promote nextAudio → audio by moving its src/position into the primary
+      // element. Set crossfadeActiveRef so the loop top skips the reload.
+      const crossfadeHappened = endedNaturally && nextAudio != null && !nextAudio.paused && nextTrack != null;
+      if (crossfadeHappened) {
+        console.log('[Crossfade] promoting nextAudio → audio');
+        const crossfadePos = nextAudio!.currentTime;
+        nextAudio!.pause();
+
+        // Move playback into audio at the crossfade position
+        audio.src    = nextTrack!.liveUrl;
+        audio.volume = mutedRef.current ? 0 : volumeRef.current;
+        audio.load();
+        await new Promise<void>(res => {
+          const onCanPlay = () => { audio.removeEventListener('canplay', onCanPlay); res(); };
+          audio.addEventListener('canplay', onCanPlay);
+          setTimeout(res, 500); // fallback
+        });
+        if (isFinite(audio.duration) && crossfadePos < audio.duration) {
+          audio.currentTime = crossfadePos;
+        }
+        try { await audio.play(); } catch { /* ignore */ }
+
+        // Advance silent counter for the track that just ended (t)
         recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
         silentCountRef.current++;
 
-        const nextMusicIdx = (currentIdx + 1) % tracks.length;
-        idxRef.current     = nextMusicIdx;
-        console.log(`[Loop] index advanced ${currentIdx} → ${nextMusicIdx}`);
+        // Signal the loop top that audio is already loaded & playing
+        crossfadeActiveRef.current = true;
+        idxRef.current = nextIdx;
+        // Fall through to podcast check with nextMusicIdx = nextIdx + 1 below
+      }
+
+      if (endedNaturally) {
+        // If crossfade happened, counters & idxRef were already updated above.
+        // Only update them here for the normal (non-crossfade) case.
+        if (!crossfadeHappened) {
+          recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
+          silentCountRef.current++;
+          idxRef.current = (currentIdx + 1) % tracks.length;
+        }
+
+        const nextMusicIdx = idxRef.current;
+        console.log(`[Loop] index advanced → ${nextMusicIdx}`);
         console.log(`[Loop] silentCount=${silentCountRef.current} / budget=${silentBudgetRef.current}, episodes=${episodesRef.current.length}`);
 
         // ── Podcast slot every 2–3 music tracks ──────────────────────────────
