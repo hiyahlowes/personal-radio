@@ -124,6 +124,7 @@ function getStoredLanguage(): string {
 
 async function generateScript(prompt: string, longForm = false): Promise<string | null> {
   const language = getStoredLanguage();
+  console.log(`[Moderator] language="${language}" | longForm=${longForm} | prompt: ${prompt.slice(0, 80)}…`);
   const lengthInstruction = longForm
     ? 'Be a bit more elaborate this time: use 3 to 4 sentences.'
     : 'Keep it to 1 to 2 sentences.';
