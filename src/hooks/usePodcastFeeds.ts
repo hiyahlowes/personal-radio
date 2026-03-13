@@ -1,70 +1,36 @@
 import { useQuery } from '@tanstack/react-query';
 
-// ── CORS proxy cascade ────────────────────────────────────────────────────────
-// Tried in order; first response that parses as real RSS/Atom wins.
-const FETCH_TIMEOUT_MS = 15_000;
+// ── RSS fetch via Netlify Function proxy ──────────────────────────────────────
+// All RSS fetching goes through /.netlify/functions/podcast-proxy?action=rss&url=...
+// This avoids CORS issues on production and works locally via `netlify dev`.
 
-interface ProxyStrategy {
-  name: string;
-  buildUrl: (feedUrl: string) => string;
-}
-
-const PROXY_STRATEGIES: ProxyStrategy[] = [
-  {
-    name: 'corsproxy.io',
-    buildUrl: (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  },
-  {
-    name: 'codetabs',
-    buildUrl: (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-  },
-  {
-    name: 'direct',
-    buildUrl: (url) => url,
-  },
-];
-
-/** Attempt a single fetch with a hard timeout; throws on non-OK or timeout. */
-async function attemptFetch(url: string): Promise<string> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.text();
-}
+const RSS_PROXY_URL = '/.netlify/functions/podcast-proxy';
 
 /**
- * Fetch raw RSS/XML for `feedUrl`, trying each proxy strategy in sequence.
- * Returns the raw text from the first strategy that returns valid RSS/Atom XML.
- *
- * Sanity check: the response body must contain an <rss or <feed root element —
- * this rejects HTML pages (e.g. Squarespace homepages) that proxies sometimes
- * return with HTTP 200 when they follow redirects to the wrong URL.
+ * Fetch raw RSS/XML for `feedUrl` via the server-side Netlify Function proxy.
+ * Throws if the response is not valid RSS/Atom XML.
  */
 async function fetchRawFeed(feedUrl: string): Promise<string> {
-  const errors: string[] = [];
+  const proxyUrl = `${RSS_PROXY_URL}?action=rss&url=${encodeURIComponent(feedUrl)}`;
+  console.log(`[Podcast] fetching via proxy: ${feedUrl}`);
 
-  for (const strategy of PROXY_STRATEGIES) {
-    const proxyUrl = strategy.buildUrl(feedUrl);
-    try {
-      console.log(`[Podcast] trying ${strategy.name} for ${feedUrl}`);
-      const text = await attemptFetch(proxyUrl);
-
-      // Must look like RSS or Atom — reject HTML pages silently returned as 200
-      const trimmed = text.trim();
-      const isRss  = trimmed.includes('<rss') || trimmed.includes('<feed') || trimmed.includes('<channel');
-      if (!isRss) {
-        throw new Error('Response is not RSS/Atom XML');
-      }
-
-      console.log(`[Podcast] ✓ ${strategy.name} succeeded for ${feedUrl}`);
-      return text;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[Podcast] ✗ ${strategy.name} failed for ${feedUrl}: ${msg}`);
-      errors.push(`${strategy.name}: ${msg}`);
-    }
+  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Proxy returned HTTP ${res.status}: ${body.slice(0, 120)}`);
   }
 
-  throw new Error(`All strategies failed for ${feedUrl} — ${errors.join(' | ')}`);
+  const text = await res.text();
+
+  // Sanity-check: must look like RSS or Atom XML
+  const trimmed = text.trim();
+  const isRss = trimmed.includes('<rss') || trimmed.includes('<feed') || trimmed.includes('<channel');
+  if (!isRss) {
+    throw new Error('Response is not RSS/Atom XML');
+  }
+
+  console.log(`[Podcast] ✓ proxy succeeded for ${feedUrl}`);
+  return text;
 }
 
 export interface PodcastChapter {
