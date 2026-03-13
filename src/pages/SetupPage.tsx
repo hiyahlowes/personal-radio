@@ -1,11 +1,12 @@
 /**
- * SetupPage — 3-step onboarding flow
+ * SetupPage — 4-step onboarding flow
  *
- * Step 1: Name entry
- * Step 2: Genre selection (Wavlake genres)
- * Step 3: Podcast selection (PodcastIndex trending + search)
+ * Step 1: Language selection
+ * Step 2: Name entry
+ * Step 3: Genre selection (Wavlake genres)
+ * Step 4: Podcast selection (PodcastIndex trending + search)
  *
- * On completion: saves name, genres, and podcast feeds to localStorage,
+ * On completion: saves language, name, genres, and podcast feeds to localStorage,
  * sets setupComplete = true, then navigates to /radio.
  *
  * All localStorage keys are shared with SettingsPage.
@@ -29,6 +30,13 @@ import {
 export const SETUP_COMPLETE_KEY = 'pr:setupComplete';
 export const LISTENER_NAME_KEY  = 'pr:listenerName';
 export const GENRES_KEY         = 'pr:selected-genres';
+export const LANGUAGE_KEY       = 'pr:language';
+
+const LANGUAGES = [
+  { value: 'English',  label: 'English',  flag: '🇬🇧' },
+  { value: 'Deutsch',  label: 'Deutsch',  flag: '🇩🇪' },
+  { value: 'Français', label: 'Français', flag: '🇫🇷' },
+];
 
 export function getStoredName(): string {
   return localStorage.getItem(LISTENER_NAME_KEY) ?? '';
@@ -40,17 +48,20 @@ export function setStoredName(name: string): void {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-const TOTAL_STEPS = 3;
+const TOTAL_STEPS = 4;
 
 export function SetupPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
 
-  // Step 1 — pre-populate from localStorage if re-entering setup
+  // Step 1 — language
+  const [language, setLanguage] = useState(() => localStorage.getItem(LANGUAGE_KEY) || 'English');
+
+  // Step 2 — pre-populate from localStorage if re-entering setup
   const [name, setName]         = useState(() => getStoredName());
   const [nameFocused, setNF]    = useState(false);
 
-  // Step 2 — pre-populate genres if re-entering
+  // Step 3 — pre-populate genres if re-entering
   const [selectedGenres, setSelectedGenres] = useState<string[]>(() => {
     try {
       const raw = localStorage.getItem(GENRES_KEY);
@@ -60,7 +71,7 @@ export function SetupPage() {
     } catch { return []; }
   });
 
-  // Step 3 — pre-populate feeds if re-entering
+  // Step 4 — pre-populate feeds if re-entering
   const [addedFeeds, setAddedFeeds] = useState<PodcastFeed[]>(() => getStoredFeeds());
   const [query, setQuery]           = useState('');
   const [trending, setTrending]     = useState<PodcastIndexFeed[]>([]);
@@ -70,9 +81,9 @@ export function SetupPage() {
   const [addedIds, setAddedIds]           = useState<Set<number>>(new Set());
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ── Fetch trending podcasts when reaching step 3 ──────────────────────────
+  // ── Fetch trending podcasts when reaching step 4 ──────────────────────────
   useEffect(() => {
-    if (step !== 3) return;
+    if (step !== 4) return;
     setSearchLoading(true);
     fetchTrendingPodcasts()
       .then(setTrending)
@@ -82,7 +93,7 @@ export function SetupPage() {
 
   // ── Debounced podcast search ───────────────────────────────────────────────
   useEffect(() => {
-    if (step !== 3) return;
+    if (step !== 4) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!query.trim()) {
       setResults([]);
@@ -132,32 +143,37 @@ export function SetupPage() {
   const finish = () => {
     const trimmedName = name.trim();
 
-    // 1. Save listener name
+    // 1. Save language
+    localStorage.setItem(LANGUAGE_KEY, language);
+
+    // 2. Save listener name
     setStoredName(trimmedName);
 
-    // 2. Save genres (use all if somehow empty — shouldn't happen via UI)
+    // 3. Save genres (use all if somehow empty — shouldn't happen via UI)
     const genresToSave = selectedGenres.length > 0 ? selectedGenres : ALL_GENRE_IDS;
     localStorage.setItem(GENRES_KEY, JSON.stringify(genresToSave));
 
-    // 3. Save podcast feeds
+    // 4. Save podcast feeds
     setStoredFeeds(addedFeeds);
 
-    // 4. Mark setup complete
+    // 5. Mark setup complete
     localStorage.setItem(SETUP_COMPLETE_KEY, 'true');
 
-    // 5. Navigate to radio
+    // 6. Navigate to radio
     navigate(`/radio?name=${encodeURIComponent(trimmedName)}`);
   };
 
   // ── Navigation guards ──────────────────────────────────────────────────────
-  const canNext1 = name.trim().length > 0;
-  const canNext2 = selectedGenres.length > 0;
+  const canNext1 = true; // language always has a default
+  const canNext2 = name.trim().length > 0;
+  const canNext3 = selectedGenres.length > 0;
   const canFinish = addedFeeds.length > 0;
 
   const goNext = () => {
-    if (step === 1 && canNext1) setStep(2);
+    if (step === 1) setStep(2);
     else if (step === 2 && canNext2) setStep(3);
-    else if (step === 3 && canFinish) finish();
+    else if (step === 3 && canNext3) setStep(4);
+    else if (step === 4 && canFinish) finish();
   };
 
   const goBack = () => {
@@ -220,19 +236,58 @@ export function SetupPage() {
           <p className="text-xs text-white/30 text-right">Step {step} of {TOTAL_STEPS}</p>
         </div>
 
-        {/* ── STEP 1: Name ────────────────────────────────────────────────── */}
+        {/* ── STEP 1: Language ────────────────────────────────────────────── */}
         {step === 1 && (
           <div className="fade-in-up space-y-6">
             <div className="text-center space-y-2">
               <h1 className="text-3xl font-black tracking-tight">Welcome to PR</h1>
               <p className="text-lg font-light text-purple-300">Personal Radio</p>
               <p className="text-white/50 text-sm leading-relaxed mt-3">
+                Choose the language your AI host will speak.
+              </p>
+            </div>
+
+            <div className="glass-card rounded-2xl p-6 space-y-3">
+              <p className="text-sm font-semibold text-white/70">Host language</p>
+              {LANGUAGES.map(lang => {
+                const active = language === lang.value;
+                return (
+                  <button
+                    key={lang.value}
+                    onClick={() => setLanguage(lang.value)}
+                    aria-pressed={active}
+                    className={`w-full flex items-center gap-4 px-5 py-4 rounded-xl border-2 transition-all duration-150 text-left
+                      ${active
+                        ? 'bg-purple-600/25 border-purple-500/70 text-white shadow-sm shadow-purple-900/40'
+                        : 'bg-white/5 border-white/10 text-white/50 hover:border-white/25 hover:text-white/70 hover:bg-white/8'
+                      }`}
+                  >
+                    <span className="text-2xl select-none">{lang.flag}</span>
+                    <span className="text-base font-semibold">{lang.label}</span>
+                    {active && (
+                      <svg className="w-4 h-4 ml-auto text-purple-400 flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                      </svg>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 2: Name ────────────────────────────────────────────────── */}
+        {step === 2 && (
+          <div className="fade-in-up space-y-6">
+            <div className="text-center space-y-2">
+              <h1 className="text-3xl font-black tracking-tight">What's your name?</h1>
+              <p className="text-white/50 text-sm leading-relaxed mt-3">
                 Your AI host will greet you by name and curate the perfect mix of music and podcasts.
               </p>
             </div>
 
             <div className="glass-card rounded-2xl p-6 space-y-4">
-              <label className="block text-sm font-semibold text-white/70">What's your name?</label>
+              <label className="block text-sm font-semibold text-white/70">Your name</label>
               <div className="relative">
                 <div className={`absolute inset-0 rounded-xl transition-all duration-300 ${nameFocused ? 'bg-gradient-to-r from-violet-600/20 to-purple-600/20 blur-sm scale-105' : 'bg-transparent'}`} />
                 <input
@@ -241,7 +296,7 @@ export function SetupPage() {
                   onChange={e => setName(e.target.value)}
                   onFocus={() => setNF(true)}
                   onBlur={() => setNF(false)}
-                  onKeyDown={e => e.key === 'Enter' && canNext1 && goNext()}
+                  onKeyDown={e => e.key === 'Enter' && canNext2 && goNext()}
                   placeholder="e.g. Alex"
                   maxLength={50}
                   autoFocus
@@ -253,8 +308,8 @@ export function SetupPage() {
           </div>
         )}
 
-        {/* ── STEP 2: Genres ──────────────────────────────────────────────── */}
-        {step === 2 && (
+        {/* ── STEP 3: Genres ──────────────────────────────────────────────── */}
+        {step === 3 && (
           <div className="fade-in-up space-y-6">
             <div className="text-center space-y-2">
               <h1 className="text-3xl font-black tracking-tight">What do you want to hear?</h1>
@@ -345,8 +400,8 @@ export function SetupPage() {
           </div>
         )}
 
-        {/* ── STEP 3: Podcasts ────────────────────────────────────────────── */}
-        {step === 3 && (
+        {/* ── STEP 4: Podcasts ────────────────────────────────────────────── */}
+        {step === 4 && (
           <div className="fade-in-up space-y-5">
             <div className="text-center space-y-2">
               <h1 className="text-3xl font-black tracking-tight">Add a podcast or two</h1>
@@ -482,21 +537,23 @@ export function SetupPage() {
           <button
             onClick={goNext}
             disabled={
-              (step === 1 && !canNext1) ||
               (step === 2 && !canNext2) ||
-              (step === 3 && !canFinish)
+              (step === 3 && !canNext3) ||
+              (step === 4 && !canFinish)
             }
             className={`flex-1 py-3.5 text-base font-bold rounded-2xl transition-all duration-300 ${
-              (step === 1 && canNext1) ||
+              step === 1 ||
               (step === 2 && canNext2) ||
-              (step === 3 && canFinish)
+              (step === 3 && canNext3) ||
+              (step === 4 && canFinish)
                 ? 'bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-500 hover:to-purple-500 glow-purple-sm hover:scale-[1.01] active:scale-[0.99]'
                 : 'bg-white/5 text-white/25 cursor-not-allowed border border-white/10'
             }`}
           >
-            {step === 1 && (canNext1 ? `Continue, ${name.trim().split(' ')[0]} →` : 'Enter your name to continue')}
-            {step === 2 && (canNext2 ? 'Continue →' : 'Select at least one genre')}
-            {step === 3 && (canFinish ? '🎙️ Start listening →' : 'Add at least one podcast')}
+            {step === 1 && 'Continue →'}
+            {step === 2 && (canNext2 ? `Continue, ${name.trim().split(' ')[0]} →` : 'Enter your name to continue')}
+            {step === 3 && (canNext3 ? 'Continue →' : 'Select at least one genre')}
+            {step === 4 && (canFinish ? '🎙️ Start listening →' : 'Add at least one podcast')}
           </button>
         </div>
 
