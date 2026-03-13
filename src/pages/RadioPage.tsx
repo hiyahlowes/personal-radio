@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   DragDropContext,
   Droppable,
@@ -94,11 +94,29 @@ function PortalAware({
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export function RadioPage() {
-  const [params]  = useSearchParams();
   const navigate  = useNavigate();
-  // Prefer name from URL param (keeps existing behaviour); fall back to localStorage
-  const name      = params.get('name') || getStoredName() || 'Listener';
+
+  // Always read name from localStorage — it's the single source of truth.
+  // The URL ?name= param is only a legacy hint from the old welcome page flow
+  // and must NOT take precedence, or changing the name in Settings has no effect.
+  const [name, setName] = useState(() => getStoredName() || 'Listener');
   const firstName = name.split(' ')[0];
+
+  // Re-read name from localStorage whenever the page becomes visible again
+  // (e.g. returning from Settings after changing the name there).
+  useEffect(() => {
+    const refresh = () => {
+      const stored = getStoredName();
+      if (stored) setName(stored);
+    };
+    // visibilitychange fires when tab becomes active; focus fires on window refocus
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('focus', refresh);
+    };
+  }, []);
 
   const { selectedIds, toggle, selectAll, isAllSelected } = useGenreSelection();
   const { data: tracks = [], isLoading, isError } = useWavlakeTracks(selectedIds);
@@ -672,7 +690,7 @@ export function RadioPage() {
         {/* Header */}
         <header className="flex items-center justify-between fade-in-up">
           <div>
-            <button onClick={() => navigate('/')} className="text-xs tracking-[0.25em] text-purple-400 uppercase font-semibold hover:text-purple-300 transition-colors flex items-center gap-1.5">
+            <button onClick={() => navigate('/settings')} className="text-xs tracking-[0.25em] text-purple-400 uppercase font-semibold hover:text-purple-300 transition-colors flex items-center gap-1.5">
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 18l-6-6 6-6"/></svg>
               PR Personal Radio
             </button>

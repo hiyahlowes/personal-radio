@@ -389,16 +389,22 @@ export function SettingsPage() {
         </section>
 
         {/* ── Re-run setup ───────────────────────────────────────────────── */}
-        <section className="fade-in-up-delay-2 pt-2">
-          <button
-            onClick={() => {
-              localStorage.removeItem('pr:setupComplete');
-              navigate('/setup');
-            }}
-            className="text-xs text-white/25 hover:text-white/50 transition-colors"
-          >
-            Re-run setup wizard
-          </button>
+        <section className="fade-in-up-delay-2">
+          <div className="glass-card rounded-2xl p-5 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-white">Start over</p>
+              <p className="text-xs text-white/40 mt-0.5">Re-run the setup wizard from the beginning</p>
+            </div>
+            <button
+              onClick={() => {
+                localStorage.removeItem('pr:setupComplete');
+                navigate('/setup');
+              }}
+              className="flex-shrink-0 px-4 py-2 rounded-xl text-sm font-semibold text-white/60 border border-white/15 hover:border-white/30 hover:text-white/80 transition-all"
+            >
+              Setup wizard
+            </button>
+          </div>
         </section>
 
         {/* Footer */}

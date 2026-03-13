@@ -45,15 +45,22 @@ export function SetupPage() {
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
 
-  // Step 1
-  const [name, setName]         = useState('');
+  // Step 1 — pre-populate from localStorage if re-entering setup
+  const [name, setName]         = useState(() => getStoredName());
   const [nameFocused, setNF]    = useState(false);
 
-  // Step 2
-  const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
+  // Step 2 — pre-populate genres if re-entering
+  const [selectedGenres, setSelectedGenres] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(GENRES_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as string[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  });
 
-  // Step 3
-  const [addedFeeds, setAddedFeeds] = useState<PodcastFeed[]>([]);
+  // Step 3 — pre-populate feeds if re-entering
+  const [addedFeeds, setAddedFeeds] = useState<PodcastFeed[]>(() => getStoredFeeds());
   const [query, setQuery]           = useState('');
   const [trending, setTrending]     = useState<PodcastIndexFeed[]>([]);
   const [results, setResults]       = useState<PodcastIndexFeed[]>([]);
