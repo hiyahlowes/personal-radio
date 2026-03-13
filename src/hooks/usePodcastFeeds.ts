@@ -171,8 +171,16 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
     doc.querySelector('feed > title')?.textContent?.trim() ??
     'Unknown Podcast';
 
-  const items = Array.from(doc.querySelectorAll('item'));
-  console.log(`[Podcast] "${feedTitle}" — ${items.length} items found`);
+  const allItems = Array.from(doc.querySelectorAll('item'));
+  console.log(`[Podcast] "${feedTitle}" — ${allItems.length} items found`);
+
+  // Sort by pubDate descending so the newest episode is always first,
+  // regardless of the order the feed delivers items.
+  const items = allItems.sort((a, b) => {
+    const dateA = new Date(getText(a, 'pubDate') || getText(a, 'published') || 0).getTime();
+    const dateB = new Date(getText(b, 'pubDate') || getText(b, 'published') || 0).getTime();
+    return dateB - dateA; // descending — newest first
+  });
 
   const episodes: PodcastEpisode[] = [];
 
@@ -235,11 +243,12 @@ export function usePodcastEpisodes(feeds: PodcastFeed[]) {
         else console.warn('[Podcast] feed failed:', r.reason);
       }
       console.log(`[Podcast] total episodes loaded: ${all.length}`);
-      // Shuffle so episodes from different feeds are interleaved
-      for (let i = all.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [all[i], all[j]] = [all[j], all[i]];
-      }
+      // Sort by pubDate descending — newest episode across all feeds plays first.
+      all.sort((a, b) => {
+        const dateA = new Date(a.pubDate || 0).getTime();
+        const dateB = new Date(b.pubDate || 0).getTime();
+        return dateB - dateA; // descending — newest first
+      });
       return all;
     },
     staleTime: 1000 * 60 * 30, // 30 min
