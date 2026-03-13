@@ -246,24 +246,73 @@ export function useSingleFeedEpisodes(feedUrl: string, enabled: boolean) {
   });
 }
 
+/**
+ * Round-robin interleave: given an array of per-feed episode lists (each
+ * already sorted newest-first), produce a single flat list that alternates
+ * feeds so no single podcast dominates the queue.
+ *
+ * Algorithm:
+ *   - Each feed gets a cursor starting at 0.
+ *   - We cycle through feeds in order; each cycle picks one episode from the
+ *     current feed's cursor and advances it.
+ *   - Feeds that have run out of episodes are skipped.
+ *   - This guarantees the pattern: A→B→C→A→B→C→… with graceful degradation
+ *     when feeds have different episode counts.
+ *
+ * Example (3 feeds, 5 / 2 / 3 episodes):
+ *   A0 B0 C0  A1 B1 C1  A2 C2  A3  A4
+ *
+ * The cap (MAX_PER_FEED) ensures that a prolific feed (e.g. hourly news)
+ * never takes more slots than ceil(totalSlots / numFeeds).
+ */
+function roundRobinInterleave(perFeed: PodcastEpisode[][]): PodcastEpisode[] {
+  const numFeeds = perFeed.length;
+  if (numFeeds === 0) return [];
+  if (numFeeds === 1) return perFeed[0]; // single feed — no interleaving needed
+
+  const totalEpisodes = perFeed.reduce((s, f) => s + f.length, 0);
+  const maxPerFeed    = Math.ceil(totalEpisodes / numFeeds);
+
+  // Cap each feed at maxPerFeed so a high-volume feed can't dominate
+  const capped  = perFeed.map(eps => eps.slice(0, maxPerFeed));
+  const cursors = new Array<number>(numFeeds).fill(0);
+  const result: PodcastEpisode[] = [];
+
+  let remaining = capped.reduce((s, f) => s + f.length, 0);
+
+  while (remaining > 0) {
+    for (let fi = 0; fi < numFeeds; fi++) {
+      if (cursors[fi] < capped[fi].length) {
+        result.push(capped[fi][cursors[fi]++]);
+        remaining--;
+      }
+    }
+  }
+
+  console.log(
+    `[Podcast] round-robin queue: ${result.length} episodes from ${numFeeds} feeds` +
+    ` (cap ${maxPerFeed}/feed, total raw ${totalEpisodes})`,
+  );
+
+  return result;
+}
+
 export function usePodcastEpisodes(feeds: PodcastFeed[]) {
   return useQuery({
     queryKey: ['podcast-episodes', feeds.map(f => f.url).join(',')],
     queryFn: async (): Promise<PodcastEpisode[]> => {
+      // Fetch all feeds in parallel; failed feeds are skipped with a warning
       const results = await Promise.allSettled(feeds.map(f => fetchFeed(f.url)));
-      const all: PodcastEpisode[] = [];
+
+      const perFeed: PodcastEpisode[][] = [];
       for (const r of results) {
-        if (r.status === 'fulfilled') all.push(...r.value);
+        if (r.status === 'fulfilled') perFeed.push(r.value);
         else console.warn('[Podcast] feed failed:', r.reason);
       }
-      console.log(`[Podcast] total episodes loaded: ${all.length}`);
-      // Sort by pubDate descending — newest episode across all feeds plays first.
-      all.sort((a, b) => {
-        const dateA = new Date(a.pubDate || 0).getTime();
-        const dateB = new Date(b.pubDate || 0).getTime();
-        return dateB - dateA; // descending — newest first
-      });
-      return all;
+
+      // Each per-feed list is already sorted newest-first by fetchFeed.
+      // Apply round-robin so the queue alternates between podcasts.
+      return roundRobinInterleave(perFeed);
     },
     staleTime: 1000 * 60 * 30, // 30 min
     retry: 1,
