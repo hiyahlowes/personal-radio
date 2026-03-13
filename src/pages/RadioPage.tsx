@@ -209,8 +209,12 @@ export function RadioPage() {
     const pod   = podAudioRef.current;
     if (!audio || !pod) return;
 
-    const onMusicTime  = () => setCT(audio.currentTime);
-    const onMusicDur   = () => setDur(audio.duration || 0);
+    // ── Music element listeners ───────────────────────────────────────────────
+    // Always update currentTime/duration from whichever element is not paused.
+    // Music takes precedence when both are somehow playing (shouldn't happen).
+    const onMusicTime  = () => { if (!audio.paused) setCT(audio.currentTime); };
+    const onMusicDur   = () => { if (!audio.paused) setDur(isFinite(audio.duration) ? audio.duration : 0); };
+    const onMusicMeta  = () => { if (!audio.paused) setDur(isFinite(audio.duration) ? audio.duration : 0); };
     const onMusicPlay  = () => { console.log('[Music] play');  setPlaying(true);  setBuf(false); };
     const onMusicPause = () => { console.log('[Music] pause'); setPlaying(false); };
     const onMusicWait  = () => setBuf(true);
@@ -219,22 +223,30 @@ export function RadioPage() {
 
     audio.addEventListener('timeupdate',     onMusicTime);
     audio.addEventListener('durationchange', onMusicDur);
+    audio.addEventListener('loadedmetadata', onMusicMeta);
     audio.addEventListener('play',           onMusicPlay);
     audio.addEventListener('pause',          onMusicPause);
     audio.addEventListener('waiting',        onMusicWait);
     audio.addEventListener('canplay',        onMusicCan);
     audio.addEventListener('error',          onMusicErr);
 
-    const onPodTime  = () => { if (nowPlayingRef.current?.kind === 'podcast') setCT(pod.currentTime); };
-    const onPodDur   = () => { if (nowPlayingRef.current?.kind === 'podcast') setDur(pod.duration || 0); };
-    const onPodPlay  = () => { if (nowPlayingRef.current?.kind === 'podcast') { setPlaying(true); setBuf(false); } };
-    const onPodPause = () => { if (nowPlayingRef.current?.kind === 'podcast') setPlaying(false); };
-    const onPodWait  = () => { if (nowPlayingRef.current?.kind === 'podcast') setBuf(true); };
-    const onPodCan   = () => { if (nowPlayingRef.current?.kind === 'podcast') setBuf(false); };
+    // ── Podcast element listeners ─────────────────────────────────────────────
+    // No nowPlayingRef guard — always forward time/duration from pod when it's
+    // the active element (i.e. not paused). The nowPlayingRef check was fragile:
+    // durationchange and timeupdate can fire before setNowPlaying('podcast') runs,
+    // causing the progress bar to stay frozen at 0:00.
+    const onPodTime  = () => { if (!pod.paused) setCT(pod.currentTime); };
+    const onPodDur   = () => { if (!pod.paused) setDur(isFinite(pod.duration) ? pod.duration : 0); };
+    const onPodMeta  = () => { if (!pod.paused) setDur(isFinite(pod.duration) ? pod.duration : 0); };
+    const onPodPlay  = () => { console.log('[Podcast] play'); setPlaying(true);  setBuf(false); };
+    const onPodPause = () => { console.log('[Podcast] pause'); setPlaying(false); };
+    const onPodWait  = () => setBuf(true);
+    const onPodCan   = () => setBuf(false);
     const onPodErr   = () => { if (pod.src) console.error('[Podcast] audio error', pod.error?.message); };
 
     pod.addEventListener('timeupdate',     onPodTime);
     pod.addEventListener('durationchange', onPodDur);
+    pod.addEventListener('loadedmetadata', onPodMeta);
     pod.addEventListener('play',           onPodPlay);
     pod.addEventListener('pause',          onPodPause);
     pod.addEventListener('waiting',        onPodWait);
@@ -243,14 +255,21 @@ export function RadioPage() {
 
     // Sync UI state with whatever the elements are currently doing (handles
     // returning to RadioPage while audio was already playing).
-    if (!audio.paused) { setPlaying(true); }
-    if (audio.currentTime) setCT(audio.currentTime);
-    if (audio.duration)    setDur(audio.duration);
+    if (!pod.paused) {
+      setPlaying(true);
+      setCT(pod.currentTime);
+      if (isFinite(pod.duration)) setDur(pod.duration);
+    } else if (!audio.paused) {
+      setPlaying(true);
+      setCT(audio.currentTime);
+      if (isFinite(audio.duration)) setDur(audio.duration);
+    }
 
     return () => {
       // Detach listeners only — do NOT pause or clear src.
       audio.removeEventListener('timeupdate',     onMusicTime);
       audio.removeEventListener('durationchange', onMusicDur);
+      audio.removeEventListener('loadedmetadata', onMusicMeta);
       audio.removeEventListener('play',           onMusicPlay);
       audio.removeEventListener('pause',          onMusicPause);
       audio.removeEventListener('waiting',        onMusicWait);
@@ -259,6 +278,7 @@ export function RadioPage() {
 
       pod.removeEventListener('timeupdate',     onPodTime);
       pod.removeEventListener('durationchange', onPodDur);
+      pod.removeEventListener('loadedmetadata', onPodMeta);
       pod.removeEventListener('play',           onPodPlay);
       pod.removeEventListener('pause',          onPodPause);
       pod.removeEventListener('waiting',        onPodWait);
@@ -804,10 +824,13 @@ export function RadioPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Seek whichever element is currently active (music or podcast)
+    const pod   = podAudioRef.current;
     const audio = audioRef.current;
-    if (!audio || !duration) return;
+    const el    = (pod && !pod.paused) ? pod : audio;
+    if (!el || !duration) return;
     const r = (e.clientX - e.currentTarget.getBoundingClientRect().left) / e.currentTarget.offsetWidth;
-    audio.currentTime = Math.max(0, Math.min(1, r)) * duration;
+    el.currentTime = Math.max(0, Math.min(1, r)) * duration;
   };
 
   // ── Derived UI ────────────────────────────────────────────────────────────
