@@ -129,16 +129,9 @@ async function generateScript(prompt: string, longForm = false): Promise<string 
     ? 'Be a bit more elaborate this time: use 3 to 4 sentences.'
     : 'Keep it to 1 to 2 sentences.';
   try {
-    const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY as string | undefined;
-    if (!apiKey) { console.warn('[Moderator] VITE_ANTHROPIC_API_KEY not set'); return null; }
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch('/.netlify/functions/claude-proxy', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         system:
@@ -157,7 +150,7 @@ async function generateScript(prompt: string, longForm = false): Promise<string 
         max_tokens: longForm ? 200 : 120,
       }),
     });
-    if (!response.ok) { console.warn('[Moderator] Anthropic API error:', response.status); return null; }
+    if (!response.ok) { console.warn('[Moderator] claude-proxy error:', response.status); return null; }
     const data = await response.json();
     const text = data?.content?.[0]?.text;
     return typeof text === 'string' && text.trim() ? text.trim() : null;
