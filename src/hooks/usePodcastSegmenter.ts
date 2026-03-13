@@ -29,11 +29,13 @@ import type { PodcastChapter } from './usePodcastFeeds';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const ELEVENLABS_API_KEY = 'sk_632e7857df9f28257efd1e9995e06af8741ead98b385099b';
-const STT_URL            = 'https://api.elevenlabs.io/v1/speech-to-text';
+// Credentials come from environment variables — never hardcoded.
+// If VITE_ELEVENLABS_API_KEY is absent, STT is skipped (commentary falls back to pre-written).
+// If VITE_ANTHROPIC_API_KEY is absent, Claude commentary is skipped (fallback text used).
+const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
+const ANTHROPIC_API_KEY  = import.meta.env.VITE_ANTHROPIC_API_KEY  as string | undefined;
 
-/** Claude sonnet endpoint — caller must supply ANTHROPIC_API_KEY via env or
- *  we fall back to a pre-written commentary if the key is absent. */
+const STT_URL        = 'https://api.elevenlabs.io/v1/speech-to-text';
 const CLAUDE_MODEL   = 'claude-sonnet-4-20250514';
 const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
 
@@ -78,6 +80,11 @@ function getRmsDb(analyser: AnalyserNode): number {
 // ── ElevenLabs STT ────────────────────────────────────────────────────────────
 
 async function transcribeBlob(blob: Blob): Promise<string> {
+  if (!ELEVENLABS_API_KEY) {
+    console.warn('[Segmenter] VITE_ELEVENLABS_API_KEY not set — skipping STT');
+    return '';
+  }
+
   const form = new FormData();
   form.append('audio', blob, 'segment.webm');
   form.append('model_id', 'scribe_v1');
@@ -111,11 +118,11 @@ const COMMENTARY_SYSTEM =
   'No stage directions, no asterisks, no emojis. Just speak naturally as you would on air.';
 
 async function generateCommentary(transcript: string, podcastTitle: string): Promise<string | null> {
-  const apiKey = (import.meta as { env?: Record<string, string> }).env?.VITE_ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.warn('[Segmenter] No VITE_ANTHROPIC_API_KEY — using fallback commentary');
+  if (!ANTHROPIC_API_KEY) {
+    console.warn('[Segmenter] VITE_ANTHROPIC_API_KEY not set — using fallback commentary');
     return null;
   }
+  const apiKey = ANTHROPIC_API_KEY;
 
   try {
     const res = await fetch(CLAUDE_API_URL, {

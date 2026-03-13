@@ -1,10 +1,24 @@
 import { useRef, useState, useCallback } from 'react';
 
-const ELEVENLABS_API_KEY = 'sk_632e7857df9f28257efd1e9995e06af8741ead98b385099b';
-const VOICE_ID = 'UgBBYS2sOqTuMpoF3BR0';
-const TTS_URL = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=mp3_44100_128`;
+// ── Env vars — must be set in .env.local or Netlify environment variables ──────
+const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
+const VOICE_ID           = import.meta.env.VITE_ELEVENLABS_VOICE_ID as string | undefined;
+
+if (!ELEVENLABS_API_KEY) {
+  console.warn(
+    '[ElevenLabs] VITE_ELEVENLABS_API_KEY is not set. ' +
+    'TTS will be disabled — the AI host will not speak.',
+  );
+}
+if (!VOICE_ID) {
+  console.warn(
+    '[ElevenLabs] VITE_ELEVENLABS_VOICE_ID is not set. ' +
+    'TTS will be disabled — the AI host will not speak.',
+  );
+}
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+void sleep; // used by callers via re-export path — keep for tree-shaking safety
 
 export interface ElevenLabsOptions {
   stability?: number;
@@ -31,6 +45,14 @@ export function useElevenLabs() {
   };
 
   const speak = useCallback(async (text: string, opts: ElevenLabsOptions = {}): Promise<void> => {
+    // Graceful no-op when credentials are missing
+    if (!ELEVENLABS_API_KEY || !VOICE_ID) {
+      console.warn('[ElevenLabs] Skipping TTS — credentials not configured.');
+      return;
+    }
+
+    const TTS_URL = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=mp3_44100_128`;
+
     console.log('[ElevenLabs] speak() called with text:', text.slice(0, 80) + (text.length > 80 ? '…' : ''));
 
     // Cancel any in-progress speech
@@ -61,7 +83,6 @@ export function useElevenLabs() {
       };
 
       console.log('[ElevenLabs] POSTing to:', TTS_URL);
-      console.log('[ElevenLabs] Request body:', JSON.stringify(body));
 
       const response = await fetch(TTS_URL, {
         method: 'POST',
@@ -74,11 +95,6 @@ export function useElevenLabs() {
       });
 
       console.log('[ElevenLabs] Response status:', response.status, response.statusText);
-      console.log('[ElevenLabs] Response headers:', {
-        'content-type': response.headers.get('content-type'),
-        'access-control-allow-origin': response.headers.get('access-control-allow-origin'),
-        'x-request-id': response.headers.get('x-request-id'),
-      });
 
       if (!response.ok) {
         const errText = await response.text().catch(() => response.statusText);
@@ -146,8 +162,6 @@ export function useElevenLabs() {
         }).catch((playErr: unknown) => {
           const msg = playErr instanceof Error ? playErr.message : String(playErr);
           console.error('[ElevenLabs] audio.play() rejected:', msg);
-          // NotAllowedError = browser autoplay policy blocked it
-          // Log clearly but still reject so the sequence knows
           cleanup();
           reject(playErr instanceof Error ? playErr : new Error(msg));
         });

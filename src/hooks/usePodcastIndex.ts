@@ -3,9 +3,29 @@
  *
  * Thin wrapper around the PodcastIndex REST API.
  * Auth: SHA-1(apiKey + apiSecret + unixTimestamp) per PodcastIndex spec.
+ *
+ * Credentials are read from environment variables:
+ *   VITE_PODCASTINDEX_API_KEY
+ *   VITE_PODCASTINDEX_API_SECRET
+ *
+ * If either is missing the functions return empty arrays and log a warning,
+ * so the app still loads without crashing.
  */
 
 const BASE_URL = 'https://api.podcastindex.org/api/1.0';
+
+// ── Credentials ───────────────────────────────────────────────────────────────
+const PI_API_KEY    = import.meta.env.VITE_PODCASTINDEX_API_KEY    as string | undefined;
+const PI_API_SECRET = import.meta.env.VITE_PODCASTINDEX_API_SECRET as string | undefined;
+
+const credentialsAvailable = Boolean(PI_API_KEY && PI_API_SECRET);
+
+if (!credentialsAvailable) {
+  console.warn(
+    '[PodcastIndex] VITE_PODCASTINDEX_API_KEY / VITE_PODCASTINDEX_API_SECRET not set. ' +
+    'Podcast search and trending will be unavailable.',
+  );
+}
 
 export interface PodcastIndexFeed {
   id: number;
@@ -27,8 +47,9 @@ async function sha1Hex(str: string): Promise<string> {
 }
 
 async function buildHeaders(): Promise<Record<string, string>> {
-  const apiKey    = 'GFE3HU2AD5HGAWEULYWW';
-  const apiSecret = '#vXhc923mSznbMdg$qQWXBvdfTUMA3DqdPtwgC6J';
+  // Caller must check credentialsAvailable before calling this
+  const apiKey    = PI_API_KEY!;
+  const apiSecret = PI_API_SECRET!;
   const timestamp = Math.floor(Date.now() / 1000);
   const hash      = await sha1Hex(apiKey + apiSecret + timestamp);
 
@@ -43,6 +64,7 @@ async function buildHeaders(): Promise<Record<string, string>> {
 // ── API calls ─────────────────────────────────────────────────────────────────
 
 export async function fetchTrendingPodcasts(): Promise<PodcastIndexFeed[]> {
+  if (!credentialsAvailable) return [];
   const headers = await buildHeaders();
   const res = await fetch(
     `${BASE_URL}/podcasts/trending?max=3&lang=en&cat=&notcat=`,
@@ -54,6 +76,7 @@ export async function fetchTrendingPodcasts(): Promise<PodcastIndexFeed[]> {
 }
 
 export async function searchPodcasts(query: string): Promise<PodcastIndexFeed[]> {
+  if (!credentialsAvailable) return [];
   if (!query.trim()) return [];
   const headers = await buildHeaders();
   const res = await fetch(
