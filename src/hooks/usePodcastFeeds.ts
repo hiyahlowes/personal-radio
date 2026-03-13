@@ -45,6 +45,7 @@ export interface PodcastEpisode {
   audioUrl: string;
   duration: number;     // seconds (0 if not parseable)
   description: string;
+  author: string;       // itunes:author or feed-level author
   pubDate: string;
   chapters?: PodcastChapter[]; // Podcast 2.0 chapter markers, if available
 }
@@ -165,11 +166,20 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
     throw new Error(`XML parse error: ${parseErr.textContent?.slice(0, 120)}`);
   }
 
-  // Get podcast title from channel
+  // Get podcast title and feed-level author from channel
   const feedTitle =
     doc.querySelector('channel > title')?.textContent?.trim() ??
     doc.querySelector('feed > title')?.textContent?.trim() ??
     'Unknown Podcast';
+
+  const feedAuthor = (() => {
+    const ch = doc.querySelector('channel');
+    if (!ch) return '';
+    return getItunesText(ch, 'author') ||
+      ch.querySelector('author name')?.textContent?.trim() ||
+      ch.querySelector('managingEditor')?.textContent?.trim() ||
+      '';
+  })();
 
   const allItems = Array.from(doc.querySelectorAll('item'));
   console.log(`[Podcast] "${feedTitle}" — ${allItems.length} items found`);
@@ -207,6 +217,8 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
       ''
     ).slice(0, 200);
 
+    const author = getItunesText(item, 'author') || feedAuthor;
+
     // Duration — use proper namespace-aware lookup for itunes:duration
     const duration = parseDuration(getItunesText(item, 'duration'));
 
@@ -223,7 +235,7 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
       }
     }
 
-    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, pubDate, chapters });
+    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, author, pubDate, chapters });
   }
 
   console.log(`[Podcast] "${feedTitle}" — ${episodes.length} episodes parsed`);

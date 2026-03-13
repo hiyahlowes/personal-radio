@@ -576,10 +576,10 @@ export function RadioPage() {
       // 2. Speak over the playing music; when isSpeaking flips false the
       //    ducking useEffect automatically fades volume back to target.
       if (skipRef.current) {
-        // User just skipped — say a brief "skipping ahead" line then carry on.
+        // User just skipped — say a brief hardcoded reaction then carry on.
         skipRef.current = false;
-        console.log('[Loop] skip transition — speakSkipTransition');
-        await moderatorRef.current.speakSkipTransition(t);
+        console.log('[Loop] skip — speakUserControlReaction');
+        await moderatorRef.current.speakUserControlReaction();
       } else if (!greetedRef.current) {
         greetedRef.current = true;
         console.log('[Loop] greeting + track intro over music');
@@ -775,9 +775,9 @@ export function RadioPage() {
           console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
 
           // ── Transition: moderator introduces the podcast episode ────────────
-          // speakPodcastTransition takes (podcastTitle, hostName) — we pass
-          // the episode title as the segment name and the show name as "host".
-          await moderatorRef.current.speakPodcastTransition(episode.title, episode.feedTitle);
+          await moderatorRef.current.speakPodcastTransition(
+            episode.title, episode.feedTitle, episode.description, episode.author,
+          );
           if (!runningRef.current) break;
 
           // ── Load podcast onto the dedicated CORS-enabled audio element ────
@@ -1009,6 +1009,42 @@ export function RadioPage() {
   const handlePrev   = useCallback(() => jumpTo((idxRef.current - 1 + tracksRef.current.length) % tracksRef.current.length, true), [jumpTo]);
   const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length, true), [jumpTo]);
   const handleSelect = useCallback((i: number) => jumpTo(i, false), [jumpTo]);
+
+  // ── Jump directly to a podcast episode ────────────────────────────────────
+  // Moves the episode to the front of the queue, forces the podcast slot to
+  // fire on the very next track end, and seeks the current music track to
+  // near its end so the episode starts within ~1 second.
+  const jumpToEpisode = useCallback((episode: PodcastEpisode) => {
+    // Move episode to front of queue
+    setOrderedEpisodes(prev => {
+      const next = [episode, ...prev.filter(e => e.id !== episode.id)];
+      episodesRef.current = next;
+      return next;
+    });
+    podcastIdxRef.current  = 0;
+    silentCountRef.current = silentBudgetRef.current; // trigger podcast slot immediately
+    recentTracksRef.current = [];                      // suppress DJ-break speech
+
+    // Restart loop at current track with user-skip flag
+    // (speakUserControlReaction fires, then quick track end, then podcast)
+    jumpTo(idxRef.current, true);
+
+    // Seek to near-end of current track so the loop advances in ~300ms
+    setTimeout(() => {
+      const audio = audioRef.current;
+      if (!audio || !runningRef.current) return;
+      const seekToEnd = () => {
+        if (isFinite(audio.duration) && audio.duration > 1) {
+          audio.currentTime = Math.max(0, audio.duration - 0.3);
+        }
+      };
+      if (isFinite(audio.duration) && audio.duration > 1) {
+        seekToEnd();
+      } else {
+        audio.addEventListener('loadedmetadata', seekToEnd, { once: true });
+      }
+    }, 500);
+  }, [jumpTo]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Drag-and-drop handlers ─────────────────────────────────────────────────
   const handleDragEnd = useCallback((result: DropResult) => {
@@ -1410,6 +1446,17 @@ export function RadioPage() {
                                 <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
                                 <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
                               </div>
+                              {/* Play episode now */}
+                              <button
+                                onClick={e => { e.stopPropagation(); jumpToEpisode(ep); }}
+                                aria-label="Play episode now"
+                                title="Play now"
+                                className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-amber-400/60 hover:text-amber-300 hover:bg-amber-900/30 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M8 5v14l11-7z"/>
+                                </svg>
+                              </button>
                               {/* Remove episode from queue */}
                               <button
                                 onClick={e => {

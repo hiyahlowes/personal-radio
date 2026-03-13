@@ -116,7 +116,10 @@ function fallbackPodcastTransition(showName: string, episodeTitle: string): stri
 
 // Shakespeare AI script generator
 
-async function generateScript(prompt: string): Promise<string | null> {
+async function generateScript(prompt: string, longForm = false): Promise<string | null> {
+  const lengthInstruction = longForm
+    ? 'Be a bit more elaborate this time: use 3 to 4 sentences.'
+    : 'Keep it to 1 to 2 sentences.';
   try {
     const response = await fetch('https://ai.shakespeare.diy/v1/chat/completions', {
       method: 'POST',
@@ -129,17 +132,16 @@ async function generateScript(prompt: string): Promise<string | null> {
             content:
               'You are a warm, natural-sounding AI radio host for PR, Personal Radio. ' +
               'Speak exactly as you would on air: no stage directions, no quotation marks around spoken titles, no asterisks, ' +
-              'no parenthetical notes. Just pure, natural radio speech. ' +
-              'Keep it short, 1 to 3 sentences maximum. No emojis. ' +
+              'no parenthetical notes. Just pure, natural radio speech. No emojis. ' +
               'RULES: ' +
               '(1) Never read out dates, times, episode numbers, or version tags. ' +
               '(2) For podcast episodes where the title is just a date or timestamp, ignore it and use the show name only. ' +
               '(3) For music, drop parenthetical suffixes like acoustic version or feat X, just say the clean title and artist. ' +
               '(4) Sound like a real DJ who knows what is worth saying on air.',
           },
-          { role: 'user', content: prompt },
+          { role: 'user', content: `${prompt}\n${lengthInstruction}` },
         ],
-        max_tokens: 120,
+        max_tokens: longForm ? 200 : 120,
         temperature: 0.85,
       }),
     });
@@ -175,7 +177,9 @@ export function useRadioModerator() {
 
   const buildAndSpeak = useCallback(
     async (prompt: string, fallback: string): Promise<void> => {
-      const aiScript = await generateScript(prompt);
+      // 20% of calls: ask the AI to be more elaborate (3-4 sentences)
+      const longForm = Math.random() < 0.2;
+      const aiScript = await generateScript(prompt, longForm);
       await sayScript(aiScript ?? fallback);
     },
     [sayScript]
@@ -240,29 +244,54 @@ export function useRadioModerator() {
     [buildAndSpeak]
   );
 
+  /**
+   * Brief hardcoded reaction spoken when the listener manually skips or
+   * jumps directly to a podcast episode. No AI call — instant playback.
+   */
+  const speakUserControlReaction = useCallback(async (): Promise<void> => {
+    const lines = [
+      'Your radio, your rules.',
+      'Bold choice — I like it.',
+      'Great idea, I was just thinking the same.',
+      'Alright, we do it your way.',
+      'Taking matters into your own hands — respect.',
+    ];
+    const line = lines[Math.floor(Math.random() * lines.length)];
+    await sayScript(line);
+  }, [sayScript]);
+
   const speakPodcastTransition = useCallback(
-    async (episodeTitle: string, showName: string): Promise<void> => {
+    async (episodeTitle: string, showName: string, description?: string, author?: string): Promise<void> => {
       const isNews = isNewsShow(showName, episodeTitle);
       const isDateDump = episodeTitleIsDateDump(episodeTitle);
+
+      // Optional context from the RSS feed to enrich the AI prompt
+      const rssContext = [
+        author ? `Host/author: ${author}.` : '',
+        description ? `Episode description: "${description}"` : '',
+      ].filter(Boolean).join(' ');
 
       let prompt: string;
       if (isNews) {
         prompt =
           `You're a radio host transitioning from music to a news segment. ` +
           `The news show is called ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
           `Say something brief and natural to bridge to the news, like time to check in with the headlines or let's see what's happening in the world. ` +
-          `Mention the show name. 1 to 2 sentences. Never mention dates, times, or episode numbers.`;
+          `Mention the show name. Never mention dates, times, or episode numbers.`;
       } else if (isDateDump) {
         prompt =
           `You're a radio host transitioning from music to a podcast segment. ` +
           `The show is called ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
           `Introduce it naturally using only the show name, do not mention the episode title at all. ` +
-          `1 to 2 sentences. Keep it smooth and conversational.`;
+          `Keep it smooth and conversational.`;
       } else {
         prompt =
           `You're transitioning from a music set to a podcast segment. ` +
           `Show name: ${showName}. Episode: ${episodeTitle}. ` +
-          `Give a smooth natural on-air handoff, 1 to 2 sentences. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Give a smooth natural on-air handoff. ` +
           `Use the show name primarily. Only mention the episode title if it adds real value. ` +
           `Never mention dates, times, or episode numbers.`;
       }
@@ -276,24 +305,32 @@ export function useRadioModerator() {
       const isNews = isNewsShow(episode.feedTitle, episode.title);
       const isDateDump = episodeTitleIsDateDump(episode.title);
 
+      const rssContext = [
+        episode.author ? `Host/author: ${episode.author}.` : '',
+        episode.description ? `Episode description: "${episode.description}"` : '',
+      ].filter(Boolean).join(' ');
+
       let prompt: string;
       if (isNews) {
         prompt =
           `You're a radio host introducing a news segment. ` +
           `The show is ${episode.feedTitle}. ` +
+          (rssContext ? `${rssContext} ` : '') +
           `Say something like time for the news or let's check in with the latest headlines. ` +
-          `Mention the show name. 1 sentence. Never read out dates, times, or timestamps.`;
+          `Mention the show name. Never read out dates, times, or timestamps.`;
       } else if (isDateDump) {
         prompt =
           `You're a radio host introducing a podcast segment. ` +
           `Show: ${episode.feedTitle}. ` +
+          (rssContext ? `${rssContext} ` : '') +
           `The episode title is just a date or time, ignore it completely. ` +
-          `Introduce the show by name only. 1 to 2 sentences. Sound warm and natural.`;
+          `Introduce the show by name only. Sound warm and natural.`;
       } else {
         prompt =
           `You're a radio host transitioning from music to a podcast segment. ` +
           `Show: ${episode.feedTitle}. Episode: ${episode.title}. ` +
-          `Sound warm and natural, 1 to 2 sentences. Do not say here's at the start. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Sound warm and natural. Do not say here's at the start. ` +
           `Refer to the show by name. Only use the episode title if it is genuinely descriptive. ` +
           `Never mention dates, times, or episode numbers.`;
       }
@@ -392,6 +429,7 @@ export function useRadioModerator() {
     speakPodcastSegmentCommentary,
     speakPodcastReturn,
     speakSkipTransition,
+    speakUserControlReaction,
     stop,
     isSpeaking,
     isGenerating,
