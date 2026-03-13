@@ -12,6 +12,7 @@ import {
   type PodcastIndexFeed,
 } from '@/hooks/usePodcastIndex';
 import { GENRES, ALL_GENRE_IDS, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
+import { useLikedTracks } from '@/hooks/useLikedTracks';
 import {
   getStoredName,
   setStoredName,
@@ -159,6 +160,9 @@ export function SettingsPage() {
   };
 
   const removeFeed = (url: string) => saveFeeds(feeds.filter(f => f.url !== url));
+
+  // ── Liked tracks ───────────────────────────────────────────────────────────
+  const { liked, unlike } = useLikedTracks();
 
   return (
     <div className="min-h-screen gradient-bg text-white">
@@ -417,6 +421,56 @@ export function SettingsPage() {
               <PasteUrlForm feeds={feeds} onAdd={addFeedByUrl} error={error} setError={setError} />
             </div>
           </div>
+        </section>
+
+        {/* ── Liked Tracks ────────────────────────────────────────────────── */}
+        <section className="fade-in-up-delay-2 space-y-3">
+          <div className="flex items-center justify-between px-1">
+            <h2 className="text-sm font-semibold text-white/60 uppercase tracking-widest">♥ Liked Tracks</h2>
+            {liked.length > 0 && (
+              <span className="text-xs text-pink-400/70">{liked.length} track{liked.length !== 1 ? 's' : ''} · 2× priority</span>
+            )}
+          </div>
+          {liked.length === 0 ? (
+            <div className="glass-card rounded-2xl px-5 py-8 text-center">
+              <p className="text-sm text-white/30">No liked tracks yet.</p>
+              <p className="text-xs text-white/20 mt-1">Tap ♥ on any track while listening to save it here.</p>
+            </div>
+          ) : (
+            <div className="glass-card rounded-2xl divide-y divide-white/5">
+              {liked.map(track => (
+                <div key={track.id} className="flex items-center gap-3 px-4 py-3">
+                  <div className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
+                    <img src={track.artworkUrl} alt={track.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-white/80 truncate">{track.name}</p>
+                    <p className="text-xs text-white/40 truncate">{track.artist}</p>
+                  </div>
+                  <a
+                    href={`https://wavlake.com/track/${track.id}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex-shrink-0 text-white/20 hover:text-purple-400 transition-colors p-1"
+                    aria-label="Open on Wavlake"
+                  >
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                    </svg>
+                  </a>
+                  <button
+                    onClick={() => unlike(track.id)}
+                    aria-label="Unlike track"
+                    className="flex-shrink-0 p-1.5 rounded-full text-pink-400 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                  >
+                    <svg className="w-4 h-4 fill-pink-400" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                    </svg>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* ── Re-run setup ───────────────────────────────────────────────── */}

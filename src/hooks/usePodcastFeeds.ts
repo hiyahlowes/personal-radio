@@ -232,6 +232,20 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Fetch episodes for a single podcast feed URL.
+ * Used by the episode management panel to show all available episodes per feed.
+ */
+export function useSingleFeedEpisodes(feedUrl: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ['single-feed-episodes', feedUrl],
+    queryFn: () => fetchFeed(feedUrl),
+    enabled,
+    staleTime: 1000 * 60 * 30,
+    retry: 1,
+  });
+}
+
 export function usePodcastEpisodes(feeds: PodcastFeed[]) {
   return useQuery({
     queryKey: ['podcast-episodes', feeds.map(f => f.url).join(',')],

@@ -11,10 +11,11 @@ import {
 } from '@hello-pangea/dnd';
 
 import { useWavlakeTracks, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
-import { usePodcastEpisodes, getStoredFeeds, type PodcastEpisode } from '@/hooks/usePodcastFeeds';
+import { usePodcastEpisodes, useSingleFeedEpisodes, getStoredFeeds, type PodcastEpisode, type PodcastFeed } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator } from '@/hooks/useRadioModerator';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
+import { useLikedTracks } from '@/hooks/useLikedTracks';
 import { useRadioContext } from '@/contexts/RadioContext';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getStoredName } from '@/pages/SetupPage';
@@ -147,6 +148,7 @@ export function RadioPage() {
   } = usePodcastEpisodes(storedFeeds);
 
   const moderator = useRadioModerator();
+  const likedTracks = useLikedTracks();
 
   // ── UI state ──────────────────────────────────────────────────────────────
   const [idx, setIdx]         = useState(0);
@@ -160,6 +162,9 @@ export function RadioPage() {
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
   const [orderedTracks, setOrderedTracks] = useState<WavlakeTrack[]>([]);
   const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>([]);
+
+  // ── Episode management panel ──────────────────────────────────────────────
+  const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
 
   const segmenter = usePodcastSegmenter();
   const radioCtx  = useRadioContext();
@@ -202,12 +207,28 @@ export function RadioPage() {
   useEffect(() => { mutedRef.current     = muted;     }, [muted]);
 
   // Seed ordered arrays when fresh data arrives from the query.
-  // Only seed once (when going from empty → populated) so user reorders survive
-  // a re-render. If the genre selection changes we get a brand-new tracks array
-  // from React Query and we do want to reset.
+  // Apply liked-track 2x weighting immediately on seed. If the genre
+  // selection changes, React Query returns a new array and we reset.
   useEffect(() => {
-    if (tracks.length > 0) setOrderedTracks(tracks);
-  }, [tracks]);
+    if (tracks.length > 0) {
+      const currentId = tracksRef.current[idxRef.current]?.id;
+      setOrderedTracks(likedTracks.applyWeighting(tracks, currentId));
+    }
+  }, [tracks]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-apply weighting whenever the liked set changes (like/unlike action).
+  // Preserves the currently playing track at its position.
+  useEffect(() => {
+    if (orderedTracks.length > 0) {
+      const currentId = tracksRef.current[idxRef.current]?.id;
+      setOrderedTracks(prev => likedTracks.applyWeighting(
+        // De-duplicate first so we don't compound duplicates on every like
+        [...new Map(prev.map(t => [t.id, t])).values()],
+        currentId,
+      ));
+    }
+  }, [likedTracks.liked]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (episodes.length > 0) setOrderedEpisodes(episodes);
   }, [episodes]);
@@ -967,9 +988,20 @@ export function RadioPage() {
                       : 'Now Playing'}
                 </span>
                 {nowPlaying?.kind === 'music' && nowPlaying.track && (
-                  <a href={`https://wavlake.com/track/${nowPlaying.track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                  </a>
+                  <>
+                    <button
+                      onClick={() => likedTracks.toggle(nowPlaying.track)}
+                      aria-label={likedTracks.isLiked(nowPlaying.track.id) ? 'Unlike track' : 'Like track'}
+                      className="transition-colors"
+                    >
+                      <svg className={`w-3.5 h-3.5 transition-colors ${likedTracks.isLiked(nowPlaying.track.id) ? 'text-pink-400 fill-pink-400' : 'text-white/25 fill-none stroke-white/25'}`} viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                      </svg>
+                    </button>
+                    <a href={`https://wavlake.com/track/${nowPlaying.track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
+                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    </a>
+                  </>
                 )}
               </div>
               {isLoading ? (
@@ -1188,19 +1220,32 @@ export function RadioPage() {
                                </svg>
                              </div>
                              <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
-                             <div className="flex-1 min-w-0">
-                               <div className="flex items-center gap-2 mb-0.5">
-                                 <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
-                                 {ep.duration > 0 && <>
-                                   <span className="text-xs text-white/25">·</span>
-                                   <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
-                                 </>}
-                                 {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
-                               </div>
-                               <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
-                               <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
-                             </div>
-                           </PortalAware>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-0.5">
+                                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
+                                  {ep.duration > 0 && <>
+                                    <span className="text-xs text-white/25">·</span>
+                                    <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
+                                  </>}
+                                  {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
+                                </div>
+                                <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
+                                <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
+                              </div>
+                              {/* Remove episode from queue */}
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setOrderedEpisodes(prev => prev.filter(e => e.id !== ep.id));
+                                }}
+                                aria-label="Remove episode from queue"
+                                className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white/25 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                              </button>
+                            </PortalAware>
                          )}
                        </Draggable>
                      ))}
@@ -1292,20 +1337,59 @@ export function RadioPage() {
                                  <p className="text-xs text-white/40 truncate">{t.artist}</p>
                                </button>
 
-                               <span className="text-xs text-white/30 flex-shrink-0 pr-1">{fmt(t.duration)}</span>
-                             </PortalAware>
-                           )}
-                         </Draggable>
-                       ))}
-                      {provided.placeholder}
-                    </div>
-                  )}
-                </Droppable>
+                                {/* Like button */}
+                                <button
+                                  onClick={e => { e.stopPropagation(); likedTracks.toggle(t); }}
+                                  aria-label={likedTracks.isLiked(t.id) ? 'Unlike track' : 'Like track'}
+                                  className="flex-shrink-0 p-1 rounded-full transition-colors hover:bg-white/10"
+                                >
+                                  <svg
+                                    className={`w-3.5 h-3.5 transition-colors ${likedTracks.isLiked(t.id) ? 'text-pink-400 fill-pink-400' : 'text-white/20 fill-none stroke-white/20'}`}
+                                    viewBox="0 0 24 24"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                  >
+                                    <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                                  </svg>
+                                </button>
+                                <span className="text-xs text-white/30 flex-shrink-0 pr-1">{fmt(t.duration)}</span>
+                              </PortalAware>
+                            )}
+                          </Draggable>
+                        ))}
+                       {provided.placeholder}
+                     </div>
+                   )}
+                 </Droppable>
               )}
             </div>
           </div>
 
         </DragDropContext>
+
+        {/* ── Episode Management — browse all episodes per feed ── */}
+        {storedFeeds.length > 0 && (
+          <div className="fade-in-up-delay-3 space-y-3">
+            <div className="flex items-center justify-between px-1">
+              <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Episode Browser</h3>
+              <span className="text-xs text-white/30">tap a feed to browse</span>
+            </div>
+            <div className="space-y-2">
+              {storedFeeds.map(feed => (
+                <FeedEpisodesPanel
+                  key={feed.url}
+                  feed={feed}
+                  isExpanded={expandedFeed === feed.url}
+                  onToggle={() => setExpandedFeed(prev => prev === feed.url ? null : feed.url)}
+                  queuedIds={new Set(orderedEpisodes.map(e => e.id))}
+                  onAdd={ep => setOrderedEpisodes(prev => prev.some(e => e.id === ep.id) ? prev : [...prev, ep])}
+                  onRemove={id => setOrderedEpisodes(prev => prev.filter(e => e.id !== id))}
+                  fmt={fmt}
+                />
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="text-center pt-2 pb-10">
@@ -1316,6 +1400,118 @@ export function RadioPage() {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── FeedEpisodesPanel ─────────────────────────────────────────────────────────
+// Expandable panel for a single podcast feed: shows all available episodes
+// with add/remove controls relative to the current queue.
+
+function FeedEpisodesPanel({
+  feed,
+  isExpanded,
+  onToggle,
+  queuedIds,
+  onAdd,
+  onRemove,
+  fmt,
+}: {
+  feed: PodcastFeed;
+  isExpanded: boolean;
+  onToggle: () => void;
+  queuedIds: Set<string>;
+  onAdd: (ep: PodcastEpisode) => void;
+  onRemove: (id: string) => void;
+  fmt: (s: number) => string;
+}) {
+  const { data: episodes = [], isFetching, isError } = useSingleFeedEpisodes(feed.url, isExpanded);
+
+  return (
+    <div className="glass-card rounded-2xl overflow-hidden">
+      {/* Feed header / toggle */}
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center gap-3 px-4 py-3.5 hover:bg-white/5 transition-colors text-left"
+        aria-expanded={isExpanded}
+      >
+        <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-base">🎙️</div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-white/80 truncate">{feed.title}</p>
+          <p className="text-xs text-white/35 truncate">{feed.url}</p>
+        </div>
+        <svg
+          className={`w-4 h-4 text-white/30 flex-shrink-0 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+          viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+        >
+          <path d="M6 9l6 6 6-6"/>
+        </svg>
+      </button>
+
+      {/* Episodes list */}
+      {isExpanded && (
+        <div className="border-t border-white/5">
+          {isFetching ? (
+            <div className="px-4 py-5 text-center">
+              <p className="text-sm text-white/30">Loading episodes…</p>
+            </div>
+          ) : isError ? (
+            <div className="px-4 py-5 text-center">
+              <p className="text-sm text-red-400/70">Couldn't load episodes. Check your relay or try again later.</p>
+            </div>
+          ) : episodes.length === 0 ? (
+            <div className="px-4 py-5 text-center">
+              <p className="text-sm text-white/30">No episodes found.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-white/5">
+              {episodes.map(ep => {
+                const inQueue = queuedIds.has(ep.id);
+                return (
+                  <div key={ep.id} className="flex items-center gap-3 px-4 py-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white/80 truncate">{ep.title}</p>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        {ep.duration > 0 && (
+                          <span className="text-xs text-white/35">{fmt(ep.duration)}</span>
+                        )}
+                        {ep.pubDate && (
+                          <span className="text-xs text-white/25">
+                            {new Date(ep.pubDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {inQueue ? (
+                      <button
+                        onClick={() => onRemove(ep.id)}
+                        aria-label="Remove from queue"
+                        className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-red-900/20 hover:text-red-400 hover:border-red-500/30 transition-all"
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                        In queue
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => onAdd(ep)}
+                        aria-label="Add to queue"
+                        className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-white/5 text-white/40 border border-white/10 hover:bg-amber-500/20 hover:text-amber-300 hover:border-amber-500/30 transition-all"
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                        Add
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
