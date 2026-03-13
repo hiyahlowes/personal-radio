@@ -626,9 +626,11 @@ export function RadioPage() {
 
   // ── Drag-and-drop handlers ─────────────────────────────────────────────────
   const handleDragEnd = useCallback((result: DropResult) => {
-    const { source, destination, droppableId } = result;
+    const { source, destination } = result;
     if (!destination) return; // dropped outside a list
     if (source.index === destination.index && source.droppableId === destination.droppableId) return;
+
+    const droppableId = source.droppableId;
 
     if (droppableId === 'playlist') {
       setOrderedTracks(prev => {
