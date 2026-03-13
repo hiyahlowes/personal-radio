@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -17,9 +17,38 @@ import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
 import { usePodcastHistory } from '@/hooks/usePodcastHistory';
+import { useMusicHistory } from '@/hooks/useMusicHistory';
 import { useRadioContext } from '@/contexts/RadioContext';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getStoredName } from '@/pages/SetupPage';
+
+// ─── Play-count helpers ────────────────────────────────────────────────────────
+/** In-place Fisher-Yates shuffle; returns the same array. */
+function fisherYates<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/**
+ * Re-order tracks so unplayed ones come first, played ones sorted by count.
+ * The currently-playing track (if any) is pinned at index 0.
+ */
+function applyPlayCountBias(
+  tracks: WavlakeTrack[],
+  playCounts: Record<string, number>,
+  currentId?: string,
+): WavlakeTrack[] {
+  const current  = currentId ? tracks.find(t => t.id === currentId) : undefined;
+  const rest     = tracks.filter(t => t !== current);
+  const unplayed = fisherYates(rest.filter(t => !(playCounts[t.id] ?? 0)));
+  const played   = rest
+    .filter(t => !!(playCounts[t.id] ?? 0))
+    .sort((a, b) => (playCounts[a.id] ?? 0) - (playCounts[b.id] ?? 0));
+  return current ? [current, ...unplayed, ...played] : [...unplayed, ...played];
+}
 
 // ─── RadioItem union ─────────────────────────────────────────────────────────
 type RadioItem =
@@ -178,6 +207,7 @@ export function RadioPage() {
   const moderator = useRadioModerator();
   const likedTracks    = useLikedTracks();
   const podcastHistory = usePodcastHistory();
+  const musicHistory   = useMusicHistory();
 
   // ── UI state ──────────────────────────────────────────────────────────────
   const [idx, setIdx]         = useState(0);
@@ -235,14 +265,22 @@ export function RadioPage() {
   const skipRef          = useRef(false);
   // Ref-stable callback used inside advanceLoop (stable closure) to mark
   // episodes as played without adding podcastHistory to its dependency array.
-  const markPlayedRef    = useRef<(id: string) => void>(() => {});
+  const markPlayedRef      = useRef<(id: string) => void>(() => {});
+  const markMusicPlayedRef = useRef<(id: string) => void>(() => {});
 
   // Sync refs to latest state/props
   useEffect(() => { moderatorRef.current  = moderator;                   }, [moderator]);
   useEffect(() => { nameRef.current       = name;                        }, [name]);
   useEffect(() => { volumeRef.current     = volume;                      }, [volume]);
   useEffect(() => { mutedRef.current      = muted;                       }, [muted]);
-  useEffect(() => { markPlayedRef.current = podcastHistory.markPlayed;   }, [podcastHistory.markPlayed]);
+  useEffect(() => { markPlayedRef.current      = podcastHistory.markPlayed;  }, [podcastHistory.markPlayed]);
+  useEffect(() => { markMusicPlayedRef.current = musicHistory.markPlayed;   }, [musicHistory.markPlayed]);
+
+  // Set of track IDs that have been played at least once — used for UI indicators.
+  const playedTrackIds = useMemo(
+    () => new Set(Object.keys(musicHistory.history)),
+    [musicHistory.history],
+  );
 
   // Seed ordered arrays when fresh data arrives from the query.
   // Apply liked-track 2x weighting immediately on seed. If the genre
@@ -250,7 +288,14 @@ export function RadioPage() {
   useEffect(() => {
     if (tracks.length > 0) {
       const currentId = tracksRef.current[idxRef.current]?.id;
-      setOrderedTracks(likedTracks.applyWeighting(tracks, currentId));
+      // Always Fisher-Yates shuffle before weighting so each page load / genre
+      // change produces a fresh random order. In Top Charts mode we preserve
+      // chart ranking so skip the extra shuffle there.
+      const toSeed = isTopCharts ? [...tracks] : fisherYates([...tracks]);
+      const weighted = likedTracks.applyWeighting(toSeed, currentId);
+      // Bias: unplayed tracks bubble to the front; played tracks sorted by
+      // play count ascending so the least-played ones come soonest.
+      setOrderedTracks(isTopCharts ? weighted : applyPlayCountBias(weighted, musicHistory.history, currentId));
     }
   }, [tracks]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -517,9 +562,12 @@ export function RadioPage() {
           await audio.play();
           console.log('[Loop] audio.play() resolved at duck level');
         } catch (e) {
-          console.error('[Loop] audio.play() failed:', e);
-          runningRef.current = false;
-          break;
+          console.error('[Loop] audio.play() failed — skipping to next track:', e);
+          // Skip to next track rather than freezing the loop.
+          // (Autoplay-blocked errors will be caught by the user pressing play again.)
+          idxRef.current = (currentIdx + 1) % tracks.length;
+          await sleep(200);
+          continue;
         }
       }
 
@@ -677,6 +725,7 @@ export function RadioPage() {
         // Advance silent counter for the track that just ended (t)
         recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
         silentCountRef.current++;
+        markMusicPlayedRef.current(t.id);
 
         // Signal the loop top that audio is already loaded & playing
         crossfadeActiveRef.current = true;
@@ -690,6 +739,7 @@ export function RadioPage() {
         if (!crossfadeHappened) {
           recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
           silentCountRef.current++;
+          markMusicPlayedRef.current(t.id);
           idxRef.current = (currentIdx + 1) % tracks.length;
         }
 
@@ -1417,12 +1467,14 @@ export function RadioPage() {
                     >
                        {orderedTracks.map((t, i) => (
                          <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
-                           {(drag, dragSnapshot) => (
+                           {(drag, dragSnapshot) => {
+                             const isPlayed = i !== idx && playedTrackIds.has(t.id);
+                             return (
                              <PortalAware
                                provided={drag}
                                snapshot={dragSnapshot}
                                className={`flex items-center gap-3 px-4 py-3.5 transition-all
-                                 ${i === idx ? 'bg-purple-900/20' : 'hover:bg-white/5'}
+                                 ${i === idx ? 'bg-purple-900/20' : isPlayed ? 'opacity-45 hover:opacity-70' : 'hover:bg-white/5'}
                                  ${dragSnapshot.isDragging ? 'shadow-xl shadow-purple-900/40 bg-[rgba(30,20,60,0.95)] ring-1 ring-purple-500/40 rounded-xl opacity-95' : ''}
                                `}
                              >
@@ -1437,7 +1489,7 @@ export function RadioPage() {
                                  </svg>
                                </div>
 
-                               {/* Track number / playing indicator */}
+                               {/* Track number / playing indicator / played checkmark */}
                                <button
                                  onClick={() => handleSelect(i)}
                                  className="w-6 flex items-center justify-center flex-shrink-0"
@@ -1445,7 +1497,9 @@ export function RadioPage() {
                                >
                                  {i === idx
                                    ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                                   : <span className="text-white/30 text-xs hover:text-white/60">{i + 1}</span>
+                                   : isPlayed
+                                     ? <svg className="w-3.5 h-3.5 text-green-500/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                                     : <span className="text-white/30 text-xs hover:text-white/60">{i + 1}</span>
                                  }
                                </button>
 
@@ -1456,7 +1510,7 @@ export function RadioPage() {
 
                                {/* Info */}
                                <button onClick={() => handleSelect(i)} className="flex-1 min-w-0 text-left">
-                                 <p className={`text-sm font-medium truncate flex items-center gap-1.5 ${i === idx ? 'text-purple-300' : 'text-white/80'}`}>
+                                 <p className={`text-sm font-medium truncate flex items-center gap-1.5 ${i === idx ? 'text-purple-300' : isPlayed ? 'text-white/40' : 'text-white/80'}`}>
                                    {t.isTopChart && (
                                      <span className="flex-shrink-0 text-amber-400 text-xs" title="Top Charts — Lightning-boosted hit">⚡</span>
                                    )}
@@ -1480,9 +1534,32 @@ export function RadioPage() {
                                     <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
                                   </svg>
                                 </button>
-                                <span className="text-xs text-white/30 flex-shrink-0 pr-1">{fmt(t.duration)}</span>
+                                <span className="text-xs text-white/30 flex-shrink-0">{fmt(t.duration)}</span>
+                                {/* Delete track from playlist */}
+                                <button
+                                  onClick={e => {
+                                    e.stopPropagation();
+                                    setOrderedTracks(prev => {
+                                      const targetIdx = prev.findIndex(x => x.id === t.id);
+                                      const next = prev.filter(x => x.id !== t.id);
+                                      if (targetIdx !== -1 && targetIdx < idxRef.current) {
+                                        idxRef.current = Math.max(0, idxRef.current - 1);
+                                        setIdx(idxRef.current);
+                                      }
+                                      tracksRef.current = next;
+                                      return next;
+                                    });
+                                  }}
+                                  aria-label="Remove from playlist"
+                                  className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white/20 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                                >
+                                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                                  </svg>
+                                </button>
                               </PortalAware>
-                            )}
+                             );
+                            }}
                           </Draggable>
                         ))}
                        {provided.placeholder}
