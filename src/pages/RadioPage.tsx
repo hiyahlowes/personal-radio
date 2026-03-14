@@ -120,6 +120,27 @@ function loadQueue(): { tracks: WavlakeTrack[]; episodes: PodcastEpisode[]; idx:
   }
 }
 
+// ─── Podcast position persistence ────────────────────────────────────────────
+const PODCAST_POSITION_KEY = 'pr:podcast-position';
+
+function savePodcastPosition(episodeId: string, currentTime: number): void {
+  try {
+    const raw = localStorage.getItem(PODCAST_POSITION_KEY);
+    const positions: Record<string, number> = raw ? JSON.parse(raw) : {};
+    positions[episodeId] = currentTime;
+    localStorage.setItem(PODCAST_POSITION_KEY, JSON.stringify(positions));
+  } catch { /* quota exceeded — ignore */ }
+}
+
+function loadPodcastPosition(episodeId: string): number {
+  try {
+    const raw = localStorage.getItem(PODCAST_POSITION_KEY);
+    if (!raw) return 0;
+    const positions = JSON.parse(raw) as Record<string, number>;
+    return positions[episodeId] ?? 0;
+  } catch { return 0; }
+}
+
 // ─── Portal-aware drag clone helper ──────────────────────────────────────────
 // backdrop-filter on .glass-card creates a new stacking context that traps
 // position:fixed elements — which is exactly how @hello-pangea/dnd positions
@@ -221,7 +242,11 @@ export function RadioPage() {
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
   // Initialise from persisted queue so content appears instantly on page return,
   // before the Wavlake / RSS queries resolve. API data overwrites these on load.
-  const [orderedTracks, setOrderedTracks] = useState<WavlakeTrack[]>(() => loadQueue().tracks);
+  // Shuffle persisted tracks immediately so every session starts with a fresh order
+  const [orderedTracks, setOrderedTracks] = useState<WavlakeTrack[]>(() => {
+    const { tracks } = loadQueue();
+    return tracks.length > 0 ? fisherYates([...tracks]) : tracks;
+  });
   const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>(() => loadQueue().episodes);
 
   // ── Episode management panel ──────────────────────────────────────────────
@@ -246,8 +271,12 @@ export function RadioPage() {
 
   const nextAudioRef     = radioCtx.nextAudioRef;
 
-  const cancelRampRef     = useRef<(() => void) | null>(null);
-  const cancelNextRampRef = useRef<(() => void) | null>(null);
+  const cancelRampRef          = useRef<(() => void) | null>(null);
+  const cancelNextRampRef      = useRef<(() => void) | null>(null);
+  // Non-null when the user paused mid-podcast; advanceLoop resumes from here on next play.
+  const resumePodcastEpisodeRef = useRef<PodcastEpisode | null>(null);
+  // Timestamp of last podcast position save (throttle to every 5 s).
+  const lastPodSaveRef          = useRef(0);
   // Set true after a crossfade completes so the loop top skips re-loading audio
   const crossfadeActiveRef = useRef(false);
   const tracksRef          = useRef<WavlakeTrack[]>([]);
@@ -413,6 +442,15 @@ export function RadioPage() {
       // until enough data is buffered. Update it opportunistically here so
       // the seek bar fills in as soon as the browser knows the duration.
       if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration);
+      // Throttled position save (every 5 s) so we can resume after pause/reload
+      const epId = nowPlayingRef.current?.kind === 'podcast' ? nowPlayingRef.current.episode.id : null;
+      if (epId && pod.currentTime > 5) {
+        const now = Date.now();
+        if (now - lastPodSaveRef.current > 5000) {
+          savePodcastPosition(epId, pod.currentTime);
+          lastPodSaveRef.current = now;
+        }
+      }
     };
     const onPodDur   = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
     const onPodMeta  = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
@@ -512,6 +550,46 @@ export function RadioPage() {
     console.log('[Loop] advanceLoop() started, idxRef:', idxRef.current);
 
     while (runningRef.current) {
+      // ── Resume a podcast episode that was paused mid-playback ──────────────
+      const resumeEp = resumePodcastEpisodeRef.current;
+      if (resumeEp) {
+        resumePodcastEpisodeRef.current = null;
+        const pod = podAudioRef.current;
+        if (pod?.src && runningRef.current) {
+          console.log(`[Loop] resuming paused podcast: "${resumeEp.title}"`);
+          try { await pod.play(); } catch (e) { console.warn('[Loop] pod resume failed:', e); }
+
+          // Wait for episode to finish or user to pause again
+          if (runningRef.current) {
+            await new Promise<void>(res => {
+              const onEnded       = () => { cleanup(); res(); };
+              const onResumePause = () => { if (!runningRef.current) { cleanup(); res(); } };
+              function cleanup() {
+                pod.removeEventListener('ended',  onEnded);
+                pod.removeEventListener('pause',  onResumePause);
+              }
+              pod.addEventListener('ended', onEnded);
+              pod.addEventListener('pause', onResumePause);
+            });
+          }
+
+          pod.pause();
+          if (runningRef.current) {
+            // Episode finished naturally after resume
+            pod.src = '';
+            markPlayedRef.current(resumeEp.id);
+            setOrderedEpisodes(prev => prev.filter(e => e.id !== resumeEp.id));
+            const nextMusicTrack = tracksRef.current[idxRef.current];
+            if (nextMusicTrack) await moderatorRef.current.speakPodcastOutro(resumeEp, nextMusicTrack);
+          } else {
+            // Paused again — save for next resume
+            resumePodcastEpisodeRef.current = resumeEp;
+          }
+        }
+        if (!runningRef.current) break;
+        continue;
+      }
+
       const tracks     = tracksRef.current;
       const currentIdx = idxRef.current;
       const t          = tracks[currentIdx];
@@ -803,7 +881,21 @@ export function RadioPage() {
             pod.src    = episode.audioUrl;
             pod.volume = mutedRef.current ? 0 : volumeRef.current;
             pod.load();
-            setCT(0);
+
+            // Seek to saved position if this episode was partially played before
+            const savedPos = loadPodcastPosition(episode.id);
+            if (savedPos > 5) {
+              console.log(`[Loop] resuming from saved position ${savedPos.toFixed(0)}s`);
+              const seekOnMeta = () => {
+                pod.removeEventListener('loadedmetadata', seekOnMeta);
+                if (isFinite(pod.duration) && savedPos < pod.duration - 10) {
+                  pod.currentTime = savedPos;
+                }
+              };
+              pod.addEventListener('loadedmetadata', seekOnMeta);
+            }
+
+            setCT(savedPos > 5 ? savedPos : 0);
             setDur(episode.duration || 0);
 
             // Update Now Playing to show podcast info
@@ -918,20 +1010,19 @@ export function RadioPage() {
               );
             }
 
-            // ── Episode finished (naturally or user paused) ────────────────
+            // ── Episode finished or user paused ───────────────────────────
             pod.pause();
-            pod.src = '';
-
-            // Mark this episode as played so it won't re-appear in the queue
-            // on next refresh (unless all episodes have been played).
-            markPlayedRef.current(episode.id);
-
-            // Also remove it from orderedEpisodes state so the UI updates.
-            setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
-
-            // ── Outro: bridge back to music ───────────────────────────────
-            if (runningRef.current && nextMusicTrack) {
-              await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
+            if (runningRef.current) {
+              // Finished naturally — clean up, mark played, speak outro
+              pod.src = '';
+              markPlayedRef.current(episode.id);
+              setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
+              if (nextMusicTrack) {
+                await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
+              }
+            } else {
+              // User paused mid-episode — preserve src and queue entry for resume
+              resumePodcastEpisodeRef.current = episode;
             }
           }
 
@@ -968,7 +1059,11 @@ export function RadioPage() {
       startRadio();
     } else {
       runningRef.current = true;
-      audioRef.current?.play().catch(e => console.error('[Play] resume failed:', e));
+      // If we paused mid-podcast, advanceLoop will detect resumePodcastEpisodeRef
+      // and resume from the saved position — don't also try to play the music element.
+      if (!resumePodcastEpisodeRef.current) {
+        audioRef.current?.play().catch(e => console.error('[Play] resume failed:', e));
+      }
       advanceLoop();
     }
   }, [startRadio, advanceLoop]);
@@ -978,6 +1073,7 @@ export function RadioPage() {
     runningRef.current = false;
     moderatorRef.current.stop();
     audioRef.current?.pause();
+    podAudioRef.current?.pause(); // also pause podcast if one is playing
   }, []);
 
   const jumpTo = useCallback((newIdx: number, userSkipped = false) => {
@@ -1451,10 +1547,18 @@ export function RadioPage() {
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-0.5">
                                   <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
-                                  {ep.duration > 0 && <>
-                                    <span className="text-xs text-white/25">·</span>
-                                    <span className="text-xs text-white/40">{fmt(ep.duration)}</span>
-                                  </>}
+                                  {ep.duration > 0 && (() => {
+                                    const saved = loadPodcastPosition(ep.id);
+                                    const remaining = saved > 5 ? ep.duration - saved : ep.duration;
+                                    return remaining > 0 ? (
+                                      <>
+                                        <span className="text-xs text-white/25">·</span>
+                                        <span className="text-xs text-white/40">
+                                          {saved > 5 ? `${fmt(remaining)} left` : fmt(ep.duration)}
+                                        </span>
+                                      </>
+                                    ) : null;
+                                  })()}
                                   {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
                                 </div>
                                 <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
