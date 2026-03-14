@@ -328,6 +328,22 @@ export function RadioPage() {
     }
   }, [tracks]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-shuffle once when tracks first load (before radio starts).
+  // Mirrors exactly what the shuffle button does so the first song is random
+  // even on a fresh load where the persisted queue is still in chart order.
+  const autoShuffledRef = useRef(false);
+  useEffect(() => {
+    if (orderedTracks.length > 0 && !autoShuffledRef.current && !greetedRef.current) {
+      autoShuffledRef.current = true;
+      console.log('[AutoShuffle] shuffling playlist on first load');
+      setOrderedTracks(prev => {
+        const shuffled = fisherYates([...prev]);
+        tracksRef.current = shuffled;
+        return shuffled;
+      });
+    }
+  }, [orderedTracks.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Re-apply weighting whenever the liked set changes (like/unlike action).
   // Preserves the currently playing track at its position.
   useEffect(() => {
@@ -1047,11 +1063,13 @@ export function RadioPage() {
     console.log('[Start] startRadio()');
     runningRef.current = true;
     idxRef.current     = 0;
+    resumePodcastEpisodeRef.current = null; // never carry over a stale resume from a previous session
     await advanceLoop();
   }, [advanceLoop]);
 
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
+    console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
     // If the loop is already running (e.g. we navigated away and came back),
     // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
@@ -1059,17 +1077,19 @@ export function RadioPage() {
       startRadio();
     } else {
       runningRef.current = true;
-      // If we paused mid-podcast, advanceLoop will detect resumePodcastEpisodeRef
-      // and resume from the saved position — don't also try to play the music element.
-      if (!resumePodcastEpisodeRef.current) {
-        audioRef.current?.play().catch(e => console.error('[Play] resume failed:', e));
+      if (resumePodcastEpisodeRef.current) {
+        // Resuming mid-podcast — advanceLoop will handle pod.play(); don't touch audioRef.
+        console.log('[PlayPause] resuming podcast:', resumePodcastEpisodeRef.current.title);
+      } else {
+        // Resuming music — nudge the music element; advanceLoop will reload/play properly.
+        audioRef.current?.play().catch(e => console.warn('[PlayPause] audioRef.play() aborted (expected):', e));
       }
       advanceLoop();
     }
   }, [startRadio, advanceLoop]);
 
   const handlePause = useCallback(() => {
-    console.log('[Pause] handlePause()');
+    console.log('[PlayPause] handlePause — nowPlaying:', nowPlayingRef.current?.kind ?? 'none', '| resumePodcast before:', resumePodcastEpisodeRef.current?.title ?? 'none');
     runningRef.current = false;
     moderatorRef.current.stop();
     audioRef.current?.pause();
@@ -1091,6 +1111,8 @@ export function RadioPage() {
     audioRef.current?.pause();
     podAudioRef.current?.pause();
     if (podAudioRef.current) podAudioRef.current.src = '';
+    // Discard any pending podcast resume — skipping means we abandon the episode.
+    resumePodcastEpisodeRef.current = null;
 
     idxRef.current = newIdx;
     setIdx(newIdx);
