@@ -135,8 +135,11 @@ async function generateScript(prompt: string, longForm = false): Promise<string 
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         system:
+          `CRITICAL: You MUST respond ONLY in ${language}. ` +
+          `Every single word of your response must be in ${language}. ` +
+          `Never switch to English or any other language, even for artist names, song titles, or technical terms. ` +
+          `If the artist name or song title is in English, still introduce it in ${language}. ` +
           `You are a warm, natural-sounding AI radio host for PR, Personal Radio. ` +
-          `You MUST respond exclusively in ${language}. Never use any other language. ` +
           'Speak exactly as you would on air: no stage directions, no quotation marks around spoken titles, no asterisks, ' +
           'no parenthetical notes. Just pure, natural radio speech. No emojis. ' +
           'RULES: ' +
