@@ -328,21 +328,22 @@ export function RadioPage() {
     }
   }, [tracks]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-shuffle once when tracks first load (before radio starts).
-  // Mirrors exactly what the shuffle button does so the first song is random
-  // even on a fresh load where the persisted queue is still in chart order.
+  // Auto-shuffle once after ALL tracks have loaded (isLoading → false), before
+  // the radio starts. Watching orderedTracks.length caused premature shuffles on
+  // partial batches and race conditions when the first tracks arrived while the
+  // greeting was in-flight. Using !isLoading ensures the full batch is present.
   const autoShuffledRef = useRef(false);
   useEffect(() => {
-    if (orderedTracks.length > 0 && !autoShuffledRef.current && !greetedRef.current) {
+    if (!isLoading && tracks.length > 0 && !autoShuffledRef.current && !greetedRef.current) {
       autoShuffledRef.current = true;
-      console.log('[AutoShuffle] shuffling playlist on first load');
+      console.log('[AutoShuffle] shuffling playlist after full load');
       setOrderedTracks(prev => {
         const shuffled = fisherYates([...prev]);
         tracksRef.current = shuffled;
         return shuffled;
       });
     }
-  }, [orderedTracks.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isLoading, tracks.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-apply weighting whenever the liked set changes (like/unlike action).
   // Preserves the currently playing track at its position.
