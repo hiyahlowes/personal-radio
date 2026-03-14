@@ -88,6 +88,20 @@ function randInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+/**
+ * Play a jingle file once at full volume and resolve when it ends.
+ * Errors are swallowed so a missing file never stalls the radio loop.
+ */
+function playJingle(src: string): Promise<void> {
+  return new Promise<void>(resolve => {
+    const jingle = new Audio(src);
+    jingle.volume = 1.0;
+    jingle.addEventListener('ended', () => resolve(), { once: true });
+    jingle.addEventListener('error', () => resolve(), { once: true });
+    jingle.play().catch(() => resolve());
+  });
+}
 function fmt(s: number) {
   if (!isFinite(s) || s < 0) return '0:00';
   return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -918,31 +932,38 @@ export function RadioPage() {
 
           console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
 
-          // ── Transition: duck music, speak intro, fade to silence ─────────
-          // 1. Begin fading music down to 0.05 over 3 s — this starts
-          //    simultaneously with script generation so music is already
-          //    quieting as the moderator starts to speak.
+          // ── Transition: duck music → jingle → moderator → silence → podcast
+          // 1. Fade music to 0.05 over 3 s (awaited so jingle starts clean).
           podcastTransitionRef.current = true;
-          let cancelPodFade = rampVolume(audio, 0.05, 3000);
           console.log('[Loop] podcast transition — fading music to 0.05 over 3s');
+          await new Promise<void>(res => { rampVolume(audio, 0.05, 3000, res); });
 
+          if (!runningRef.current) {
+            podcastTransitionRef.current = false;
+            break;
+          }
+
+          // 2. Play podcast-intro jingle at full volume (no duck).
+          await playJingle('/podcast-intro.mp3');
+
+          if (!runningRef.current) {
+            podcastTransitionRef.current = false;
+            break;
+          }
+
+          // 3. Moderator speaks the transition (music still at 0.05 underneath).
           await moderatorRef.current.speakPodcastTransition(
             episode.title, episode.feedTitle, episode.description, episode.author,
           );
 
           if (!runningRef.current) {
-            cancelPodFade();
             podcastTransitionRef.current = false;
             break;
           }
 
-          // 2. Speech done — stop the duck ramp (may have already finished)
-          //    then fade music fully out over 2 s before starting the podcast.
-          cancelPodFade();
+          // 4. Fade music fully out over 2 s before starting the podcast.
           console.log('[Loop] podcast transition — fading music to 0 over 2s');
-          await new Promise<void>(res => {
-            cancelPodFade = rampVolume(audio, 0, 2000, res);
-          });
+          await new Promise<void>(res => { rampVolume(audio, 0, 2000, res); });
           podcastTransitionRef.current = false;
 
           if (!runningRef.current) break;
@@ -1011,6 +1032,7 @@ export function RadioPage() {
                   isRunning: () => runningRef.current,
 
                   speakCommentary: async (script) => {
+                    await playJingle('/studio-return.mp3');
                     await localMod.current.speakPodcastSegmentCommentary(script);
                   },
 
@@ -1221,6 +1243,14 @@ export function RadioPage() {
   const handlePrev   = useCallback(() => jumpTo((idxRef.current - 1 + tracksRef.current.length) % tracksRef.current.length, true), [jumpTo]);
   const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length, true), [jumpTo]);
   const handleSelect = useCallback((i: number) => jumpTo(i, false), [jumpTo]);
+
+  const handlePodSkip = useCallback((deltaSecs: number) => {
+    const pod = podAudioRef.current;
+    if (!pod || nowPlayingRef.current?.kind !== 'podcast') return;
+    const clamped = Math.max(0, Math.min(pod.duration || 0, pod.currentTime + deltaSecs));
+    pod.currentTime = clamped;
+    savePodcastPosition(nowPlayingRef.current.episode.id, clamped);
+  }, []);
 
   // ── Jump directly to a podcast episode ────────────────────────────────────
   // Moves the episode to the front of the queue, forces the podcast slot to
@@ -1511,9 +1541,20 @@ export function RadioPage() {
                 onChange={e => { setVol(+e.target.value); setMuted(false); }}
                 className="w-20 h-1" aria-label="Volume" />
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3">
               <button onClick={handlePrev} disabled={isLoading} className="w-10 h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Previous">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+              </button>
+              <button
+                onClick={() => handlePodSkip(-30)}
+                disabled={nowPlaying?.kind !== 'podcast'}
+                className="w-9 h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                aria-label="Skip back 30 seconds"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
+                  <text x="12" y="14.5" textAnchor="middle" fontSize="5.5" fontWeight="bold" fill="currentColor">30</text>
+                </svg>
               </button>
               <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || (orderedTracks.length === 0 && tracks.length === 0)}
                 className="w-14 h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40"
@@ -1524,6 +1565,17 @@ export function RadioPage() {
                     ? <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
                     : <svg className="w-6 h-6 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                 }
+              </button>
+              <button
+                onClick={() => handlePodSkip(30)}
+                disabled={nowPlaying?.kind !== 'podcast'}
+                className="w-9 h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                aria-label="Skip forward 30 seconds"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/>
+                  <text x="12" y="14.5" textAnchor="middle" fontSize="5.5" fontWeight="bold" fill="currentColor">30</text>
+                </svg>
               </button>
               <button onClick={handleNext} disabled={isLoading} className="w-10 h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Next">
                 <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
