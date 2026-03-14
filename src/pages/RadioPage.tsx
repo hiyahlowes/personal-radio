@@ -279,6 +279,9 @@ export function RadioPage() {
   const lastPodSaveRef          = useRef(0);
   // Set true after a crossfade completes so the loop top skips re-loading audio
   const crossfadeActiveRef = useRef(false);
+  // Set true when the user resumes music that was paused mid-track so the loop
+  // skips the src reload and just calls play() from the current position.
+  const resumeMusicRef = useRef(false);
   const tracksRef          = useRef<WavlakeTrack[]>([]);
   const silentCountRef   = useRef(0);
   const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
@@ -634,6 +637,20 @@ export function RadioPage() {
         setIdx(currentIdx);
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
+      } else if (resumeMusicRef.current) {
+        // ── User resumed after pausing mid-track — src is still loaded ─────
+        resumeMusicRef.current = false;
+        console.log(`[Loop] music resume — playing from ${audio.currentTime.toFixed(1)}s`);
+        // Sync UI state (don't reset setCT — keep current position)
+        setIdx(currentIdx);
+        nowPlayingRef.current = { kind: 'music', track: t };
+        setNowPlaying({ kind: 'music', track: t });
+        try {
+          await audio.play();
+          console.log('[Loop] resume play() resolved');
+        } catch (e) {
+          console.warn('[Loop] resume play() failed:', e);
+        }
       } else {
         // Normal load
         audio.pause();
@@ -1081,11 +1098,16 @@ export function RadioPage() {
       if (resumePodcastEpisodeRef.current) {
         // Resuming mid-podcast — advanceLoop will handle pod.play(); don't touch audioRef.
         console.log('[PlayPause] resuming podcast:', resumePodcastEpisodeRef.current.title);
+        advanceLoop();
+      } else if (audioRef.current?.src && audioRef.current.paused) {
+        // Resuming music — src is still loaded, signal the loop to skip reload.
+        console.log('[PlayPause] resuming music from', audioRef.current.currentTime.toFixed(1));
+        resumeMusicRef.current = true;
+        advanceLoop();
       } else {
-        // Resuming music — nudge the music element; advanceLoop will reload/play properly.
-        audioRef.current?.play().catch(e => console.warn('[PlayPause] audioRef.play() aborted (expected):', e));
+        // No src loaded yet (edge case) — restart the loop so it loads the next track.
+        advanceLoop();
       }
-      advanceLoop();
     }
   }, [startRadio, advanceLoop]);
 
