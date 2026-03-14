@@ -33,11 +33,10 @@ import type { PodcastChapter } from './usePodcastFeeds';
 // If VITE_ELEVENLABS_API_KEY is absent, STT is skipped (commentary falls back to pre-written).
 // If VITE_ANTHROPIC_API_KEY is absent, Claude commentary is skipped (fallback text used).
 const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
-const ANTHROPIC_API_KEY  = import.meta.env.VITE_ANTHROPIC_API_KEY  as string | undefined;
 
 const STT_URL        = 'https://api.elevenlabs.io/v1/speech-to-text';
-const CLAUDE_MODEL   = 'claude-sonnet-4-20250514';
-const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
+const CLAUDE_MODEL   = 'claude-haiku-4-5-20251001';
+const CLAUDE_PROXY   = '/.netlify/functions/claude-proxy';
 
 // Silence detection
 const SILENCE_THRESHOLD_DB = -45;   // RMS below this = silence
@@ -118,20 +117,10 @@ const COMMENTARY_SYSTEM =
   'No stage directions, no asterisks, no emojis. Just speak naturally as you would on air.';
 
 async function generateCommentary(transcript: string, podcastTitle: string): Promise<string | null> {
-  if (!ANTHROPIC_API_KEY) {
-    console.warn('[Segmenter] VITE_ANTHROPIC_API_KEY not set — using fallback commentary');
-    return null;
-  }
-  const apiKey = ANTHROPIC_API_KEY;
-
   try {
-    const res = await fetch(CLAUDE_API_URL, {
+    const res = await fetch(CLAUDE_PROXY, {
       method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model: CLAUDE_MODEL,
         max_tokens: 150,
