@@ -587,7 +587,7 @@ export function RadioPage() {
       if (resumeEp) {
         resumePodcastEpisodeRef.current = null;
         const pod = podAudioRef.current;
-        if (pod?.src && runningRef.current) {
+        if (pod?.getAttribute('src') && runningRef.current) {
           console.log(`[Loop] resuming paused podcast: "${resumeEp.title}"`);
           try { await pod.play(); } catch (e) { console.warn('[Loop] pod resume failed:', e); }
 
@@ -824,6 +824,17 @@ export function RadioPage() {
           audio.removeEventListener('ended',      onEnded);
           audio.removeEventListener('pause',      onPause);
         }
+
+        // If the track already ended during the speech phase (e.g. seeked to
+        // near-end by jumpToEpisode while TTS was still playing), `ended` fired
+        // before these listeners were registered and will never fire again.
+        // Resolve immediately so the loop doesn't hang.
+        if (audio.ended) {
+          console.log(`[Loop] track already ended during speech — advancing (gen ${myGen})`);
+          resolve(true);
+          return;
+        }
+        if (!runningRef.current) { resolve(false); return; }
 
         audio.addEventListener('timeupdate', onTimeUpdate);
         audio.addEventListener('ended',      onEnded);
@@ -1085,7 +1096,7 @@ export function RadioPage() {
             pod.pause();
             if (runningRef.current) {
               // Finished naturally — clean up, mark played, speak outro
-              pod.src = '';
+              pod.removeAttribute('src');
               markPlayedRef.current(episode.id);
               setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
               if (nextMusicTrack) {
@@ -1181,7 +1192,10 @@ export function RadioPage() {
     // element (e.g. podcast playing while we skip music).
     audioRef.current?.pause();
     podAudioRef.current?.pause();
-    if (podAudioRef.current) podAudioRef.current.src = '';
+    // removeAttribute rather than .src = '' so that getAttribute('src') reliably
+    // returns null/'' — the IDL property .src would otherwise return the document
+    // base URL for an empty content attribute, breaking guards that check .src.
+    if (podAudioRef.current) podAudioRef.current.removeAttribute('src');
     // Discard any pending podcast resume — skipping means we abandon the episode.
     resumePodcastEpisodeRef.current = null;
 

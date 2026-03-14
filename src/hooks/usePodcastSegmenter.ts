@@ -176,6 +176,207 @@ function extractWindow(raw: string, fromSecs: number, toSecs: number): string {
   return raw.slice(-1600).trim();
 }
 
+/**
+ * Parse all timed cue entries from raw transcript data.
+ * Returns structured entries for SRT, WebVTT, and Podcast Index JSON.
+ * Returns an empty array for plain-text transcripts (no timestamps).
+ *
+ * Reuses the same format-detection and parseTimeSecs logic as extractWindow.
+ */
+function parseCueEntries(raw: string): Array<{ start: number; end: number; text: string }> {
+  const trimmed = raw.trimStart();
+
+  if (trimmed.startsWith('{')) {
+    try {
+      const data = JSON.parse(trimmed) as Record<string, unknown>;
+      const segs = (data.segments ?? []) as Record<string, unknown>[];
+      return segs
+        .map(s => ({
+          start: Number(s.startTime ?? s.start ?? 0),
+          end:   Number(s.endTime   ?? s.end   ?? 0),
+          text:  String(s.body ?? s.text ?? '').trim(),
+        }))
+        .filter(e => e.text.length > 0);
+    } catch { /* fall through to SRT/plain */ }
+  }
+
+  if (trimmed.includes('-->')) {
+    const entries: Array<{ start: number; end: number; text: string }> = [];
+    const lines = raw.split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i].trim();
+      if (line.includes('-->')) {
+        const [startStr, endStr] = line.split('-->').map(s => s.trim());
+        const start = parseTimeSecs(startStr);
+        const end   = parseTimeSecs(endStr);
+        const textLines: string[] = [];
+        i++;
+        while (i < lines.length && lines[i].trim() !== '') {
+          const l = lines[i].trim();
+          if (l && !/^\d+$/.test(l) && !l.startsWith('NOTE')) textLines.push(l);
+          i++;
+        }
+        const text = textLines.join(' ').trim();
+        if (text.length > 0) entries.push({ start, end, text });
+      } else {
+        i++;
+      }
+    }
+    return entries;
+  }
+
+  return []; // plain text — no timestamps available
+}
+
+// Natural-cut search constants
+const NATURAL_CUT_LOOKAHEAD = 30;   // seconds before chapter boundary to start search
+const NATURAL_CUT_MAX_DELAY = 45;   // seconds after boundary: maximum allowed delay
+const NATURAL_CUT_GAP_SECS  = 1.5; // minimum gap between cues to qualify as a cut point
+
+/**
+ * Look up the best natural cut point around a chapter boundary.
+ *
+ * Fetches a 90-second transcript window (chapterEnd−60s … chapterEnd+30s),
+ * then scans forward from the chapter boundary for the first cue that:
+ *   - ends with sentence-terminal punctuation (.  ?  !)
+ *   - is followed by a gap ≥ 1.5 s before the next cue
+ *   - falls within 45 s of the chapter boundary
+ *
+ * Returns the refined cut time, or `chapterEnd` if no good cut is found.
+ */
+async function findNaturalCutPoint(
+  transcriptUrl: string,
+  chapterEnd: number,
+): Promise<number> {
+  try {
+    const proxyUrl = `${PODCAST_PROXY}?action=text&url=${encodeURIComponent(transcriptUrl)}`;
+    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw = await res.text();
+
+    const entries = parseCueEntries(raw);
+    if (entries.length === 0) {
+      console.log('[Segmenter] No timed cues in transcript — using chapter boundary');
+      return chapterEnd;
+    }
+
+    // Only consider cues that end near or after the chapter boundary
+    const relevant = entries
+      .filter(e => e.end >= chapterEnd - 60 && e.end <= chapterEnd + NATURAL_CUT_MAX_DELAY)
+      .sort((a, b) => a.end - b.end);
+
+    for (let i = 0; i < relevant.length - 1; i++) {
+      const cue  = relevant[i];
+      const next = relevant[i + 1];
+
+      if (cue.end < chapterEnd) continue;            // prefer post-boundary cuts
+      if (!/[.?!]\s*$/.test(cue.text)) continue;     // must end a sentence
+      const gap = next.start - cue.end;
+      if (gap < NATURAL_CUT_GAP_SECS) continue;      // gap must be ≥ 1.5 s
+
+      console.log(
+        `[Segmenter] Natural cut found at ${cue.end.toFixed(1)}s ` +
+        `(chapter boundary was ${chapterEnd.toFixed(1)}s, gap: ${(gap * 1000).toFixed(0)}ms)`,
+      );
+      return cue.end;
+    }
+
+    console.log(`[Segmenter] No natural cut after ${chapterEnd.toFixed(1)}s — using chapter boundary`);
+    return chapterEnd;
+  } catch (err) {
+    console.warn('[Segmenter] Natural cut search failed:', err);
+    return chapterEnd;
+  }
+}
+
+// ── Strategy B: Scribe-based cut (chapter-less episodes) ─────────────────────
+
+const SCRIBE_GAP_MIN_SECS  = 0.8;  // minimum word gap to qualify as a cut point
+const SCRIBE_LOOKAHEAD     = 90;   // seconds before scribeTarget to start lookahead
+const SCRIBE_SEND_LEAD     = 30;   // seconds before scribeTarget to send blob to Scribe
+const SCRIBE_BLOB_SECS     = 60;   // seconds of audio to capture for Scribe
+const SCRIBE_TIMEOUT_EXTRA = 30;   // seconds past scribeTarget before forcing a split
+
+/**
+ * Analyse a 60-second audio blob with ElevenLabs Scribe v2 (via proxy) and
+ * return the best episode-absolute cut time.
+ *
+ * Timeline:
+ *   scribeTarget − 90 s : lookahead phase begins (log only)
+ *   scribeTarget − 30 s : blob is collected (last 60 chunks ≈ 60 s of audio)
+ *                         → blob covers approximately [scribeTarget−90, scribeTarget−30]
+ *   scribeTarget − 30 s : blob is POSTed to Scribe (~25 s to respond)
+ *   scribeTarget        : cut fires (Scribe result or fallback)
+ *
+ * We search for the largest inter-word gap in blob seconds [20, 40] (the
+ * middle section, avoiding the first and last 20 s), then project that time
+ * back to an episode-absolute position.
+ *
+ * Falls back to `scribeTarget` when the API fails or no gap ≥ 800 ms is found.
+ */
+async function findScribeCutPoint(
+  blob: Blob,
+  scribeTarget: number,
+): Promise<number> {
+  // Blob was collected 30 s before scribeTarget and covers 60 s of audio
+  // → blob start = scribeTarget − 30 − 60 = scribeTarget − 90
+  const blobStart   = scribeTarget - 90;
+  const middleStart = 20; // seconds into blob
+  const middleEnd   = 40; // seconds into blob
+
+  try {
+    const form = new FormData();
+    form.append('file', blob, 'segment.webm');
+    form.append('model_id', 'scribe_v2');
+    form.append('word_timestamps', 'true');
+
+    const res = await fetch(`${PODCAST_PROXY}?action=stt`, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => res.statusText);
+      throw new Error(`STT proxy ${res.status}: ${txt}`);
+    }
+
+    const data  = await res.json();
+    const words = (data.words ?? []) as Array<{ start: number; end: number }>;
+
+    let bestGap     = 0;
+    let bestWordEnd = -1;
+
+    for (let i = 0; i < words.length - 1; i++) {
+      const w    = words[i];
+      const next = words[i + 1];
+      if (w.end < middleStart || w.end > middleEnd) continue;
+      const gap = next.start - w.end;
+      if (gap > bestGap) {
+        bestGap     = gap;
+        bestWordEnd = w.end;
+      }
+    }
+
+    if (bestGap >= SCRIBE_GAP_MIN_SECS && bestWordEnd >= 0) {
+      const cutTime = blobStart + bestWordEnd;
+      console.log(
+        `[Segmenter] Scribe cut at ${cutTime.toFixed(1)}s ` +
+        `(gap: ${(bestGap * 1000).toFixed(0)}ms)`,
+      );
+      return cutTime;
+    }
+
+    console.log(`[Segmenter] Scribe fallback to ${scribeTarget.toFixed(1)}s`);
+    return scribeTarget;
+  } catch (err) {
+    console.warn('[Segmenter] Scribe cut detection failed:', err);
+    console.log(`[Segmenter] Scribe fallback to ${scribeTarget.toFixed(1)}s`);
+    return scribeTarget;
+  }
+}
+
 async function fetchTranscriptWindow(transcriptUrl: string, currentTime: number): Promise<string | null> {
   try {
     const proxyUrl = `${PODCAST_PROXY}?action=text&url=${encodeURIComponent(transcriptUrl)}`;
@@ -408,6 +609,16 @@ export function usePodcastSegmenter() {
 
     let segmentPart = 1;
 
+    // ── Strategy B: per-episode state (chapter-less episodes only) ────────
+    // Pick a random target between 8–15 min on episode start.
+    // scribeUsed ensures we fall back to silence detection after the first
+    // Scribe-triggered split (subsequent segments use silence detection).
+    const hasChapters = chapters && chapters.length > 0;
+    const scribeTarget: number = !hasChapters
+      ? 480 + Math.random() * 420
+      : 0; // unused when chapters exist
+    let scribeUsed = false;
+
     // ── Segment loop ──────────────────────────────────────────────────────
     while (callbacks.isRunning()) {
 
@@ -427,6 +638,18 @@ export function usePodcastSegmenter() {
       }
 
       let splitTriggered = false;
+
+      // Natural-cut state: populated asynchronously when a transcriptUrl is
+      // available and NATURAL_CUT_LOOKAHEAD seconds before the chapter boundary.
+      let naturalCutFetchStarted = false;
+      let naturalCutTime: number | null = null;
+
+      // Strategy B: Scribe cut state (chapter-less episodes, first break only).
+      // Phase 1 (scribeTarget − 90 s): log that lookahead has started.
+      // Phase 2 (scribeTarget − 30 s): collect 60-s blob and fire Scribe.
+      let scribeLookaheadStarted = false;
+      let scribeCaptureStarted   = false;
+      let scribeCutTime: number | null = null;
 
       // Promise that resolves true on natural end, false on split or pause
       const result = await new Promise<'ended' | 'split' | 'paused'>((resolve) => {
@@ -469,25 +692,92 @@ export function usePodcastSegmenter() {
           }
 
           if (targetChapterTime !== null) {
-            // Chapter-based split: trigger when playhead reaches chapter boundary
-            if (audio.currentTime >= targetChapterTime) {
-              console.log(`[Segmenter] Chapter boundary reached at ${audio.currentTime.toFixed(1)}s`);
+            // 30 s before the chapter boundary: kick off async natural-cut search.
+            // The result arrives well before the boundary; if not, we fall back to
+            // the chapter timestamp (naturalCutTime stays null → effectiveCutTime = targetChapterTime).
+            if (
+              transcriptUrl &&
+              !naturalCutFetchStarted &&
+              audio.currentTime >= targetChapterTime - NATURAL_CUT_LOOKAHEAD
+            ) {
+              naturalCutFetchStarted = true;
+              findNaturalCutPoint(transcriptUrl, targetChapterTime)
+                .then(t  => { naturalCutTime = t; })
+                .catch(() => { naturalCutTime = targetChapterTime; });
+            }
+
+            // Use the refined cut time once it arrives; fall back to chapter boundary.
+            const effectiveCutTime = naturalCutTime ?? targetChapterTime;
+            if (audio.currentTime >= effectiveCutTime) {
+              if (naturalCutTime !== null && naturalCutTime > targetChapterTime) {
+                console.log(`[Segmenter] Splitting at natural cut ${audio.currentTime.toFixed(1)}s`);
+              } else {
+                console.log(`[Segmenter] Chapter boundary reached at ${audio.currentTime.toFixed(1)}s`);
+              }
               triggerSplit();
             }
           } else {
-            // Silence-based split: only after SPLIT_WINDOW_MIN
+            // No chapters: Strategy B (Scribe) for the first break, then
+            // fall back to silence detection for subsequent breaks.
             if (elapsedAudio >= SPLIT_WINDOW_MIN) {
-              const db = getRmsDb(analyser);
-              const isSilent = db < SILENCE_THRESHOLD_DB;
-              if (isSilent) {
-                if (silenceStart === null) silenceStart = Date.now();
-                const silenceDuration = (Date.now() - silenceStart) / 1000;
-                if (silenceDuration >= SILENCE_MIN_DURATION) {
-                  console.log(`[Segmenter] Silence detected (${silenceDuration.toFixed(1)}s @ ${db.toFixed(1)} dB) — triggering split`);
+              if (!scribeUsed && scribeTarget > 0) {
+                // ── Strategy B: two-phase Scribe cut ─────────────────────
+                // Phase 1 — 90 s early: log lookahead start.
+                if (
+                  !scribeLookaheadStarted &&
+                  audio.currentTime >= scribeTarget - SCRIBE_LOOKAHEAD
+                ) {
+                  scribeLookaheadStarted = true;
+                  console.log(
+                    `[Segmenter] Lookahead started at ` +
+                    `${audio.currentTime.toFixed(1)}s, target=${scribeTarget.toFixed(1)}s`,
+                  );
+                }
+
+                // Phase 2 — 30 s early: collect 60-s blob and fire Scribe.
+                if (
+                  scribeLookaheadStarted &&
+                  !scribeCaptureStarted &&
+                  audio.currentTime >= scribeTarget - SCRIBE_SEND_LEAD
+                ) {
+                  scribeCaptureStarted = true;
+                  const captureBlob = collectLastNSeconds(
+                    chunksRef.current, SCRIBE_BLOB_SECS, mimeType,
+                  );
+                  findScribeCutPoint(captureBlob, scribeTarget)
+                    .then(t  => { scribeCutTime = t; })
+                    .catch(() => { scribeCutTime = scribeTarget; });
+                }
+
+                // Fire when the Scribe-detected cut time is reached, or at
+                // scribeTarget + timeout if Scribe hasn't returned yet.
+                const effectiveCutTime =
+                  scribeCutTime ??
+                  (scribeCaptureStarted
+                    ? scribeTarget + SCRIBE_TIMEOUT_EXTRA
+                    : scribeTarget);
+
+                if (audio.currentTime >= effectiveCutTime) {
+                  scribeUsed = true;
                   triggerSplit();
                 }
               } else {
-                silenceStart = null;
+                // ── Silence-based split (subsequent breaks) ───────────────
+                const db = getRmsDb(analyser);
+                const isSilent = db < SILENCE_THRESHOLD_DB;
+                if (isSilent) {
+                  if (silenceStart === null) silenceStart = Date.now();
+                  const silenceDuration = (Date.now() - silenceStart) / 1000;
+                  if (silenceDuration >= SILENCE_MIN_DURATION) {
+                    console.log(
+                      `[Segmenter] Silence detected (${silenceDuration.toFixed(1)}s ` +
+                      `@ ${db.toFixed(1)} dB) — triggering split`,
+                    );
+                    triggerSplit();
+                  }
+                } else {
+                  silenceStart = null;
+                }
               }
             }
           }
@@ -575,6 +865,15 @@ export function usePodcastSegmenter() {
       if (!callbacks.isRunning()) break;
 
       // ── Resume podcast ────────────────────────────────────────────────────
+      // Re-check isRunning AND audio.src — jumpTo() may have cleared src and
+      // then restarted the loop (runningRef → true again) before we get here.
+      // NOTE: audio.src (IDL attribute) returns the document URL when the src
+      // content attribute is empty, so we must check the content attribute.
+      if (!callbacks.isRunning() || !audio.getAttribute('src')) {
+        console.log('[Segmenter] Aborting resume — loop restarted or src cleared');
+        break;
+      }
+
       console.log(`[Segmenter] Resuming episode from ${resumeAt.toFixed(1)}s (part ${segmentPart})`);
 
       // When we paused, the AudioContext may have suspended. Resume it.

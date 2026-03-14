@@ -242,7 +242,9 @@ async function handlePodcastIndex(action, params) {
         body: JSON.stringify({ error: 'Missing query parameter "q"' }),
       };
     }
-    piUrl = `${PI_BASE_URL}/search/byterm?q=${encodeURIComponent(q.trim())}&max=10`;
+    const maxParam = parseInt(params.max ?? '10', 10);
+    const max = Number.isFinite(maxParam) && maxParam > 0 ? Math.min(maxParam, 40) : 10;
+    piUrl = `${PI_BASE_URL}/search/byterm?q=${encodeURIComponent(q.trim())}&max=${max}`;
   }
 
   try {
@@ -266,6 +268,144 @@ async function handlePodcastIndex(action, params) {
   }
 }
 
+// ── action=tts ────────────────────────────────────────────────────────────────
+// Converts text to speech via ElevenLabs and returns audio/mpeg as binary.
+// Expected JSON body: { text, voice_id, model_id?, voice_settings? }
+// Uses ELEVENLABS_API_KEY from Netlify env (server-side, no VITE_ prefix).
+
+async function handleTts(event) {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) {
+    return {
+      statusCode: 500,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'ELEVENLABS_API_KEY not configured' }),
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(event.body ?? '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid JSON body' }),
+    };
+  }
+
+  const { text, voice_id, model_id = 'eleven_turbo_v2_5', voice_settings } = parsed;
+
+  if (!text || !voice_id) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing required fields: text, voice_id' }),
+    };
+  }
+
+  try {
+    const ttsUrl =
+      `https://api.elevenlabs.io/v1/text-to-speech/${voice_id}?output_format=mp3_44100_128`;
+
+    const res = await fetch(ttsUrl, {
+      method: 'POST',
+      headers: {
+        'xi-api-key': apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ text, model_id, voice_settings }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      return {
+        statusCode: res.status,
+        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: `ElevenLabs TTS ${res.status}: ${errText}` }),
+      };
+    }
+
+    const buffer = await res.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+
+    return {
+      statusCode: 200,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'audio/mpeg',
+        'Cache-Control': 'no-store',
+      },
+      body: base64,
+      isBase64Encoded: true,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `TTS proxy failed: ${String(err)}` }),
+    };
+  }
+}
+
+// ── action=stt ────────────────────────────────────────────────────────────────
+// Forwards a multipart/form-data STT request to ElevenLabs Scribe v2.
+// Expected form fields (passed through from client):
+//   file           — audio blob (webm/ogg)
+//   model_id       — e.g. "scribe_v2"
+//   word_timestamps — "true"
+//
+// Uses ELEVENLABS_API_KEY from Netlify env (server-side, no VITE_ prefix).
+
+async function handleStt(event) {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) {
+    return {
+      statusCode: 500,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'ELEVENLABS_API_KEY not configured' }),
+    };
+  }
+
+  // Netlify encodes binary bodies as base64 when isBase64Encoded === true.
+  const rawBody = event.isBase64Encoded
+    ? Buffer.from(event.body ?? '', 'base64')
+    : Buffer.from(event.body ?? '');
+
+  // Forward the original Content-Type (which carries the multipart boundary).
+  const contentType =
+    event.headers['content-type'] ?? event.headers['Content-Type'] ?? '';
+
+  try {
+    const res = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+      method: 'POST',
+      headers: {
+        'xi-api-key': apiKey,
+        'Content-Type': contentType,
+      },
+      body: rawBody,
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    const body = await res.text();
+    return {
+      statusCode: res.status,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `STT proxy failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export const handler = async (event) => {
@@ -279,6 +419,8 @@ export const handler = async (event) => {
   if (action === 'rss')  return handleRss(params);
   if (action === 'json') return handleJson(params);
   if (action === 'text') return handleText(params);
+  if (action === 'tts')  return handleTts(event);
+  if (action === 'stt')  return handleStt(event);
 
   return handlePodcastIndex(action, params);
 };

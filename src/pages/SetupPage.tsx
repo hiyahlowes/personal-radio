@@ -21,7 +21,7 @@ import {
   type PodcastFeed,
 } from '@/hooks/usePodcastFeeds';
 import {
-  fetchTrendingPodcasts,
+  fetchSuggestedPodcasts,
   searchPodcasts,
   type PodcastIndexFeed,
 } from '@/hooks/usePodcastIndex';
@@ -81,11 +81,11 @@ export function SetupPage() {
   const [addedIds, setAddedIds]           = useState<Set<number>>(new Set());
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ── Fetch trending podcasts when reaching step 4 ──────────────────────────
+  // ── Fetch curated transcript-first suggestions when reaching step 4 ─────────
   useEffect(() => {
     if (step !== 4) return;
     setSearchLoading(true);
-    fetchTrendingPodcasts()
+    fetchSuggestedPodcasts()
       .then(setTrending)
       .catch(err => setSearchError(String(err)))
       .finally(() => setSearchLoading(false));
@@ -450,10 +450,10 @@ export function SetupPage() {
               </div>
 
               {/* Section label */}
-              <p className="text-xs font-semibold text-white/50 uppercase tracking-widest">
+              <p className="text-xs font-semibold text-white/50 uppercase tracking-widest flex items-center gap-1.5">
                 {query.trim()
                   ? searchLoading ? 'Searching…' : `${results.length} result${results.length !== 1 ? 's' : ''}`
-                  : 'Trending 🔥'}
+                  : <><span className="text-emerald-400">✓</span> Transcript-ready shows</>}
               </p>
 
               {searchError && <p className="text-xs text-red-400">{searchError}</p>}
@@ -487,7 +487,15 @@ export function SetupPage() {
                           <div className="w-12 h-12 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-xl">🎙️</div>
                         )}
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-white truncate">{feed.title}</p>
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-sm font-semibold text-white truncate">{feed.title}</p>
+                            {!!feed.hasTranscripts && (
+                              <span
+                                title="Transcript-ready — best listening experience"
+                                className="flex-shrink-0 text-emerald-400/90 text-xs leading-none"
+                              >✓</span>
+                            )}
+                          </div>
                           {feed.author && <p className="text-xs text-white/40 truncate">{feed.author}</p>}
                         </div>
                         <button

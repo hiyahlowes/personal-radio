@@ -262,19 +262,19 @@ export function useRadioModerator() {
   );
 
   /**
-   * Brief hardcoded reaction spoken when the listener manually skips or
-   * jumps directly to a podcast episode. No AI call — instant playback.
+   * Brief reaction spoken when the listener manually skips or jumps directly
+   * to a podcast episode. Uses the AI with the CRITICAL language rule so the
+   * line is always spoken in the listener's chosen language.
    */
   const speakUserControlReaction = useCallback(async (): Promise<void> => {
-    const lines = [
-      'Your radio, your rules.',
-      'Bold choice — I like it.',
-      'Great idea, I was just thinking the same.',
-      'Alright, we do it your way.',
-      'Taking matters into your own hands — respect.',
-    ];
-    const line = lines[Math.floor(Math.random() * lines.length)];
-    await sayScript(line);
+    const prompt =
+      'The listener just manually skipped or selected a track. ' +
+      'React in one short, casual sentence — like a real radio host who respects the listener taking control. ' +
+      'Sound natural and unbothered. No stage directions, no emojis.';
+    // generateScript already applies the CRITICAL language rule (reads localStorage).
+    // If the AI call fails, skip silently — better than speaking in the wrong language.
+    const aiScript = await generateScript(prompt);
+    if (aiScript) await sayScript(aiScript);
   }, [sayScript]);
 
   const speakPodcastTransition = useCallback(

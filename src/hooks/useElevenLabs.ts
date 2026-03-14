@@ -1,15 +1,12 @@
 import { useRef, useState, useCallback } from 'react';
 
-// ── Env vars — must be set in .env.local or Netlify environment variables ──────
-const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY as string | undefined;
-const VOICE_ID           = import.meta.env.VITE_ELEVENLABS_VOICE_ID as string | undefined;
+// ── Env vars ───────────────────────────────────────────────────────────────────
+// VITE_ELEVENLABS_VOICE_ID is safe to bundle (not a secret).
+// The API key is kept server-side in ELEVENLABS_API_KEY (no VITE_ prefix) and
+// accessed only through the podcast-proxy Netlify Function.
+const VOICE_ID   = import.meta.env.VITE_ELEVENLABS_VOICE_ID as string | undefined;
+const TTS_PROXY  = '/.netlify/functions/podcast-proxy?action=tts';
 
-if (!ELEVENLABS_API_KEY) {
-  console.warn(
-    '[ElevenLabs] VITE_ELEVENLABS_API_KEY is not set. ' +
-    'TTS will be disabled — the AI host will not speak.',
-  );
-}
 if (!VOICE_ID) {
   console.warn(
     '[ElevenLabs] VITE_ELEVENLABS_VOICE_ID is not set. ' +
@@ -45,13 +42,11 @@ export function useElevenLabs() {
   };
 
   const speak = useCallback(async (text: string, opts: ElevenLabsOptions = {}): Promise<void> => {
-    // Graceful no-op when credentials are missing
-    if (!ELEVENLABS_API_KEY || !VOICE_ID) {
-      console.warn('[ElevenLabs] Skipping TTS — credentials not configured.');
+    // Graceful no-op when voice ID is missing
+    if (!VOICE_ID) {
+      console.warn('[ElevenLabs] Skipping TTS — VITE_ELEVENLABS_VOICE_ID not configured.');
       return;
     }
-
-    const TTS_URL = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}?output_format=mp3_44100_128`;
 
     console.log('[ElevenLabs] speak() called with text:', text.slice(0, 80) + (text.length > 80 ? '…' : ''));
 
@@ -73,6 +68,7 @@ export function useElevenLabs() {
     try {
       const body = {
         text,
+        voice_id: VOICE_ID,
         model_id: 'eleven_turbo_v2_5',
         voice_settings: {
           stability: opts.stability ?? 0.45,
@@ -82,14 +78,11 @@ export function useElevenLabs() {
         },
       };
 
-      console.log('[ElevenLabs] POSTing to:', TTS_URL);
+      console.log('[ElevenLabs] POSTing to:', TTS_PROXY);
 
-      const response = await fetch(TTS_URL, {
+      const response = await fetch(TTS_PROXY, {
         method: 'POST',
-        headers: {
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: abort.signal,
       });
