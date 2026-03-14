@@ -1152,6 +1152,17 @@ export function RadioPage() {
     console.log('[PlayPause] handlePause — nowPlaying:', nowPlayingRef.current?.kind ?? 'none', '| resumePodcast before:', resumePodcastEpisodeRef.current?.title ?? 'none');
     runningRef.current = false;
     moderatorRef.current.stop();
+
+    // Set the resume ref synchronously here rather than relying on the async
+    // loop to set it (race: the loop sets it only after awaited promises resolve,
+    // but handlePlay can be called before that completes).
+    // Guard: only set if not already populated, so the loop's own assignment
+    // (which may run later) is a harmless no-op.
+    if (nowPlayingRef.current?.kind === 'podcast' && !resumePodcastEpisodeRef.current) {
+      resumePodcastEpisodeRef.current = nowPlayingRef.current.episode;
+      console.log('[PlayPause] handlePause — set resumePodcastEpisodeRef:', nowPlayingRef.current.episode.title);
+    }
+
     audioRef.current?.pause();
     podAudioRef.current?.pause(); // also pause podcast if one is playing
   }, []);
