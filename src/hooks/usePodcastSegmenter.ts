@@ -37,6 +37,7 @@ const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY as string | u
 const STT_URL        = 'https://api.elevenlabs.io/v1/speech-to-text';
 const CLAUDE_MODEL   = 'claude-haiku-4-5-20251001';
 const CLAUDE_PROXY   = '/.netlify/functions/claude-proxy';
+const PODCAST_PROXY  = '/.netlify/functions/podcast-proxy';
 
 // Silence detection
 const SILENCE_THRESHOLD_DB = -45;   // RMS below this = silence
@@ -108,6 +109,139 @@ async function transcribeBlob(blob: Blob): Promise<string> {
   return text.trim();
 }
 
+// ── Podcast transcript window extraction ─────────────────────────────────────
+
+function parseTimeSecs(ts: string): number {
+  const s = ts.replace(',', '.');
+  const parts = s.split(':').map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return Number(s) || 0;
+}
+
+/**
+ * Extract spoken text between `fromSecs` and `toSecs`.
+ * Auto-detects Podcast Index JSON, SRT, WebVTT, and plain text.
+ */
+function extractWindow(raw: string, fromSecs: number, toSecs: number): string {
+  const trimmed = raw.trimStart();
+
+  if (trimmed.startsWith('{')) {
+    // Podcast Index JSON transcript: { segments: [{startTime, endTime, body}] }
+    try {
+      const data = JSON.parse(trimmed) as Record<string, unknown>;
+      const segs = (data.segments ?? []) as Record<string, unknown>[];
+      return segs
+        .filter(s => {
+          const start = Number(s.startTime ?? s.start ?? 0);
+          const end   = Number(s.endTime   ?? s.end   ?? start + 5);
+          return end >= fromSecs && start <= toSecs;
+        })
+        .map(s => String(s.body ?? s.text ?? ''))
+        .join(' ')
+        .trim();
+    } catch { /* fall through to SRT/plain */ }
+  }
+
+  if (trimmed.includes('-->')) {
+    // SRT or WebVTT — parse cue timestamps
+    const lines  = raw.split('\n');
+    const parts: string[] = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i].trim();
+      if (line.includes('-->')) {
+        const [startStr, endStr] = line.split('-->').map(s => s.trim());
+        const start = parseTimeSecs(startStr);
+        const end   = parseTimeSecs(endStr);
+        const textLines: string[] = [];
+        i++;
+        while (i < lines.length && lines[i].trim() !== '') {
+          const l = lines[i].trim();
+          // Skip VTT cue settings lines and bare sequence numbers
+          if (l && !/^\d+$/.test(l) && !l.startsWith('NOTE')) textLines.push(l);
+          i++;
+        }
+        if (end >= fromSecs && start <= toSecs && textLines.length > 0) {
+          parts.push(textLines.join(' '));
+        }
+      } else {
+        i++;
+      }
+    }
+    return parts.join(' ').trim();
+  }
+
+  // Plain text — no timestamps, return last ~1 600 chars
+  return raw.slice(-1600).trim();
+}
+
+async function fetchTranscriptWindow(transcriptUrl: string, currentTime: number): Promise<string | null> {
+  try {
+    const proxyUrl = `${PODCAST_PROXY}?action=text&url=${encodeURIComponent(transcriptUrl)}`;
+    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw  = await res.text();
+    const from = Math.max(0, currentTime - 120);
+    const text = extractWindow(raw, from, currentTime);
+    if (!text || text.length < 50) return null;
+    return text.slice(0, 1600).trim(); // ~400 tokens
+  } catch (err) {
+    console.warn('[Segmenter] Transcript window fetch failed:', err);
+    return null;
+  }
+}
+
+// ── Tiered context builder ────────────────────────────────────────────────────
+
+interface PodcastContext {
+  tier: 1 | 2 | 3;
+  /** Primary text: transcript window (T1) — empty for T2/T3. */
+  primaryText: string;
+  /** Background text: chapters + description (T2) or description only (T3). */
+  backgroundText: string;
+}
+
+async function buildContext(
+  currentTime: number,
+  transcriptUrl: string | undefined,
+  chapters: PodcastChapter[] | undefined,
+  description: string,
+): Promise<PodcastContext> {
+  // ── Tier 1: RSS/Podcast 2.0 transcript file ──────────────────────────────
+  if (transcriptUrl) {
+    const window = await fetchTranscriptWindow(transcriptUrl, currentTime);
+    if (window) {
+      console.log('[Segmenter] Context → Tier 1 (transcript window)');
+      return { tier: 1, primaryText: window, backgroundText: description };
+    }
+  }
+
+  // ── Tier 2: chapter markers present ──────────────────────────────────────
+  if (chapters && chapters.length > 0) {
+    const sorted = [...chapters].sort((a, b) => a.startTime - b.startTime);
+    // findLastIndex polyfill
+    let curIdx = -1;
+    for (let i = sorted.length - 1; i >= 0; i--) {
+      if (sorted[i].startTime <= currentTime) { curIdx = i; break; }
+    }
+    const current  = curIdx >= 0 ? sorted[curIdx]     : null;
+    const previous = curIdx >  0 ? sorted[curIdx - 1] : null;
+
+    const parts: string[] = [];
+    if (previous) parts.push(`Previous chapter: "${previous.title}"`);
+    if (current)  parts.push(`Current chapter: "${current.title}"`);
+    if (description) parts.push(`Episode: ${description}`);
+
+    console.log('[Segmenter] Context → Tier 2 (chapters)');
+    return { tier: 2, primaryText: '', backgroundText: parts.join('\n') };
+  }
+
+  // ── Tier 3: description only ──────────────────────────────────────────────
+  console.log('[Segmenter] Context → Tier 3 (description only)');
+  return { tier: 3, primaryText: '', backgroundText: description };
+}
+
 // ── Claude commentary ─────────────────────────────────────────────────────────
 
 const COMMENTARY_SYSTEM =
@@ -116,7 +250,28 @@ const COMMENTARY_SYSTEM =
   'Then casually tease that some music is coming up next. ' +
   'No stage directions, no asterisks, no emojis. Just speak naturally as you would on air.';
 
-async function generateCommentary(transcript: string, podcastTitle: string): Promise<string | null> {
+/**
+ * Generate commentary using the best available context.
+ * `mainText` = transcript window (T1) or STT transcript — the specific words spoken.
+ * `backgroundText` = chapters + description (T2/T3) — thematic background.
+ */
+async function generateCommentary(
+  podcastTitle: string,
+  mainText: string,
+  backgroundText: string,
+): Promise<string | null> {
+  let userContent: string;
+  if (mainText.length > 20) {
+    userContent = `Podcast: "${podcastTitle}"\n\nLast ~2 minutes of discussion:\n"${mainText.slice(0, 1200)}"`;
+    if (backgroundText) userContent += `\n\nEpisode context: ${backgroundText.slice(0, 200)}`;
+  } else if (backgroundText.length > 20) {
+    userContent =
+      `Podcast: "${podcastTitle}"\n\nEpisode context:\n${backgroundText.slice(0, 400)}\n\n` +
+      'Comment on the current topic and tease the upcoming music break.';
+  } else {
+    return null; // nothing to say — use fallback
+  }
+
   try {
     const res = await fetch(CLAUDE_PROXY, {
       method: 'POST',
@@ -125,13 +280,7 @@ async function generateCommentary(transcript: string, podcastTitle: string): Pro
         model: CLAUDE_MODEL,
         max_tokens: 150,
         system: COMMENTARY_SYSTEM,
-        messages: [
-          {
-            role: 'user',
-            content:
-              `Podcast: "${podcastTitle}"\n\nLast 90 seconds of transcript:\n"${transcript.slice(0, 800)}"`,
-          },
-        ],
+        messages: [{ role: 'user', content: userContent }],
       }),
       signal: AbortSignal.timeout(20_000),
     });
@@ -197,6 +346,8 @@ export function usePodcastSegmenter() {
     episodeFeedTitle: string,
     chapters: PodcastChapter[] | undefined,
     callbacks: SegmenterCallbacks,
+    description = '',
+    transcriptUrl: string | undefined = undefined,
   ): Promise<void> => {
     teardown(); // clean slate
 
@@ -377,11 +528,15 @@ export function usePodcastSegmenter() {
         }
       }
 
-      // ── STT ──────────────────────────────────────────────────────────────
-      let transcript = '';
-      if (capturedBlob.size > 5_000) { // skip STT if blob is too small
+      // ── Context (tiered: transcript URL → chapters → description) ─────────
+      const podCtx = await buildContext(resumeAt, transcriptUrl, chapters, description);
+
+      // ── STT — only when no RSS transcript window was available ───────────
+      // Tier 1 provides equivalent precision without an ElevenLabs API call.
+      let sttText = '';
+      if (podCtx.tier > 1 && capturedBlob.size > 5_000) {
         try {
-          transcript = await transcribeBlob(capturedBlob);
+          sttText = await transcribeBlob(capturedBlob);
         } catch (err) {
           console.warn('[Segmenter] STT failed:', err);
         }
@@ -390,10 +545,13 @@ export function usePodcastSegmenter() {
       if (!callbacks.isRunning()) break;
 
       // ── Commentary ───────────────────────────────────────────────────────
+      // T1 window or STT transcript = mainText (specific words spoken).
+      // T2/T3 text = backgroundText (chapter / description context).
+      const mainText = podCtx.tier === 1 ? podCtx.primaryText : sttText;
       let commentary: string;
-      if (transcript.length > 20) {
-        const aiCommentary = await generateCommentary(transcript, episodeFeedTitle);
-        commentary = aiCommentary ?? fallbackCommentary(episodeFeedTitle);
+      if (mainText.length > 20 || podCtx.backgroundText.length > 20) {
+        const ai = await generateCommentary(episodeFeedTitle, mainText, podCtx.backgroundText);
+        commentary = ai ?? fallbackCommentary(episodeFeedTitle);
       } else {
         commentary = fallbackCommentary(episodeFeedTitle);
       }

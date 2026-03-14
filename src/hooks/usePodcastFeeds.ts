@@ -47,7 +47,8 @@ export interface PodcastEpisode {
   description: string;
   author: string;       // itunes:author or feed-level author
   pubDate: string;
-  chapters?: PodcastChapter[]; // Podcast 2.0 chapter markers, if available
+  chapters?: PodcastChapter[];     // Podcast 2.0 chapter markers, if available
+  transcriptUrl?: string;          // Podcast 2.0 transcript URL, if available
 }
 
 export interface PodcastFeed {
@@ -138,6 +139,30 @@ function getPodcastChaptersUrl(item: Element): string | null {
   if (byPrefixed.length > 0) return byPrefixed[0].getAttribute('url');
 
   return null;
+}
+
+/**
+ * Return the best available `podcast:transcript` URL from a feed item.
+ * Prefers structured formats (JSON → SRT → VTT → plain text) over unknown types.
+ */
+function getPodcastTranscriptUrl(item: Element): string | null {
+  const all = [
+    ...Array.from(item.getElementsByTagNameNS(PODCAST_NS, 'transcript')),
+    ...Array.from(item.getElementsByTagName('podcast:transcript')),
+  ];
+  if (all.length === 0) return null;
+
+  const PREFERRED = [
+    'application/json',
+    'application/x-subrip',
+    'text/vtt',
+    'text/plain',
+  ];
+  for (const type of PREFERRED) {
+    const match = all.find(el => el.getAttribute('type') === type);
+    if (match) return match.getAttribute('url');
+  }
+  return all[0].getAttribute('url');
 }
 
 async function fetchChapters(chaptersUrl: string): Promise<PodcastChapter[]> {
@@ -236,7 +261,11 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
       }
     }
 
-    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, author, pubDate, chapters });
+    // Podcast 2.0 transcript URL (best available format)
+    const transcriptUrl = getPodcastTranscriptUrl(item) ?? undefined;
+    if (transcriptUrl) console.log(`[Podcast] "${title}" — transcript URL: ${transcriptUrl.slice(0, 80)}`);
+
+    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, author, pubDate, chapters, transcriptUrl });
   }
 
   console.log(`[Podcast] "${feedTitle}" — ${episodes.length} episodes parsed`);

@@ -145,6 +145,66 @@ async function handleJson(params) {
   }
 }
 
+// ── action=text ───────────────────────────────────────────────────────────────
+// Fetches any text-based URL (SRT, WebVTT, plain JSON transcript, txt) and
+// returns the raw body as text/plain. Used for Podcast 2.0 transcript files.
+
+async function handleText(params) {
+  const url = params.url ?? '';
+  if (!url) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing "url" query parameter' }),
+    };
+  }
+
+  if (!/^https?:\/\//i.test(url)) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid URL scheme — only http/https allowed' }),
+    };
+  }
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'PersonalRadio/1.0 (transcript fetch)',
+        'Accept': 'text/plain, text/vtt, application/x-subrip, application/json, */*',
+      },
+      signal: AbortSignal.timeout(15_000),
+      redirect: 'follow',
+    });
+
+    if (!res.ok) {
+      return {
+        statusCode: res.status,
+        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: `Upstream returned HTTP ${res.status}` }),
+      };
+    }
+
+    const text = await res.text();
+
+    return {
+      statusCode: 200,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+      },
+      body: text,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `Text fetch failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── action=trending / action=search (PodcastIndex) ────────────────────────────
 
 async function handlePodcastIndex(action, params) {
@@ -216,8 +276,9 @@ export const handler = async (event) => {
   const params = event.queryStringParameters ?? {};
   const action = params.action ?? 'search';
 
-  if (action === 'rss') return handleRss(params);
+  if (action === 'rss')  return handleRss(params);
   if (action === 'json') return handleJson(params);
+  if (action === 'text') return handleText(params);
 
   return handlePodcastIndex(action, params);
 };

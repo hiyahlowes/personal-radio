@@ -961,7 +961,7 @@ export function RadioPage() {
                 episode.title,
                 episode.feedTitle,
                 episode.chapters,
-                {
+                /* callbacks ↓ */ {
                   isRunning: () => runningRef.current,
 
                   speakCommentary: async (script) => {
@@ -1041,6 +1041,8 @@ export function RadioPage() {
                     await localMod.current.speakPodcastReturn(podcastTitle, partNumber);
                   },
                 },
+                episode.description,
+                episode.transcriptUrl,
               );
             }
 
