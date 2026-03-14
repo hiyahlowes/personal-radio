@@ -86,6 +86,10 @@ async function fetchTracksForQuery(query: string): Promise<WavlakeTrack[]> {
   if (!res.ok) throw new Error(`Wavlake search failed for "${query}": ${res.status}`);
   const json: WavlakeSearchResponse = await res.json();
 
+  if (json.data?.length > 0) {
+    console.log('[Wavlake] raw first track (all fields):', JSON.stringify(json.data[0], null, 2));
+  }
+
   return json.data
     .filter(
       (item): item is WavlakeSearchResult & { liveUrl: string; duration: number; artist: string } =>
