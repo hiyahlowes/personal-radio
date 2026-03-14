@@ -462,7 +462,9 @@ export function RadioPage() {
     // The old nowPlayingRef guard caused durationchange + timeupdate to be
     // dropped when they fired before setNowPlaying('podcast') was called.
     const onPodTime  = () => {
-      console.log(`[Podcast] timeupdate ct=${pod.currentTime.toFixed(1)} dur=${pod.duration}`);
+      if (Math.floor(pod.currentTime) % 30 === 0 && Math.floor(pod.currentTime) > 0) {
+        console.log(`[Podcast] timeupdate ct=${pod.currentTime.toFixed(1)} dur=${pod.duration}`);
+      }
       setCT(pod.currentTime);
       // When the browser streams a podcast, duration may be Infinity or NaN
       // until enough data is buffered. Update it opportunistically here so
