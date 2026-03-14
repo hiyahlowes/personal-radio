@@ -143,7 +143,16 @@ async function generateScript(prompt: string, longForm = false): Promise<string 
           '(1) Never read out dates, times, episode numbers, or version tags. ' +
           '(2) For podcast episodes where the title is just a date or timestamp, ignore it and use the show name only. ' +
           '(3) For music, drop parenthetical suffixes like acoustic version or feat X, just say the clean title and artist. ' +
-          '(4) Sound like a real DJ who knows what is worth saying on air.',
+          '(4) Sound like a real DJ who knows what is worth saying on air. ' +
+          'EXPRESSIVE TAGS: You can use ElevenLabs expressive tags inline in your spoken text to sound more like a real radio host. ' +
+          'Available tags: [laughs] for genuine humor or amusement, [excited] for energetic song intros or big announcements, ' +
+          '[sighs] for relaxed or late-night chill vibes, [whispers] for intimate or mysterious moments, ' +
+          '[slow] for emphasis on an important word or phrase. ' +
+          'Each tag affects only the next 4-5 words, then returns to normal. ' +
+          'Use them sparingly — max 1-2 tags per moderation, only when it feels natural. ' +
+          'Never stack multiple tags back to back. ' +
+          'A real radio host uses these moments deliberately, not constantly. ' +
+          'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."',
         messages: [
           { role: 'user', content: `${prompt}\n${lengthInstruction}` },
         ],
