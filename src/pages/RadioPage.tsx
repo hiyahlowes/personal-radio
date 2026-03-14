@@ -367,7 +367,10 @@ export function RadioPage() {
       // If all episodes have been played (e.g. only one feed), show them all
       // again rather than an empty queue.
       const fresh = episodes.filter(ep => !podcastHistory.hasPlayed(ep.id));
-      setOrderedEpisodes(fresh.length > 0 ? fresh : episodes);
+      const pool  = fresh.length > 0 ? fresh : episodes;
+      // Episodes with a transcript URL float to the top — best listening experience.
+      const sorted = [...pool].sort((a, b) => (b.transcriptUrl ? 1 : 0) - (a.transcriptUrl ? 1 : 0));
+      setOrderedEpisodes(sorted);
     }
   }, [episodes]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1532,6 +1535,9 @@ export function RadioPage() {
               <div className="flex items-center justify-between px-1">
                 <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up · Podcasts</h3>
                 <div className="flex items-center gap-3">
+                  {orderedEpisodes.some(ep => ep.transcriptUrl) && (
+                    <span className="text-xs text-emerald-400/60">✓ Best listening experience</span>
+                  )}
                   {orderedEpisodes.length > 0 && (
                     <span className="text-xs text-amber-400/60">drag to reorder</span>
                   )}
@@ -1606,6 +1612,12 @@ export function RadioPage() {
                                       </>
                                     ) : null;
                                   })()}
+                                  {ep.transcriptUrl && (
+                                    <span
+                                      title="Best listening experience — full transcript available"
+                                      className="text-emerald-400/80 text-xs leading-none"
+                                    >✓</span>
+                                  )}
                                   {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
                                 </div>
                                 <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
