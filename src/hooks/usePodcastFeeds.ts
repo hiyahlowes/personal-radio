@@ -142,7 +142,8 @@ function getPodcastChaptersUrl(item: Element): string | null {
 
 async function fetchChapters(chaptersUrl: string): Promise<PodcastChapter[]> {
   try {
-    const res = await fetch(chaptersUrl, { signal: AbortSignal.timeout(10_000) });
+    const proxyUrl = `${RSS_PROXY_URL}?action=json&url=${encodeURIComponent(chaptersUrl)}`;
+    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (!Array.isArray(data?.chapters)) return [];

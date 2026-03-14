@@ -10,6 +10,8 @@
  *   "search"    → GET PodcastIndex /search/byterm?q=<q>
  *   "rss"       → Fetch any RSS/Atom feed URL server-side (?url=https://...)
  *                 Returns the raw XML with appropriate headers.
+ *   "json"      → Fetch any JSON URL server-side (?url=https://...)
+ *                 Used for Podcast 2.0 chapter files (feeds.fountain.fm, etc.)
  *
  * Environment variables (set in Netlify dashboard — no VITE_ prefix):
  *   PODCASTINDEX_API_KEY
@@ -88,6 +90,61 @@ async function handleRss(params) {
   }
 }
 
+// ── action=json ───────────────────────────────────────────────────────────────
+
+async function handleJson(params) {
+  const url = params.url ?? '';
+  if (!url) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing "url" query parameter' }),
+    };
+  }
+
+  if (!/^https?:\/\//i.test(url)) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid URL scheme — only http/https allowed' }),
+    };
+  }
+
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'PersonalRadio/1.0 (chapters fetch)', 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+      redirect: 'follow',
+    });
+
+    if (!res.ok) {
+      return {
+        statusCode: res.status,
+        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: `Upstream returned HTTP ${res.status}` }),
+      };
+    }
+
+    const json = await res.text(); // pass through as-is
+
+    return {
+      statusCode: 200,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600', // chapters rarely change
+      },
+      body: json,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `JSON fetch failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── action=trending / action=search (PodcastIndex) ────────────────────────────
 
 async function handlePodcastIndex(action, params) {
@@ -159,9 +216,8 @@ export const handler = async (event) => {
   const params = event.queryStringParameters ?? {};
   const action = params.action ?? 'search';
 
-  if (action === 'rss') {
-    return handleRss(params);
-  }
+  if (action === 'rss') return handleRss(params);
+  if (action === 'json') return handleJson(params);
 
   return handlePodcastIndex(action, params);
 };
