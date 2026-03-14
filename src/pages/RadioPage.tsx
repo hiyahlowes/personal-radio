@@ -1066,8 +1066,11 @@ export function RadioPage() {
     if (droppableId === 'playlist') {
       setOrderedTracks(prev => {
         const next = [...prev];
-        const [moved] = next.splice(source.index, 1);
-        next.splice(destination.index, 0, moved);
+        // source/destination indices are relative to the visible window; offset by current position
+        const actualSrc = idxRef.current + source.index;
+        const actualDst = idxRef.current + destination.index;
+        const [moved] = next.splice(actualSrc, 1);
+        next.splice(actualDst, 0, moved);
 
         // Keep idxRef pointing at the same track after reorder
         const currentTrack = tracksRef.current[idxRef.current];
@@ -1109,6 +1112,8 @@ export function RadioPage() {
   // ── Derived UI ────────────────────────────────────────────────────────────
   // Use orderedTracks so the displayed track matches what the loop is playing
   const track = (orderedTracks.length > 0 ? orderedTracks : tracks)[idx];
+  // Sliding window: current track is always at position 0, show up to 10 ahead
+  const windowTracks = orderedTracks.slice(idx, idx + 10);
   // For streaming podcasts duration may be 0/Infinity even while playing.
   // Fall through to the RSS episode.duration as a best-effort estimate.
   const effectiveDuration =
@@ -1539,16 +1544,16 @@ export function RadioPage() {
                       {...provided.droppableProps}
                       className={`divide-y divide-white/5 transition-colors ${snapshot.isDraggingOver ? 'bg-purple-900/10' : ''}`}
                     >
-                       {orderedTracks.map((t, i) => (
+                       {windowTracks.map((t, i) => (
                          <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
                            {(drag, dragSnapshot) => {
-                             const isPlayed = i !== idx && playedTrackIds.has(t.id);
+                             const isCurrent = i === 0;
                              return (
                              <PortalAware
                                provided={drag}
                                snapshot={dragSnapshot}
                                className={`flex items-center gap-3 px-4 py-3.5 transition-all
-                                 ${i === idx ? 'bg-purple-900/20' : isPlayed ? 'opacity-45 hover:opacity-70' : 'hover:bg-white/5'}
+                                 ${isCurrent ? 'bg-purple-900/20' : 'hover:bg-white/5'}
                                  ${dragSnapshot.isDragging ? 'shadow-xl shadow-purple-900/40 bg-[rgba(30,20,60,0.95)] ring-1 ring-purple-500/40 rounded-xl opacity-95' : ''}
                                `}
                              >
@@ -1563,28 +1568,26 @@ export function RadioPage() {
                                  </svg>
                                </div>
 
-                               {/* Track number / playing indicator / played checkmark */}
+                               {/* Track number / playing indicator */}
                                <button
-                                 onClick={() => handleSelect(i)}
+                                 onClick={() => handleSelect(idx + i)}
                                  className="w-6 flex items-center justify-center flex-shrink-0"
-                                 aria-label={i === idx ? 'Currently playing' : `Play ${t.name}`}
+                                 aria-label={isCurrent ? 'Currently playing' : `Play ${t.name}`}
                                >
-                                 {i === idx
+                                 {isCurrent
                                    ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                                   : isPlayed
-                                     ? <svg className="w-3.5 h-3.5 text-green-500/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                                     : <span className="text-white/30 text-xs hover:text-white/60">{i + 1}</span>
+                                   : <span className="text-white/30 text-xs hover:text-white/60">{idx + i + 1}</span>
                                  }
                                </button>
 
                                {/* Artwork */}
-                               <button onClick={() => handleSelect(i)} className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
+                               <button onClick={() => handleSelect(idx + i)} className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
                                  <img src={t.artworkUrl} alt={t.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
                                </button>
 
                                {/* Info */}
-                               <button onClick={() => handleSelect(i)} className="flex-1 min-w-0 text-left">
-                                 <p className={`text-sm font-medium truncate flex items-center gap-1.5 ${i === idx ? 'text-purple-300' : isPlayed ? 'text-white/40' : 'text-white/80'}`}>
+                               <button onClick={() => handleSelect(idx + i)} className="flex-1 min-w-0 text-left">
+                                 <p className={`text-sm font-medium truncate flex items-center gap-1.5 ${isCurrent ? 'text-purple-300' : 'text-white/80'}`}>
                                    {t.isTopChart && (
                                      <span className="flex-shrink-0 text-amber-400 text-xs" title="Top Charts — Lightning-boosted hit">⚡</span>
                                    )}
