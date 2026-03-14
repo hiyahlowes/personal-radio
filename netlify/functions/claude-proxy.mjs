@@ -55,6 +55,8 @@ export default async function handler(req) {
 
   const requestBody = JSON.stringify({ system, messages, model, max_tokens });
   console.log('[Claude Proxy] Sending body:', requestBody);
+  console.log('[Claude Proxy] API key length:', process.env.ANTHROPIC_API_KEY?.length);
+  console.log('[Claude Proxy] API key prefix:', process.env.ANTHROPIC_API_KEY?.substring(0, 10));
 
   const upstream = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
