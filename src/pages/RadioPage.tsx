@@ -932,8 +932,8 @@ export function RadioPage() {
 
           console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
 
-          // ── Transition: duck music → jingle → moderator → silence → podcast
-          // 1. Fade music to 0.05 over 3 s (awaited so jingle starts clean).
+          // ── Transition: duck music → moderator → jingle → silence → podcast
+          // 1. Fade music to 0.05 over 3 s (awaited so moderator starts clean).
           podcastTransitionRef.current = true;
           console.log('[Loop] podcast transition — fading music to 0.05 over 3s');
           await new Promise<void>(res => { rampVolume(audio, 0.05, 3000, res); });
@@ -943,18 +943,18 @@ export function RadioPage() {
             break;
           }
 
-          // 2. Play podcast-intro jingle at full volume (no duck).
-          await playJingle('/podcast-intro.mp3');
+          // 2. Moderator speaks the transition (music still at 0.05 underneath).
+          await moderatorRef.current.speakPodcastTransition(
+            episode.title, episode.feedTitle, episode.description, episode.author,
+          );
 
           if (!runningRef.current) {
             podcastTransitionRef.current = false;
             break;
           }
 
-          // 3. Moderator speaks the transition (music still at 0.05 underneath).
-          await moderatorRef.current.speakPodcastTransition(
-            episode.title, episode.feedTitle, episode.description, episode.author,
-          );
+          // 3. Play podcast-intro jingle as the handoff cue before podcast starts.
+          await playJingle('/podcast-intro.mp3');
 
           if (!runningRef.current) {
             podcastTransitionRef.current = false;
