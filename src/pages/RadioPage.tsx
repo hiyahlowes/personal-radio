@@ -279,6 +279,9 @@ export function RadioPage() {
   const lastPodSaveRef          = useRef(0);
   // Set true after a crossfade completes so the loop top skips re-loading audio
   const crossfadeActiveRef = useRef(false);
+  // Set true while the podcast transition ramp sequence is running so the generic
+  // duck effect does not interfere (we own the volume during that window).
+  const podcastTransitionRef = useRef(false);
   // Set true when the user resumes music that was paused mid-track so the loop
   // skips the src reload and just calls play() from the current position.
   const resumeMusicRef = useRef(false);
@@ -528,6 +531,10 @@ export function RadioPage() {
 
   // ── Ducking — ramp audio.volume on isSpeaking changes ────────────────────
   useEffect(() => {
+    // The podcast transition sequence owns the volume ramp during its window.
+    // Skip this generic duck so we don't cancel or override that fade.
+    if (podcastTransitionRef.current) return;
+
     console.log('[Duck] effect fired — isSpeaking:', moderator.isSpeaking, '| audio.volume:', audioRef.current?.volume ?? 'no audio');
     const audio = audioRef.current;
     if (!audio) return;
@@ -898,10 +905,33 @@ export function RadioPage() {
 
           console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
 
-          // ── Transition: moderator introduces the podcast episode ────────────
+          // ── Transition: duck music, speak intro, fade to silence ─────────
+          // 1. Begin fading music down to 0.05 over 3 s — this starts
+          //    simultaneously with script generation so music is already
+          //    quieting as the moderator starts to speak.
+          podcastTransitionRef.current = true;
+          let cancelPodFade = rampVolume(audio, 0.05, 3000);
+          console.log('[Loop] podcast transition — fading music to 0.05 over 3s');
+
           await moderatorRef.current.speakPodcastTransition(
             episode.title, episode.feedTitle, episode.description, episode.author,
           );
+
+          if (!runningRef.current) {
+            cancelPodFade();
+            podcastTransitionRef.current = false;
+            break;
+          }
+
+          // 2. Speech done — stop the duck ramp (may have already finished)
+          //    then fade music fully out over 2 s before starting the podcast.
+          cancelPodFade();
+          console.log('[Loop] podcast transition — fading music to 0 over 2s');
+          await new Promise<void>(res => {
+            cancelPodFade = rampVolume(audio, 0, 2000, res);
+          });
+          podcastTransitionRef.current = false;
+
           if (!runningRef.current) break;
 
           // ── Load podcast onto the dedicated CORS-enabled audio element ────
@@ -911,7 +941,7 @@ export function RadioPage() {
           } else {
             loopGenRef.current++;
 
-            // Pause music while podcast plays
+            // Pause music (now at vol 0) before handing audio to podcast
             audio.pause();
 
             // Set src AFTER crossOrigin is already set (done at element creation)

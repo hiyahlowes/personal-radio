@@ -107,8 +107,8 @@ function fallbackPodcastTransition(showName: string, episodeTitle: string): stri
     return templates[showName.charCodeAt(0) % templates.length];
   }
   const templates = [
-    `Coming up, we're switching gears. ${showName} joins us with ${episodeTitle}. Stay with us.`,
-    `That's the music for now. Next up, ${showName}. Don't go anywhere.`,
+    `Let's check in with ${showName}.`,
+    `Time for some ${showName}.`,
     `And now for something a little different. Here's ${showName}.`,
   ];
   return templates[showName.charCodeAt(0) % templates.length];
@@ -286,28 +286,32 @@ export function useRadioModerator() {
       ].filter(Boolean).join(' ');
 
       let prompt: string;
+      const noSongRule =
+        'Do NOT mention what song was just playing or what music comes next. ' +
+        'Focus only on the podcast. No "coming up after this" or "stay tuned for more music".';
+
       if (isNews) {
         prompt =
           `You're a radio host transitioning from music to a news segment. ` +
           `The news show is called ${showName}. ` +
           (rssContext ? `${rssContext} ` : '') +
-          `Say something brief and natural to bridge to the news, like time to check in with the headlines or let's see what's happening in the world. ` +
-          `Mention the show name. Never mention dates, times, or episode numbers.`;
+          `Say something like "time to check in with the headlines" or "let's see what's happening in the world". ` +
+          `Mention the show name. Never mention dates, times, or episode numbers. ${noSongRule}`;
       } else if (isDateDump) {
         prompt =
           `You're a radio host transitioning from music to a podcast segment. ` +
           `The show is called ${showName}. ` +
           (rssContext ? `${rssContext} ` : '') +
           `Introduce it naturally using only the show name, do not mention the episode title at all. ` +
-          `Keep it smooth and conversational.`;
+          `Keep it smooth and conversational. ${noSongRule}`;
       } else {
         prompt =
-          `You're transitioning from a music set to a podcast segment. ` +
-          `Show name: ${showName}. Episode: ${episodeTitle}. ` +
+          `You're a radio host transitioning from music to a podcast segment. ` +
+          `Show: ${showName}. Episode: ${episodeTitle}. ` +
           (rssContext ? `${rssContext} ` : '') +
-          `Give a smooth natural on-air handoff. ` +
-          `Use the show name primarily. Only mention the episode title if it adds real value. ` +
-          `Never mention dates, times, or episode numbers.`;
+          `Give a warm, natural on-air introduction — like "let's check in on ${showName}" or "time for some ${showName}". ` +
+          `Use the show name primarily. Only mention the episode title if it is genuinely descriptive and adds real value. ` +
+          `Never mention dates, times, or episode numbers. ${noSongRule}`;
       }
       await buildAndSpeak(prompt, fallbackPodcastTransition(showName, episodeTitle));
     },
