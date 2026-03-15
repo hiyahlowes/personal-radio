@@ -682,6 +682,17 @@ export function RadioPage() {
         setIdx(currentIdx);
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
+        // Volume guard: promotion sets full volume, but the duck effect may have
+        // fired during the async load. Correct immediately rather than waiting
+        // for the speech/no-speech branch to ramp up from 0.08.
+        if (!mutedRef.current) {
+          const expected = volumeRef.current;
+          if (audio.volume < expected - 0.05) {
+            console.log(`[Crossfade] volume was ${audio.volume.toFixed(2)} — correcting to ${expected.toFixed(2)}`);
+            cancelRampRef.current?.();
+            audio.volume = expected;
+          }
+        }
       } else if (resumeMusicRef.current) {
         // ── User resumed after pausing mid-track — src is still loaded ─────
         resumeMusicRef.current = false;
@@ -900,22 +911,33 @@ export function RadioPage() {
       const crossfadeHappened = endedNaturally && nextAudio != null && !nextAudio.paused && nextTrack != null;
       if (crossfadeHappened) {
         console.log('[Crossfade] promoting nextAudio → audio');
-        const crossfadePos = nextAudio!.currentTime;
-        nextAudio!.pause();
 
-        // Move playback into audio at the crossfade position
+        // Load audio in the background while nextAudio KEEPS PLAYING — this
+        // eliminates the gap that occurred when we paused nextAudio first.
+        const targetVol = mutedRef.current ? 0 : volumeRef.current;
         audio.src    = nextTrack!.liveUrl;
-        audio.volume = mutedRef.current ? 0 : volumeRef.current;
+        audio.volume = targetVol;
         audio.load();
         await new Promise<void>(res => {
           const onCanPlay = () => { audio.removeEventListener('canplay', onCanPlay); res(); };
           audio.addEventListener('canplay', onCanPlay);
-          setTimeout(res, 500); // fallback
+          setTimeout(res, 500); // fallback — don't block forever
         });
-        if (isFinite(audio.duration) && crossfadePos < audio.duration) {
-          audio.currentTime = crossfadePos;
+
+        // Snap to the live position of nextAudio (it has been playing throughout)
+        const handoffPos = isFinite(nextAudio!.currentTime) ? nextAudio!.currentTime : 0;
+        if (isFinite(audio.duration) && handoffPos < audio.duration) {
+          audio.currentTime = handoffPos;
         }
-        try { await audio.play(); } catch { /* ignore */ }
+
+        // Switch: pause nextAudio only after audio is ready — minimal gap.
+        // Volume is already at targetVol; no ramp needed.
+        nextAudio!.pause();
+        audio.volume = targetVol; // guard: re-assert in case duck effect fired during load
+        console.log(`[Crossfade] immediate fade-up to ${targetVol.toFixed(2)} on handoff`);
+        if (audio.paused) {
+          try { await audio.play(); } catch { /* ignore */ }
+        }
 
         // Advance silent counter for the track that just ended (t)
         recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
