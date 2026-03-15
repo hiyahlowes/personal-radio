@@ -62,47 +62,41 @@ const CROSSFADE_SECS = 3;    // seconds before track end to begin crossfade
 const TICK_MS        = 40;   // ~25 steps/s — smooth enough
 
 // ─── Web Audio API — GainNode volume control (iOS-safe) ───────────────────────
-// ── iOS audio unlock (Blake Kus pattern) ──────────────────────────────────────
-// iOS Safari suspends the audio context until a user touch. This warms it on
-// the very first touchend anywhere on the page — not just the play button —
-// so that all subsequent async play() calls succeed without being blocked.
+// ── Shared AudioContext ────────────────────────────────────────────────────────
+// A single AudioContext instance is used for both the iOS warm-up (Blake Kus
+// pattern) and the GainNode volume control. Using separate instances was the
+// root cause of audio not routing to the speaker on iOS — the GainNode must
+// connect to the SAME context that was unlocked by the user gesture.
+//
+// _warmIOSAudio fires on the first touchend anywhere on the page, creates the
+// shared context, plays a 1-sample silent buffer to satisfy iOS's gesture
+// requirement, then removes itself. handlePlay and advanceLoop reuse _audioCtx.
+//
 // Based on: https://gist.github.com/kus/3f01d60569eeadefe3a1
-//
-// Desktop: AudioContext is not suspended on load; the listener fires harmlessly
-// and removes itself. No oscillator or silent-element tricks needed.
-const _AudioCtx = window.AudioContext ?? (window as any).webkitAudioContext as typeof AudioContext | undefined;
-let _iosWarmCtx: AudioContext | null = null;
-
-const _warmIOSAudio = () => {
-  if (_iosWarmCtx || !_AudioCtx) return;
-  _iosWarmCtx = new _AudioCtx();
-  const buffer = _iosWarmCtx.createBuffer(1, 1, 22050);
-  const source = _iosWarmCtx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(_iosWarmCtx.destination);
-  source.start(0);
-  document.removeEventListener('touchend', _warmIOSAudio);
-  console.log('[iOS] AudioContext warmed on first touch');
-};
-document.addEventListener('touchend', _warmIOSAudio);
-
-// ── GainNode volume control ────────────────────────────────────────────────────
-// On iOS Safari, HTMLAudioElement.volume is READ-ONLY — it always stays at 1.0.
-// The only reliable volume control on iOS is the Web Audio API via a GainNode.
-//
-// These module-level vars persist across RadioPage route changes (the audio
-// elements themselves also persist in RadioContext above the router).
-// The GainNode is connected once in handlePlay() (first user tap).
 //
 // CORS note: createMediaElementSource() requires the media element to be
 // CORS-enabled if the source is cross-origin. Without crossOrigin='anonymous'
 // the call may throw a SecurityError (which we catch). If it throws, _webAudioReady
 // remains false and all volume control falls back to audio.volume (works on
 // desktop, silent no-op on iOS — duck effect absent but music plays normally).
+const _AudioCtx = (window.AudioContext ?? (window as any).webkitAudioContext) as typeof AudioContext | undefined;
 let _audioCtx:     AudioContext                  | null = null;
 let _musicGain:    GainNode                      | null = null;
 let _musicSource:  MediaElementAudioSourceNode   | null = null;
 let _webAudioReady = false;
+
+const _warmIOSAudio = () => {
+  if (_audioCtx || !_AudioCtx) return;
+  _audioCtx = new _AudioCtx();
+  const buffer = _audioCtx.createBuffer(1, 1, 22050);
+  const source = _audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(_audioCtx.destination);
+  source.start(0);
+  document.removeEventListener('touchend', _warmIOSAudio);
+  console.log('[iOS] AudioContext warmed on first touch');
+};
+document.addEventListener('touchend', _warmIOSAudio);
 
 /** Set volume on the primary music element: GainNode when connected, audio.volume otherwise. */
 function setVolumeOnAudio(audio: HTMLAudioElement, value: number) {
@@ -839,7 +833,7 @@ export function RadioPage() {
               _musicSource.connect(_musicGain);
               _musicGain.connect(_audioCtx.destination);
               _webAudioReady = true;
-              console.log('[Duck] Web Audio GainNode connected after play()');
+              console.log('[Duck] GainNode connected to shared iOS AudioContext');
             } catch (e) {
               console.warn('[Duck] GainNode failed, falling back to audio.volume:', e);
               _musicSource   = null;
@@ -1469,14 +1463,14 @@ export function RadioPage() {
     // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
 
-    // ── AudioContext: create + resume synchronously in gesture handler ───────
-    // The GainNode is connected AFTER audio.play() resolves (in advanceLoop) —
-    // iOS requires play() to be called on the element first, then the graph
-    // can be wired up. AudioContext itself is pre-warmed by the touchend
-    // listener (_warmIOSAudio) so it is running before we get here.
-    if (!_audioCtx) {
+    // ── AudioContext: ensure the shared context exists + is running ──────────
+    // _warmIOSAudio (touchend) should have created _audioCtx already. If the
+    // play button was tapped before any touchend fired (e.g. desktop mouse click
+    // on first interaction), create it now as a fallback.
+    if (!_audioCtx && _AudioCtx) {
       try {
-        _audioCtx = new (window.AudioContext ?? (window as any).webkitAudioContext)();
+        _audioCtx = new _AudioCtx();
+        console.log('[Duck] AudioContext created in handlePlay (touchend fallback)');
       } catch (e) {
         console.warn('[Duck] AudioContext unavailable:', e);
       }
