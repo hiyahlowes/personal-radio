@@ -268,6 +268,83 @@ async function handlePodcastIndex(action, params) {
   }
 }
 
+// ── action=audio ──────────────────────────────────────────────────────────────
+// Proxies a podcast MP3 / audio file through the Netlify function, resolving
+// any CORS-blocked redirects (e.g. anchor.fm → CloudFront) server-side so that
+// iOS Safari can play the audio.
+//
+// Supports HTTP Range header forwarding so iOS can issue byte-range requests
+// for seeking and progressive buffering without fetching the whole file.
+
+async function handleAudio(event, params) {
+  const url = params.url ?? '';
+  if (!url) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing "url" query parameter' }),
+    };
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid URL scheme — only http/https allowed' }),
+    };
+  }
+
+  // Forward any Range header so iOS byte-range / seeking requests work.
+  const rangeHeader =
+    event.headers['range'] ?? event.headers['Range'] ?? '';
+  const upstreamHeaders = { 'User-Agent': 'PersonalRadio/1.0 (audio proxy)' };
+  if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+
+  try {
+    const res = await fetch(url, {
+      headers: upstreamHeaders,
+      redirect: 'follow', // resolve anchor.fm → CloudFront etc. server-side
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    // Pass non-2xx / non-206 errors back to the client.
+    if (!res.ok && res.status !== 206) {
+      return {
+        statusCode: res.status,
+        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: `Upstream returned HTTP ${res.status}` }),
+      };
+    }
+
+    const buffer = await res.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+
+    const responseHeaders = {
+      ...corsHeaders(),
+      'Content-Type':  res.headers.get('content-type')  ?? 'audio/mpeg',
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=3600',
+    };
+    // Forward Content-Range so the browser knows which byte range we returned.
+    const contentRange = res.headers.get('content-range');
+    if (contentRange) responseHeaders['Content-Range'] = contentRange;
+    const contentLength = res.headers.get('content-length');
+    if (contentLength) responseHeaders['Content-Length'] = contentLength;
+
+    return {
+      statusCode: res.status, // preserve 206 Partial Content
+      headers: responseHeaders,
+      body: base64,
+      isBase64Encoded: true,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `Audio proxy failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── action=tts ────────────────────────────────────────────────────────────────
 // Converts text to speech via ElevenLabs and returns audio/mpeg as binary.
 // Expected JSON body: { text, voice_id, model_id?, voice_settings? }
@@ -423,10 +500,11 @@ export const handler = async (event) => {
   const params = event.queryStringParameters ?? {};
   const action = params.action ?? 'search';
 
-  if (action === 'rss')  return handleRss(params);
-  if (action === 'json') return handleJson(params);
-  if (action === 'text') return handleText(params);
-  if (action === 'tts')       return handleTts(event);
-  if (action === 'stt')       return handleStt(event);
+  if (action === 'rss')   return handleRss(params);
+  if (action === 'json')  return handleJson(params);
+  if (action === 'text')  return handleText(params);
+  if (action === 'audio') return handleAudio(event, params);
+  if (action === 'tts')   return handleTts(event);
+  if (action === 'stt')   return handleStt(event);
   return handlePodcastIndex(action, params);
 };

@@ -590,8 +590,12 @@ export function RadioPage() {
     cancelRampRef.current?.();
 
     if (moderator.isSpeaking) {
-      console.log(`[Duck] duckDown() → ${DUCK_LEVEL} over 1000ms`);
-      cancelRampRef.current = rampVolume(audio, DUCK_LEVEL, 1000);
+      // Set directly — iOS Safari throttles setInterval in the background, making
+      // a ramped fade-down unreliable. A hard cut to DUCK_LEVEL is instantaneous
+      // and works consistently across devices.
+      console.log(`[Duck] duckDown() → ${DUCK_LEVEL} (immediate, iOS-safe)`);
+      audio.volume = DUCK_LEVEL;
+      cancelRampRef.current = null;
     } else {
       const target = mutedRef.current ? 0 : volumeRef.current;
       console.log(`[Duck] fadeBack() → ${target} over 2000ms`);
@@ -1095,8 +1099,13 @@ export function RadioPage() {
             // Pause music (now at vol 0) before handing audio to podcast
             audio.pause();
 
-            // Set src AFTER crossOrigin is already set (done at element creation)
-            pod.src    = episode.audioUrl;
+            // Route podcast audio through the Netlify proxy so iOS Safari can
+            // play it without being blocked by CORS redirects (anchor.fm → CloudFront).
+            // The proxy follows redirects server-side and returns audio/mpeg from the
+            // same origin, which needs no CORS credentials on the <audio> element.
+            const podSrc = `/.netlify/functions/podcast-proxy?action=audio&url=${encodeURIComponent(episode.audioUrl)}`;
+            console.log(`[Loop] podcast src (proxied): ${podSrc}`);
+            pod.src    = podSrc;
             pod.volume = mutedRef.current ? 0 : volumeRef.current;
             pod.load();
 
@@ -1135,10 +1144,20 @@ export function RadioPage() {
               podStarted = true;
               console.log('[Loop] podcast playing via dedicated element');
             } catch (e) {
-              console.error('[Loop] podcast play failed:', e);
-              nowPlayingRef.current = { kind: 'music', track: t };
-              setNowPlaying({ kind: 'music', track: t });
+              console.error('[Loop] podcast play failed — resetting state:', e);
+              // Reset everything so the user can press Play to retry.
+              // Without this, runningRef stays true but playing is false — the
+              // play button handler short-circuits on "already running" and
+              // the UI appears permanently stuck in PAUSED.
+              runningRef.current = false;
+              resumePodcastEpisodeRef.current = null;
+              nowPlayingRef.current = null;
+              setNowPlaying(null);
+              setPlaying(false);
             }
+
+            // Pod failed to start — runningRef was already set false in the catch.
+            if (!podStarted) break;
 
             // ── Run episode through segmenter ─────────────────────────────
             if (podStarted && runningRef.current) {
@@ -1271,9 +1290,14 @@ export function RadioPage() {
                     setTimeout(resolve, 5000);
                   });
                 }
-                try { await audio.play(); } catch (e) {
+                let postPodMusicStarted = false;
+                try { await audio.play(); postPodMusicStarted = true; } catch (e) {
                   console.warn('[Loop] post-podcast music play failed:', e);
+                  runningRef.current = false;
+                  podcastTransitionRef.current = false;
+                  setPlaying(false);
                 }
+                if (!postPodMusicStarted) break;
 
                 nowPlayingRef.current = { kind: 'music', track: nextMusicTrack };
                 setNowPlaying({ kind: 'music', track: nextMusicTrack });
@@ -1539,24 +1563,46 @@ export function RadioPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const seekToX = (clientX: number, rect: DOMRect) => {
-    // Seek whichever element is currently active (music or podcast)
+  // Seek bar ref — used to attach a native non-passive touchmove listener so
+  // e.preventDefault() actually prevents scroll on iOS Safari. React's synthetic
+  // onTouchMove is passive by default and cannot call preventDefault().
+  const seekBarRef = useRef<HTMLDivElement>(null);
+
+  const seekToX = useCallback((clientX: number, rect: DOMRect) => {
     const pod   = podAudioRef.current;
     const audio = audioRef.current;
     const el    = (pod && !pod.paused) ? pod : audio;
     if (!el || !duration) return;
     const r = (clientX - rect.left) / rect.width;
     el.currentTime = Math.max(0, Math.min(1, r)) * duration;
-  };
+  }, [duration]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Attach native (non-passive) touch listeners to the seek bar so touchmove
+  // can call preventDefault() to prevent page scroll while dragging on iOS.
+  useEffect(() => {
+    const el = seekBarRef.current;
+    if (!el) return;
+    const onTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      const touch = e.touches[0] ?? e.changedTouches[0];
+      if (touch) seekToX(touch.clientX, el.getBoundingClientRect());
+    };
+    const onTouchStartOrEnd = (e: TouchEvent) => {
+      const touch = e.touches[0] ?? e.changedTouches[0];
+      if (touch) seekToX(touch.clientX, el.getBoundingClientRect());
+    };
+    el.addEventListener('touchmove',  onTouchMove,       { passive: false });
+    el.addEventListener('touchstart', onTouchStartOrEnd, { passive: true  });
+    el.addEventListener('touchend',   onTouchStartOrEnd, { passive: true  });
+    return () => {
+      el.removeEventListener('touchmove',  onTouchMove);
+      el.removeEventListener('touchstart', onTouchStartOrEnd);
+      el.removeEventListener('touchend',   onTouchStartOrEnd);
+    };
+  }, [seekToX]);
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     seekToX(e.clientX, e.currentTarget.getBoundingClientRect());
-  };
-
-  const handleSeekTouch = (e: React.TouchEvent<HTMLDivElement>) => {
-    e.preventDefault(); // prevent scroll while seeking
-    const touch = e.touches[0] ?? e.changedTouches[0];
-    if (touch) seekToX(touch.clientX, e.currentTarget.getBoundingClientRect());
   };
 
   // ── Derived UI ────────────────────────────────────────────────────────────
@@ -1741,14 +1787,12 @@ export function RadioPage() {
           {/* Seek */}
           <div className="mb-5">
             <div
+              ref={seekBarRef}
               className="w-full h-1.5 bg-white/10 rounded-full cursor-pointer group touch-none py-2 -my-2"
               onClick={handleSeek}
-              onTouchStart={handleSeekTouch}
-              onTouchMove={handleSeekTouch}
-              onTouchEnd={handleSeekTouch}
             >
-              <div className="h-1.5 rounded-full progress-bar-inner relative" style={{ width: `${pct}%` }}>
-                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white shadow-lg opacity-0 group-hover:opacity-100 sm:transition-opacity" />
+              <div className="h-1.5 rounded-full progress-bar-inner relative pointer-events-none" style={{ width: `${pct}%` }}>
+                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white shadow-lg opacity-0 group-hover:opacity-100 sm:transition-opacity pointer-events-none" />
               </div>
             </div>
             <div className="flex justify-between mt-1.5 text-xs text-white/30">
