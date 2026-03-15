@@ -69,7 +69,7 @@ export function useElevenLabs() {
       const body = {
         text,
         voice_id: VOICE_ID,
-        model_id: 'eleven_turbo_v2_5',
+        model_id: 'eleven_v3',
         voice_settings: {
           stability: opts.stability ?? 0.45,
           similarity_boost: opts.similarity_boost ?? 0.82,
