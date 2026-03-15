@@ -206,6 +206,23 @@ export async function fetchTopTracks(limit = 40): Promise<WavlakeTrack[]> {
   return tracks;
 }
 
+/**
+ * Fetch a small pool of ambient tracks for use as podcast transition bridges.
+ * Always fetches regardless of the user's genre selection — these tracks are
+ * kept separate from the main playlist and never shown to the listener.
+ */
+export async function fetchAmbientBridgePool(max = 5): Promise<WavlakeTrack[]> {
+  try {
+    const tracks = await fetchTracksForQuery('ambient', 'ambient');
+    const pool   = dedupeAndShuffle(tracks).slice(0, max);
+    console.log(`[Bridge] ambient pool loaded: ${pool.length} tracks`);
+    return pool;
+  } catch (err) {
+    console.warn('[Bridge] ambient pool fetch failed:', err);
+    return [];
+  }
+}
+
 /** Deduplicate tracks by ID and shuffle */
 function dedupeAndShuffle(tracks: WavlakeTrack[]): WavlakeTrack[] {
   const seen = new Set<string>();

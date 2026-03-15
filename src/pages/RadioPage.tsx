@@ -10,7 +10,7 @@ import {
   type DraggableProvided,
 } from '@hello-pangea/dnd';
 
-import { useWavlakeTracks, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
+import { useWavlakeTracks, fetchAmbientBridgePool, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, useSingleFeedEpisodes, getStoredFeeds, type PodcastEpisode, type PodcastFeed } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator, type ResumeContext } from '@/hooks/useRadioModerator';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
@@ -312,6 +312,7 @@ export function RadioPage() {
   // skips the src reload and just calls play() from the current position.
   const resumeMusicRef = useRef(false);
   const tracksRef          = useRef<WavlakeTrack[]>([]);
+  const ambientBridgeRef   = useRef<WavlakeTrack[]>([]); // separate bridge pool, never in playlist
   const silentCountRef   = useRef(0);
   const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
@@ -409,6 +410,12 @@ export function RadioPage() {
   // These are the authoritative refs used by advanceLoop.
   useEffect(() => { tracksRef.current   = orderedTracks;   }, [orderedTracks]);
   useEffect(() => { episodesRef.current = orderedEpisodes; }, [orderedEpisodes]);
+
+  // Fetch a small ambient bridge pool once on mount — separate from the main
+  // playlist, used only as background music under podcast transition speech.
+  useEffect(() => {
+    fetchAmbientBridgePool(5).then(pool => { ambientBridgeRef.current = pool; });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Push listener memory context to the AI moderator whenever memory changes.
   useEffect(() => {
@@ -996,9 +1003,13 @@ export function RadioPage() {
 
           // 1. Stop current music; find an ambient bridge track.
           audio.pause();
-          const ambientPool  = tracksRef.current.filter(t => t.genreId === 'ambient');
-          const bridgeTrack  = ambientPool.length > 0
-            ? ambientPool[Math.floor(Math.random() * ambientPool.length)]
+          // Prefer the dedicated bridge pool (always ambient, never in playlist).
+          // Fall back to ambient tracks in the main queue if the pool is empty.
+          const bridgePool = ambientBridgeRef.current.length > 0
+            ? ambientBridgeRef.current
+            : tracksRef.current.filter(t => t.genreId === 'ambient');
+          const bridgeTrack = bridgePool.length > 0
+            ? bridgePool[Math.floor(Math.random() * bridgePool.length)]
             : null;
 
           let bridgeAudio: HTMLAudioElement | null = null;
@@ -1015,7 +1026,7 @@ export function RadioPage() {
             });
             bridgeAudio.volume = 0.3;
             bridgeAudio.play().catch(() => {});
-            console.log(`[Loop] podcast bridge — ambient "${bridgeTrack.name}" at 0.3`);
+            console.log(`[Bridge] using ambient track: ${bridgeTrack.name} by ${bridgeTrack.artist}`);
           } else {
             console.log('[Loop] podcast bridge — no ambient tracks available, skipping');
           }
