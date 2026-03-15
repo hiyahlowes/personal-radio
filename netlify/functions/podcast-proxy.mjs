@@ -294,7 +294,13 @@ async function handleTts(event) {
     };
   }
 
-  const { text, voice_id, model_id = 'eleven_turbo_v2_5', voice_settings } = parsed;
+  const { text, voice_id, model_id = 'eleven_turbo_v2_5' } = parsed;
+  const voice_settings = {
+    stability:        0.40,
+    similarity_boost: 0.75,
+    style:            0.15,
+    use_speaker_boost: true,
+  };
 
   if (!text || !voice_id) {
     return {

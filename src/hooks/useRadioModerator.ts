@@ -281,9 +281,12 @@ async function generateScript(
           'EXPRESSIVE TAGS: You can use ElevenLabs expressive tags inline in your spoken text to sound more like a real radio host. ' +
           'Available tags: [laughs] for genuine humor or amusement, [excited] for energetic song intros or big announcements, ' +
           '[sighs] for relaxed or late-night chill vibes, [whispers] for intimate or mysterious moments, ' +
-          '[slow] for emphasis on an important word or phrase. ' +
+          '[slow] for emphasis on an important word or phrase, ' +
+          '[pause] for a natural timing beat between thoughts, ' +
+          '[rushed] for excited or high-energy moments, ' +
+          '[drawn out] for stretching emphasis on a key word. ' +
           'Each tag affects only the next 4-5 words, then returns to normal. ' +
-          'Use them sparingly — max 1-2 tags per moderation, only when it feels natural. ' +
+          'Use them sparingly — max 2 tags per response, only when it feels natural. ' +
           'Never stack multiple tags back to back. ' +
           'A real radio host uses these moments deliberately, not constantly. ' +
           'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."' +
