@@ -107,7 +107,7 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
 
     // Podcast audio — crossOrigin must be set BEFORE src assignment.
     const pod        = new Audio();
-    pod.preload      = 'metadata';
+    pod.preload      = 'auto';
     pod.crossOrigin  = 'anonymous';
     podAudioRef.current = pod;
 

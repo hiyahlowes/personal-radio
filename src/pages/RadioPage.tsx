@@ -90,13 +90,23 @@ function randInt(min: number, max: number) {
 }
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+// Pre-load the podcast-intro jingle so it plays instantly when needed.
+// The same element is reused (currentTime reset) on each call.
+const _jingleAudio = new Audio('/podcast-intro.mp3');
+_jingleAudio.preload = 'auto';
+_jingleAudio.load();
+console.log('[Preload] jingles cached');
+
 /**
- * Play a jingle file once at full volume and resolve when it ends.
+ * Play a jingle at full volume and resolve when it ends.
+ * For '/podcast-intro.mp3' the preloaded singleton is reused so playback
+ * starts instantly. Other paths get a fresh Audio element.
  * Errors are swallowed so a missing file never stalls the radio loop.
  */
 function playJingle(src: string): Promise<void> {
   return new Promise<void>(resolve => {
-    const jingle = new Audio(src);
+    const jingle = src === '/podcast-intro.mp3' ? _jingleAudio : new Audio(src);
+    if (src === '/podcast-intro.mp3') jingle.currentTime = 0;
     jingle.volume = 1.0;
     jingle.addEventListener('ended', () => resolve(), { once: true });
     jingle.addEventListener('error', () => resolve(), { once: true });
@@ -710,6 +720,15 @@ export function RadioPage() {
           console.log(`[Crossfade] pre-loading next: "${nextTrack.name}"`);
         }
 
+        // Wait for the current track to buffer before playing — prevents dead air.
+        if (audio.readyState < 3 /* HAVE_FUTURE_DATA */) {
+          await new Promise<void>(resolve => {
+            audio.addEventListener('canplay', () => resolve(), { once: true });
+            audio.addEventListener('error',   () => resolve(), { once: true });
+            setTimeout(resolve, 5000); // fallback — don't block forever
+          });
+        }
+
         try {
           await audio.play();
           console.log('[Loop] audio.play() resolved at duck level');
@@ -793,16 +812,24 @@ export function RadioPage() {
             }
           });
 
-          // Fade in next (already at volume 0 from pre-load)
+          // Fade in next (already at volume 0 from pre-load).
+          // Wait for canplay so there's no dead air if buffering is still in progress.
           nextAudio.volume = 0;
           cancelNextRampRef.current?.();
-          nextAudio.play().then(() => {
-            cancelNextRampRef.current = rampVolume(nextAudio, targetVol, fadeDurationMs);
-          }).catch(e => {
-            console.warn('[Crossfade] nextAudio.play() failed:', e);
-            // Crossfade failed — let ended event handle it
-            crossfadeStarted = false;
-          });
+          const startNextPlayback = () => {
+            nextAudio.play().then(() => {
+              cancelNextRampRef.current = rampVolume(nextAudio, targetVol, fadeDurationMs);
+            }).catch(e => {
+              console.warn('[Crossfade] nextAudio.play() failed:', e);
+              crossfadeStarted = false;
+            });
+          };
+          if (nextAudio.readyState >= 3 /* HAVE_FUTURE_DATA */) {
+            startNextPlayback();
+          } else {
+            console.log('[Crossfade] waiting for canplay on nextAudio…');
+            nextAudio.addEventListener('canplay', startNextPlayback, { once: true });
+          }
         };
 
         const onTimeUpdate = () => {
@@ -942,18 +969,42 @@ export function RadioPage() {
 
           console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
 
-          // ── Transition: duck music → moderator → jingle → silence → podcast
-          // 1. Fade music to 0.05 over 3 s (awaited so moderator starts clean).
+          // ── Transition: ambient bridge → moderator → fade → jingle → podcast
           podcastTransitionRef.current = true;
-          console.log('[Loop] podcast transition — fading music to 0.05 over 3s');
-          await new Promise<void>(res => { rampVolume(audio, 0.05, 3000, res); });
+
+          // 1. Stop current music; find an ambient bridge track.
+          audio.pause();
+          const ambientPool  = tracksRef.current.filter(t => t.genreId === 'ambient');
+          const bridgeTrack  = ambientPool.length > 0
+            ? ambientPool[Math.floor(Math.random() * ambientPool.length)]
+            : null;
+
+          let bridgeAudio: HTMLAudioElement | null = null;
+          if (bridgeTrack) {
+            bridgeAudio          = new Audio(bridgeTrack.liveUrl);
+            bridgeAudio.preload  = 'auto';
+            bridgeAudio.volume   = 0;
+            bridgeAudio.load();
+            // Wait up to 3 s for enough data, then start regardless
+            await new Promise<void>(resolve => {
+              bridgeAudio!.addEventListener('canplay', () => resolve(), { once: true });
+              bridgeAudio!.addEventListener('error',   () => resolve(), { once: true });
+              setTimeout(resolve, 3000);
+            });
+            bridgeAudio.volume = 0.3;
+            bridgeAudio.play().catch(() => {});
+            console.log(`[Loop] podcast bridge — ambient "${bridgeTrack.name}" at 0.3`);
+          } else {
+            console.log('[Loop] podcast bridge — no ambient tracks available, skipping');
+          }
 
           if (!runningRef.current) {
+            bridgeAudio?.pause();
             podcastTransitionRef.current = false;
             break;
           }
 
-          // 2. Moderator speaks the transition (music still at 0.05 underneath).
+          // 2. Moderator speaks over ambient bridge (or silence if none available).
           // Check if the listener has been here before (> 60 s heard).
           const epRecord = listenerMemoryRef.current.memory.episodeHistory
             .find(e => e.episodeId === episode.id);
@@ -970,11 +1021,19 @@ export function RadioPage() {
           );
 
           if (!runningRef.current) {
+            bridgeAudio?.pause();
             podcastTransitionRef.current = false;
             break;
           }
 
-          // 3. Play podcast-intro jingle as the handoff cue before podcast starts.
+          // 3. Fade bridge to 0 (await) — jingle must play into silence.
+          if (bridgeAudio) {
+            await new Promise<void>(res => { rampVolume(bridgeAudio!, 0, 3000, res); });
+            bridgeAudio.pause();
+            console.log('[Loop] podcast bridge faded out');
+          }
+
+          // 4. Jingle plays after full silence — THEN podcast starts.
           await playJingle('/podcast-intro.mp3');
 
           if (!runningRef.current) {
@@ -982,9 +1041,6 @@ export function RadioPage() {
             break;
           }
 
-          // 4. Fade music fully out over 2 s before starting the podcast.
-          console.log('[Loop] podcast transition — fading music to 0 over 2s');
-          await new Promise<void>(res => { rampVolume(audio, 0, 2000, res); });
           podcastTransitionRef.current = false;
 
           if (!runningRef.current) break;
@@ -1003,6 +1059,15 @@ export function RadioPage() {
             pod.src    = episode.audioUrl;
             pod.volume = mutedRef.current ? 0 : volumeRef.current;
             pod.load();
+
+            // Wait for enough data before playing — prevents dead air / spinner.
+            if (pod.readyState < 3 /* HAVE_FUTURE_DATA */) {
+              await new Promise<void>(resolve => {
+                pod.addEventListener('canplay', () => resolve(), { once: true });
+                pod.addEventListener('error',   () => resolve(), { once: true });
+                setTimeout(resolve, 8000); // fallback — slow connections
+              });
+            }
 
             // Seek to saved position if this episode was partially played before
             const savedPos = loadPodcastPosition(episode.id);

@@ -12,6 +12,7 @@ export interface WavlakeTrack {
   liveUrl: string;
   duration: number;    // seconds
   isTopChart?: boolean; // true when fetched from the Top 40 chart
+  genreId?: string;     // genre used to fetch this track (e.g. 'ambient')
 }
 
 interface WavlakeSearchResult {
@@ -80,7 +81,7 @@ export const ALL_GENRE_IDS = GENRES.map(g => g.id);
 
 // ── Fetching ──────────────────────────────────────────────────────────────────
 
-async function fetchTracksForQuery(query: string): Promise<WavlakeTrack[]> {
+async function fetchTracksForQuery(query: string, genreId: string): Promise<WavlakeTrack[]> {
   const url = `${WAVLAKE_BASE}/search?term=${encodeURIComponent(query)}&limit=20`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Wavlake search failed for "${query}": ${res.status}`);
@@ -112,6 +113,7 @@ async function fetchTracksForQuery(query: string): Promise<WavlakeTrack[]> {
       avatarUrl: item.avatarUrl,
       liveUrl: item.liveUrl,
       duration: item.duration,
+      genreId,
     }));
 }
 
@@ -242,12 +244,15 @@ export function useWavlakeTracks(selectedGenreIds: string[] = ALL_GENRE_IDS) {
         return tracks;
       }
 
-      // ── Genre mode (unchanged from original) ──────────────────────────────
+      // ── Genre mode ────────────────────────────────────────────────────────
       const activeGenres = GENRES.filter(g => selectedGenreIds.includes(g.id));
       const genresToFetch = activeGenres.length > 0 ? activeGenres : GENRES;
-      const terms = [...new Set(genresToFetch.flatMap(g => g.terms))];
+      // Expand each genre into { term, genreId } pairs so tracks can be tagged
+      const termEntries = genresToFetch.flatMap(g => g.terms.map(term => ({ term, genreId: g.id })));
 
-      const results = await Promise.allSettled(terms.map(fetchTracksForQuery));
+      const results = await Promise.allSettled(
+        termEntries.map(({ term, genreId }) => fetchTracksForQuery(term, genreId)),
+      );
       const allTracks: WavlakeTrack[] = [];
       for (const result of results) {
         if (result.status === 'fulfilled') allTracks.push(...result.value);
