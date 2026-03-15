@@ -950,9 +950,12 @@ export function RadioPage() {
           setTimeout(res, 500); // fallback — don't block forever
         });
 
-        // Snap to the live position of nextAudio (it has been playing throughout)
+        // Snap to the live position of nextAudio (it has been playing throughout).
+        // Do NOT gate on isFinite(audio.duration) — duration may not be known yet
+        // when the canplay/500ms fallback fires, which would leave audio playing
+        // from the start instead of the handoff position.
         const handoffPos = isFinite(nextAudio!.currentTime) ? nextAudio!.currentTime : 0;
-        if (isFinite(audio.duration) && handoffPos < audio.duration) {
+        if (handoffPos > 0) {
           audio.currentTime = handoffPos;
         }
 
@@ -1140,17 +1143,25 @@ export function RadioPage() {
               });
             }
 
-            // Seek to saved position if this episode was partially played before
+            // Seek to saved position if this episode was partially played before.
+            // The canplay wait above means loadedmetadata has already fired —
+            // pod.duration is known and we can seek directly without a listener.
+            // If for some reason duration is still unknown (error/timeout path),
+            // fall back to a loadedmetadata listener.
             const savedPos = loadPodcastPosition(episode.id);
             if (savedPos > 5) {
               console.log(`[Loop] resuming from saved position ${savedPos.toFixed(0)}s`);
-              const seekOnMeta = () => {
-                pod.removeEventListener('loadedmetadata', seekOnMeta);
+              const doSeek = () => {
                 if (isFinite(pod.duration) && savedPos < pod.duration - 10) {
                   pod.currentTime = savedPos;
+                  console.log(`[Loop] seeked to ${savedPos.toFixed(0)}s`);
                 }
               };
-              pod.addEventListener('loadedmetadata', seekOnMeta);
+              if (pod.readyState >= 1) { // HAVE_METADATA — duration is known
+                doSeek();
+              } else {
+                pod.addEventListener('loadedmetadata', doSeek, { once: true });
+              }
             }
 
             setCT(savedPos > 5 ? savedPos : 0);

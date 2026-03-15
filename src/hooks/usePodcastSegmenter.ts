@@ -650,7 +650,7 @@ export function usePodcastSegmenter() {
     // ── Segment loop ──────────────────────────────────────────────────────
     while (callbacks.isRunning()) {
 
-      const segmentStartTime = audio.currentTime; // seconds into the episode
+      let segmentStartTime = audio.currentTime; // seconds into the episode (let — reset on seek)
 
       // If chapters are available, find the first chapter boundary at least
       // SPLIT_WINDOW_MIN into this segment; otherwise use silence detection.
@@ -682,6 +682,7 @@ export function usePodcastSegmenter() {
       // Promise that resolves true on natural end, false on split or pause
       const result = await new Promise<'ended' | 'split' | 'paused'>((resolve) => {
         let pollId: ReturnType<typeof setInterval>;
+        let prevPollTime = audio.currentTime; // for seek detection
 
         function cleanup() {
           clearInterval(pollId);
@@ -710,7 +711,40 @@ export function usePodcastSegmenter() {
         pollId = setInterval(() => {
           if (!callbacks.isRunning()) { cleanup(); resolve('paused'); return; }
 
-          const elapsedAudio = audio.currentTime - segmentStartTime;
+          const ct = audio.currentTime;
+
+          // ── Seek detection ─────────────────────────────────────────────────
+          // A jump > 5 s between 200 ms polls means the user (or a time-skip)
+          // moved the playhead. Reset all split state so we don't immediately
+          // fire a chapter/scribe/silence split at the new position.
+          if (Math.abs(ct - prevPollTime) > 5) {
+            console.log(
+              `[Segmenter] seek detected (${prevPollTime.toFixed(1)}s → ${ct.toFixed(1)}s) — resetting split target`,
+            );
+            // Treat the new position as the start of a fresh segment window.
+            segmentStartTime       = ct;
+            // Recalculate chapter target from new position
+            if (chapters && chapters.length > 0) {
+              const next = chapters
+                .filter(c => c.startTime >= ct + SPLIT_WINDOW_MIN)
+                .sort((a, b) => a.startTime - b.startTime)[0];
+              targetChapterTime = next ? next.startTime : null;
+            } else {
+              targetChapterTime = null;
+            }
+            // Reset natural-cut and Scribe state so they restart from scratch
+            naturalCutFetchStarted = false;
+            naturalCutTime         = null;
+            scribeLookaheadStarted = false;
+            scribeCaptureStarted   = false;
+            scribeCutTime          = null;
+            silenceStart           = null;
+            prevPollTime = ct;
+            return; // skip split logic this tick
+          }
+          prevPollTime = ct;
+
+          const elapsedAudio = ct - segmentStartTime;
 
           // Force-split at SPLIT_WINDOW_MAX regardless of method
           if (elapsedAudio >= SPLIT_WINDOW_MAX) {
@@ -726,7 +760,7 @@ export function usePodcastSegmenter() {
             if (
               transcriptUrl &&
               !naturalCutFetchStarted &&
-              audio.currentTime >= targetChapterTime - NATURAL_CUT_LOOKAHEAD
+              ct >= targetChapterTime - NATURAL_CUT_LOOKAHEAD
             ) {
               naturalCutFetchStarted = true;
               findNaturalCutPoint(transcriptUrl, targetChapterTime)
@@ -736,11 +770,11 @@ export function usePodcastSegmenter() {
 
             // Use the refined cut time once it arrives; fall back to chapter boundary.
             const effectiveCutTime = naturalCutTime ?? targetChapterTime;
-            if (audio.currentTime >= effectiveCutTime) {
+            if (ct >= effectiveCutTime) {
               if (naturalCutTime !== null && naturalCutTime > targetChapterTime) {
-                console.log(`[Segmenter] Splitting at natural cut ${audio.currentTime.toFixed(1)}s`);
+                console.log(`[Segmenter] Splitting at natural cut ${ct.toFixed(1)}s`);
               } else {
-                console.log(`[Segmenter] Chapter boundary reached at ${audio.currentTime.toFixed(1)}s`);
+                console.log(`[Segmenter] Chapter boundary reached at ${ct.toFixed(1)}s`);
               }
               triggerSplit();
             }
@@ -753,12 +787,12 @@ export function usePodcastSegmenter() {
                 // Phase 1 — 90 s early: log lookahead start.
                 if (
                   !scribeLookaheadStarted &&
-                  audio.currentTime >= scribeTarget - SCRIBE_LOOKAHEAD
+                  ct >= scribeTarget - SCRIBE_LOOKAHEAD
                 ) {
                   scribeLookaheadStarted = true;
                   console.log(
                     `[Segmenter] Lookahead started at ` +
-                    `${audio.currentTime.toFixed(1)}s, target=${scribeTarget.toFixed(1)}s`,
+                    `${ct.toFixed(1)}s, target=${scribeTarget.toFixed(1)}s`,
                   );
                 }
 
@@ -766,7 +800,7 @@ export function usePodcastSegmenter() {
                 if (
                   scribeLookaheadStarted &&
                   !scribeCaptureStarted &&
-                  audio.currentTime >= scribeTarget - SCRIBE_SEND_LEAD
+                  ct >= scribeTarget - SCRIBE_SEND_LEAD
                 ) {
                   scribeCaptureStarted = true;
                   const captureBlob = collectLastNSeconds(
@@ -785,7 +819,7 @@ export function usePodcastSegmenter() {
                     ? scribeTarget + SCRIBE_TIMEOUT_EXTRA
                     : scribeTarget);
 
-                if (audio.currentTime >= effectiveCutTime) {
+                if (ct >= effectiveCutTime) {
                   scribeUsed = true;
                   triggerSplit();
                 }
