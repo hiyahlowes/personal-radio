@@ -1236,12 +1236,69 @@ export function RadioPage() {
             // ── Episode finished or user paused ───────────────────────────
             pod.pause();
             if (runningRef.current) {
-              // Finished naturally — clean up, mark played, speak outro
+              // Finished naturally — clean up and mark played
               pod.removeAttribute('src');
               markPlayedRef.current(episode.id);
               setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
+
               if (nextMusicTrack) {
+                // ── Post-podcast transition: radio-style, no dead air ──────
+                // Same pattern as the intro bridge: music plays at 0.3 while
+                // the moderator speaks, then fades up to full afterwards.
+
+                // 1. Studio-return jingle (podcast → music handoff cue)
+                podcastTransitionRef.current = true;
+                await playJingle('/studio-return.mp3');
+
+                if (!runningRef.current) { podcastTransitionRef.current = false; break; }
+
+                // 2. Start next song at low volume BEFORE moderator speaks
+                console.log('[Loop] post-podcast — starting music before commentary');
+                audio.src    = nextMusicTrack.liveUrl;
+                audio.volume = 0.3;
+                audio.load();
+                if (audio.readyState < 3) {
+                  await new Promise<void>(resolve => {
+                    audio.addEventListener('canplay', () => resolve(), { once: true });
+                    audio.addEventListener('error',   () => resolve(), { once: true });
+                    setTimeout(resolve, 5000);
+                  });
+                }
+                try { await audio.play(); } catch (e) {
+                  console.warn('[Loop] post-podcast music play failed:', e);
+                }
+
+                nowPlayingRef.current = { kind: 'music', track: nextMusicTrack };
+                setNowPlaying({ kind: 'music', track: nextMusicTrack });
+                setCT(0);
+                setDur(nextMusicTrack.duration || 0);
+                setIdx(idxRef.current);
+                listenerMemoryRef.current.recordSongStart(nextMusicTrack);
+
+                if (!runningRef.current) {
+                  podcastTransitionRef.current = false;
+                  crossfadeActiveRef.current   = true;
+                  break;
+                }
+
+                // 3. Moderator speaks OVER the music at 0.3
+                //    podcastTransitionRef prevents the duck effect from interfering
                 await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
+
+                if (!runningRef.current) {
+                  podcastTransitionRef.current = false;
+                  crossfadeActiveRef.current   = true;
+                  break;
+                }
+
+                // 4. Fade music up to full after commentary
+                cancelRampRef.current?.();
+                const outroTarget = mutedRef.current ? 0 : volumeRef.current;
+                cancelRampRef.current = rampVolume(audio, outroTarget, 1000);
+                podcastTransitionRef.current = false;
+
+                // Signal the loop top to skip reloading — audio is playing and ramping up
+                crossfadeActiveRef.current = true;
               }
             } else {
               // User paused mid-episode — preserve src and queue entry for resume
