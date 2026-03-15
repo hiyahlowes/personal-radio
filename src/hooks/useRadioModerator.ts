@@ -291,13 +291,12 @@ async function generateScript(
           '(9) Never read out dates, times, episode numbers, or version tags. ' +
           '(10) For podcast episodes where the title is just a date or timestamp, ignore it and use the show name only. ' +
           '(11) For music, drop parenthetical suffixes like acoustic version or feat X, just say the clean title and artist. ' +
+          '(12) Never mention Wavlake, sats, charts, streaming numbers, or Bitcoin tips in a music intro. Talk about the music itself, the artist, or how it sounds — not where it comes from. ' +
           'EXPRESSIVE TAGS: You can use ElevenLabs expressive tags inline in your spoken text to sound more like a real radio host. ' +
-          'Available tags: [laughs] for genuine humor or amusement, [excited] for energetic song intros or big announcements, ' +
+          'Available tags (turbo model — only these 5 work): ' +
+          '[laughs] for genuine humor or amusement, [excited] for energetic song intros or big announcements, ' +
           '[sighs] for relaxed or late-night chill vibes, [whispers] for intimate or mysterious moments, ' +
-          '[slow] for emphasis on an important word or phrase, ' +
-          '[pause] for a natural timing beat between thoughts, ' +
-          '[rushed] for excited or high-energy moments, ' +
-          '[drawn out] for stretching emphasis on a key word. ' +
+          '[slow] for emphasis on an important word or phrase. ' +
           'Each tag affects only the next 4-5 words, then returns to normal. ' +
           'Use them sparingly — max 2 tags per response, only when it feels natural. ' +
           'Never stack multiple tags back to back. ' +
@@ -386,10 +385,8 @@ export function useRadioModerator() {
 
   const speakTrackIntro = useCallback(
     async (track: WavlakeTrack, isTopChart = false, isLiked = false): Promise<void> => {
+      void isTopChart; // chart status intentionally not passed to Claude — rule (12)
       const cleanTitle = cleanTrackTitle(track.name);
-      const chartContext = isTopChart
-        ? `This track is one of the top-earning songs on Wavlake, ranked by Bitcoin Lightning tips from listeners. Mention this naturally. `
-        : '';
       const likedContext = isLiked
         ? `The listener has liked this song before. You may acknowledge that naturally — e.g. a favourite returning — but only if it fits and feels genuine. Do not force it. `
         : '';
@@ -397,7 +394,6 @@ export function useRadioModerator() {
         `Introduce the next song on air. ` +
         `Artist: ${track.artist}. Song title: ${cleanTitle}. ` +
         `Album: ${track.albumTitle || 'their latest work'}. ` +
-        chartContext +
         likedContext +
         `Sound like a natural radio DJ handing off to the track. Keep it to 1 to 2 sentences. ` +
         `Vary your phrasing, do not start with Here's. Do not put the title in quotes. ` +
@@ -409,13 +405,11 @@ export function useRadioModerator() {
 
   const speakReviewAndIntro = useCallback(
     async (played: WavlakeTrack[], next: WavlakeTrack, isNextTopChart = false, isNextLiked = false): Promise<void> => {
+      void isNextTopChart; // chart status intentionally not passed to Claude — rule (12)
       const playedList = played
         .map(t => `${t.artist} with ${cleanTrackTitle(t.name)}`)
         .join(' and then ');
       const cleanNextTitle = cleanTrackTitle(next.name);
-      const chartContext = isNextTopChart
-        ? `The next track is one of the top-earning songs on Wavlake, ranked by Bitcoin Lightning tips. Work that in naturally. `
-        : '';
       const likedContext = isNextLiked
         ? `The listener has liked the next track before. You may acknowledge that naturally if it fits. `
         : '';
@@ -423,7 +417,6 @@ export function useRadioModerator() {
         `You just played ${playedList} on air without commentary. ` +
         `Give a brief warm reaction to that music, one sentence. ` +
         `Then introduce the next track: ${next.artist} with ${cleanNextTitle}. ` +
-        chartContext +
         likedContext +
         `Keep the whole thing to 2 to 3 sentences. Sound like a natural radio DJ, not a robot. ` +
         `Do not put titles in quotes or add version tags.`;
