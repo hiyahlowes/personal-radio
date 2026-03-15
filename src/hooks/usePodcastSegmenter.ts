@@ -581,6 +581,11 @@ export function usePodcastSegmenter() {
     let ctx: AudioContext;
     try {
       ctx = new AudioContext();
+      // iOS Safari creates AudioContext in 'suspended' state.
+      // Fire resume() immediately — it succeeds if the user's gesture chain is
+      // still active (which it is: the user tapped Play → advanceLoop() awaited
+      // a few canplay events → we are here). No-op on desktop.
+      ctx.resume().catch(() => {});
     } catch {
       console.warn('[Segmenter] AudioContext unavailable — running without silence detection');
       await playUntilEnd(audio, callbacks.isRunning);

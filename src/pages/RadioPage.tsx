@@ -97,6 +97,12 @@ _jingleAudio.preload = 'auto';
 _jingleAudio.load();
 console.log('[Preload] jingles cached');
 
+// iOS Safari: a dedicated silent element used only to unlock web audio from the
+// first user gesture. Calling play() on it synchronously in the gesture handler
+// activates the browser's audio context for the whole page so subsequent async
+// play() calls (e.g. after awaiting canplay) succeed without being blocked.
+const _iosUnlockAudio = new Audio();
+
 /**
  * Play a jingle at full volume and resolve when it ends.
  * For '/podcast-intro.mp3' the preloaded singleton is reused so playback
@@ -311,6 +317,7 @@ export function RadioPage() {
   // Set true when the user resumes music that was paused mid-track so the loop
   // skips the src reload and just calls play() from the current position.
   const resumeMusicRef = useRef(false);
+  const iosAudioUnlockedRef = useRef(false);
   const tracksRef          = useRef<WavlakeTrack[]>([]);
   const ambientBridgeRef   = useRef<WavlakeTrack[]>([]); // separate bridge pool, never in playlist
   const silentCountRef   = useRef(0);
@@ -1337,6 +1344,19 @@ export function RadioPage() {
     // If the loop is already running (e.g. we navigated away and came back),
     // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
+
+    // iOS Safari: unlock web audio on the first user tap.
+    // play() must be called synchronously inside the gesture handler — any await
+    // before it breaks the user-activation chain on iOS. Calling it here (before
+    // startRadio / advanceLoop) ensures ALL subsequent async play() calls succeed.
+    if (!iosAudioUnlockedRef.current) {
+      iosAudioUnlockedRef.current = true;
+      _iosUnlockAudio.play().catch(() => {});
+      // Prime the podcast element specifically — iOS requires per-element activation
+      // when pod.play() will be called many async steps later in advanceLoop.
+      const pod = podAudioRef.current;
+      if (pod && !pod.getAttribute('src')) pod.play().catch(() => {});
+    }
     if (!greetedRef.current) {
       startRadio();
     } else {
@@ -1519,14 +1539,24 @@ export function RadioPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+  const seekToX = (clientX: number, rect: DOMRect) => {
     // Seek whichever element is currently active (music or podcast)
     const pod   = podAudioRef.current;
     const audio = audioRef.current;
     const el    = (pod && !pod.paused) ? pod : audio;
     if (!el || !duration) return;
-    const r = (e.clientX - e.currentTarget.getBoundingClientRect().left) / e.currentTarget.offsetWidth;
+    const r = (clientX - rect.left) / rect.width;
     el.currentTime = Math.max(0, Math.min(1, r)) * duration;
+  };
+
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    seekToX(e.clientX, e.currentTarget.getBoundingClientRect());
+  };
+
+  const handleSeekTouch = (e: React.TouchEvent<HTMLDivElement>) => {
+    e.preventDefault(); // prevent scroll while seeking
+    const touch = e.touches[0] ?? e.changedTouches[0];
+    if (touch) seekToX(touch.clientX, e.currentTarget.getBoundingClientRect());
   };
 
   // ── Derived UI ────────────────────────────────────────────────────────────
@@ -1597,11 +1627,11 @@ export function RadioPage() {
 
         {/* Player card */}
         <div className="fade-in-up-delay-2 glass-card rounded-3xl p-6">
-          <div className="flex items-center gap-5 mb-6">
+          <div className="flex items-center gap-3 sm:gap-5 mb-6">
             <div className="relative flex-shrink-0">
               {nowPlaying?.kind === 'podcast' ? (
                 /* Podcast: static icon disc — no spin */
-                <div className="w-24 h-24 rounded-full overflow-hidden border-4 border-amber-700/60 shadow-2xl bg-amber-900/30 flex items-center justify-center text-4xl select-none">
+                <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full overflow-hidden border-4 border-amber-700/60 shadow-2xl bg-amber-900/30 flex items-center justify-center text-4xl select-none">
                   🎙️
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                     <div className="w-6 h-6 rounded-full bg-black/40 border-2 border-amber-400/20" />
@@ -1609,7 +1639,7 @@ export function RadioPage() {
                 </div>
               ) : (
                 /* Music: spinning vinyl */
-                <div className={`w-24 h-24 rounded-full overflow-hidden border-4 border-gray-700 shadow-2xl bg-gray-800 ${(playing && !isModerating) ? 'vinyl-spin' : 'vinyl-spin paused'}`}>
+                <div className={`w-20 h-20 sm:w-24 sm:h-24 rounded-full overflow-hidden border-4 border-gray-700 shadow-2xl bg-gray-800 ${(playing && !isModerating) ? 'vinyl-spin' : 'vinyl-spin paused'}`}>
                   {track?.artworkUrl && <img src={track.artworkUrl} alt={track.name} className="w-full h-full object-cover" onError={e => (e.currentTarget.style.display = 'none')} />}
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                     <div className="w-6 h-6 rounded-full bg-black/60 border-2 border-white/20" />
@@ -1666,13 +1696,13 @@ export function RadioPage() {
                 <p className="text-red-400 text-sm">Couldn't load tracks</p>
               ) : nowPlaying?.kind === 'podcast' ? (
                 <>
-                  <h3 className="text-xl font-bold truncate">{nowPlaying.episode.title}</h3>
+                  <h3 className="text-base sm:text-xl font-bold truncate">{nowPlaying.episode.title}</h3>
                   <p className="text-white/60 text-sm truncate">{nowPlaying.episode.feedTitle}</p>
                   <span className="inline-block mt-2 text-xs text-amber-400/80 bg-amber-900/20 border border-amber-700/30 rounded-full px-3 py-0.5">🎙️ Podcast</span>
                 </>
               ) : nowPlaying?.kind === 'music' ? (
                 <>
-                  <h3 className="text-xl font-bold truncate">{nowPlaying.track.name}</h3>
+                  <h3 className="text-base sm:text-xl font-bold truncate">{nowPlaying.track.name}</h3>
                   <p className="text-white/60 text-sm truncate">{nowPlaying.track.artist}</p>
                   <div className="flex items-center gap-2 mt-2 flex-wrap">
                     {nowPlaying.track.isTopChart && (
@@ -1686,7 +1716,7 @@ export function RadioPage() {
               ) : track ? (
                 /* Fallback before loop starts */
                 <>
-                  <h3 className="text-xl font-bold truncate">{track.name}</h3>
+                  <h3 className="text-base sm:text-xl font-bold truncate">{track.name}</h3>
                   <p className="text-white/60 text-sm truncate">{track.artist}</p>
                   <div className="flex items-center gap-2 mt-2 flex-wrap">
                     {track.isTopChart && (
@@ -1710,9 +1740,15 @@ export function RadioPage() {
 
           {/* Seek */}
           <div className="mb-5">
-            <div className="w-full h-1.5 bg-white/10 rounded-full cursor-pointer group" onClick={handleSeek}>
-              <div className="h-full rounded-full progress-bar-inner relative" style={{ width: `${pct}%` }}>
-                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white shadow-lg opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div
+              className="w-full h-1.5 bg-white/10 rounded-full cursor-pointer group touch-none py-2 -my-2"
+              onClick={handleSeek}
+              onTouchStart={handleSeekTouch}
+              onTouchMove={handleSeekTouch}
+              onTouchEnd={handleSeekTouch}
+            >
+              <div className="h-1.5 rounded-full progress-bar-inner relative" style={{ width: `${pct}%` }}>
+                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white shadow-lg opacity-0 group-hover:opacity-100 sm:transition-opacity" />
               </div>
             </div>
             <div className="flex justify-between mt-1.5 text-xs text-white/30">
@@ -1724,7 +1760,7 @@ export function RadioPage() {
           {/* Controls */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-1">
-              <button onClick={() => setMuted(m => !m)} className="text-white/40 hover:text-white/80 transition-colors" aria-label={muted ? 'Unmute' : 'Mute'}>
+              <button onClick={() => setMuted(m => !m)} className="flex-shrink-0 text-white/40 hover:text-white/80 transition-colors" aria-label={muted ? 'Unmute' : 'Mute'}>
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
                   {muted
                     ? <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
@@ -1732,52 +1768,53 @@ export function RadioPage() {
                   }
                 </svg>
               </button>
+              {/* Volume slider: hidden on mobile to save space */}
               <input type="range" min={0} max={1} step={0.02} value={muted ? 0 : volume}
                 onChange={e => { setVol(+e.target.value); setMuted(false); }}
-                className="w-20 h-1" aria-label="Volume" />
+                className="hidden sm:block w-20 h-1" aria-label="Volume" />
             </div>
-            <div className="flex items-center gap-3">
-              <button onClick={handlePrev} disabled={isLoading} className="w-10 h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Previous">
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+            <div className="flex items-center gap-1.5 sm:gap-3">
+              <button onClick={handlePrev} disabled={isLoading} className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Previous">
+                <svg className="w-4 h-4 sm:w-5 sm:h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
               </button>
               <button
                 onClick={() => handlePodSkip(-30)}
                 disabled={nowPlaying?.kind !== 'podcast'}
-                className="w-9 h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
                 aria-label="Skip back 30 seconds"
               >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                <svg className="w-4 h-4 sm:w-5 sm:h-5" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
                   <text x="12" y="14.5" textAnchor="middle" fontSize="5.5" fontWeight="bold" fill="currentColor">30</text>
                 </svg>
               </button>
               <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || (orderedTracks.length === 0 && tracks.length === 0)}
-                className="w-14 h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40"
+                className="w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40"
                 aria-label={playing ? 'Pause' : 'Play'}>
                 {buffering && !isModerating
                   ? <svg className="w-5 h-5 text-white animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
                   : playing
-                    ? <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                    : <svg className="w-6 h-6 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    ? <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                    : <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                 }
               </button>
               <button
                 onClick={() => handlePodSkip(30)}
                 disabled={nowPlaying?.kind !== 'podcast'}
-                className="w-9 h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                className="w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
                 aria-label="Skip forward 30 seconds"
               >
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                <svg className="w-4 h-4 sm:w-5 sm:h-5" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/>
                   <text x="12" y="14.5" textAnchor="middle" fontSize="5.5" fontWeight="bold" fill="currentColor">30</text>
                 </svg>
               </button>
-              <button onClick={handleNext} disabled={isLoading} className="w-10 h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Next">
-                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+              <button onClick={handleNext} disabled={isLoading} className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Next">
+                <svg className="w-4 h-4 sm:w-5 sm:h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
               </button>
             </div>
             <div className="flex-1 flex justify-end">
-              <a href="https://wavlake.com" target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors text-xs">⚡ Wavlake</a>
+              <a href="https://wavlake.com" target="_blank" rel="noopener noreferrer" className="hidden sm:inline text-white/20 hover:text-purple-400 transition-colors text-xs">⚡ Wavlake</a>
             </div>
           </div>
         </div>
