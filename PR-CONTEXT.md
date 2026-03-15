@@ -2,7 +2,7 @@
 
 > Paste this file at the start of any new chat session to restore full context.
 > Never commit API keys here — use `.env.local` locally or Netlify Dashboard.
-> When returning after a break: check the Roadmap section to see what's next.
+> When returning after a break: check the "Next Steps" section first!
 
 ---
 
@@ -19,6 +19,39 @@
 
 ---
 
+## ⚡ NEXT STEPS (start here after a break)
+
+### Immediate fixes still to test/verify:
+1. **Resume Bug** — `isResuming=false` even when episode is 70% heard. 
+   Episode IDs from RSS feed may not match IDs saved in `pr:podcast-position` 
+   and `pr:listener-memory`. Need to verify ID consistency.
+
+2. **Audio Tags spoken aloud** — `[pause]`, `[rushed]`, `[drawn out]` don't 
+   work with `eleven_turbo_v2_5` and get spoken as text. Remove these from 
+   moderator system prompt. Keep only: `[laughs]`, `[excited]`, `[sighs]`, 
+   `[whispers]`, `[slow]`.
+
+3. **"Sats/Wavlake" in track intros** — moderator keeps mentioning Wavlake 
+   and sats counts. Add to prompt: "Never mention Wavlake, sats, charts, 
+   or streaming numbers. Talk about the music itself."
+
+4. **Post-podcast dead air** — after podcast stops, music should start 
+   BEFORE moderator speaks, not after. Music at 0.3 → moderator over it → 
+   fade up to 0.9.
+
+5. **Ambient bridge pool** — always fetch 5 ambient tracks from Wavlake 
+   regardless of user genre selection. Store separately from main playlist. 
+   Use as bridge under podcast intro moderation.
+
+6. **Crossfade gap** — brief silence after crossfade handoff. Fade-up should 
+   start immediately when nextAudio is promoted to audio.
+
+### Still to prompt (not yet sent to Claude Code):
+- Moderator personality prompt update (more human, contractions, opinions, 
+  no clichés, max 40 words)
+
+---
+
 ## Tech Stack
 
 | Layer | Tech |
@@ -26,7 +59,7 @@
 | Frontend | React + Vite + TypeScript |
 | Hosting | Netlify |
 | AI Moderator | Anthropic Claude Haiku (`claude-haiku-4-5-20251001`) |
-| Text-to-Speech | ElevenLabs (`eleven_turbo_v2_5`) — consider upgrading to `eleven_v3` |
+| Text-to-Speech | ElevenLabs (`eleven_turbo_v2_5`) |
 | Speech-to-Text | ElevenLabs Scribe v2 (natural cut points) |
 | Music | Wavlake API (Bitcoin Lightning Top Charts) |
 | Podcasts | PodcastIndex API + RSS Feeds via Fountain.fm |
@@ -45,7 +78,8 @@
 | Variable | Type | Usage |
 |---|---|---|
 | `ELEVENLABS_API_KEY` | Server-side (no VITE_) | TTS + STT via Netlify Function |
-| `VITE_ELEVENLABS_VOICE_ID` | Client-side | ElevenLabs Voice ID |
+| `VITE_ELEVENLABS_VOICE_ID` | Client-side | Default voice ID (English) |
+| `VITE_ELEVENLABS_VOICE_ID_DE` | Client-side | German voice: `87AwpS6yC86wa2WglbsK` |
 | `ANTHROPIC_API_KEY` | Server-side (no VITE_) | Claude Moderator via Netlify Function |
 | `PODCASTINDEX_API_KEY` | Server-side | PodcastIndex API |
 | `PODCASTINDEX_API_SECRET` | Server-side | PodcastIndex API |
@@ -78,8 +112,8 @@ src/
 │   ├── usePodcastFeeds.ts        # RSS feed fetching, transcript URL parsing
 │   ├── usePodcastSegmenter.ts    # Podcast interruption logic, Scribe, chapters
 │   ├── usePodcastIndex.ts        # PodcastIndex API, fetchSuggestedPodcasts
-│   ├── useWavlakeTracks.ts       # Wavlake API, weighted shuffle
-│   ├── useElevenLabs.ts          # TTS via Netlify Proxy
+│   ├── useWavlakeTracks.ts       # Wavlake API, weighted shuffle, ambient pool
+│   ├── useElevenLabs.ts          # TTS via Netlify Proxy, language-aware voice
 │   ├── useListenerMemory.ts      # localStorage memory (songs, podcasts, topics)
 │   └── useZaps.ts                # Bitcoin Lightning / Nostr Zaps
 ├── pages/
@@ -107,6 +141,7 @@ public/
 - Song Graveyard in Settings → songs can be resurrected
 - Crossfade between songs
 - Duck effect: music lowers to 0.08 when moderator speaks
+- Ambient bridge pool: always available for podcast transitions (separate from main playlist)
 
 ### Podcasts
 - PodcastIndex RSS feeds (CORS-safe via proxy)
@@ -118,14 +153,17 @@ public/
 - Resume position saved (pr:podcast-position)
 - "X:XX left" display in podcast list
 - Manual play/pause + +30s / -30s skip buttons (for skipping ads)
+- Resume-aware intro: "Wir kommen zurück zu..." when episode already partially heard
 
 ### AI Moderator
 - Claude Haiku generates ALL moderation text — NO hardcoded strings
+- Language-aware fallbacks in all 3 languages (en/de/fr)
 - ElevenLabs TTS via server-side proxy
+- Language-aware voice selection: German uses voice `87AwpS6yC86wa2WglbsK`
 - Languages: 🇩🇪 Deutsch / 🇬🇧 English / 🇫🇷 Français (stored: `pr:language`)
 - CRITICAL language rule: always responds in selected language
-- Expressive tags: `[laughs]`, `[excited]`, `[sighs]`, `[whispers]`, `[slow]`
-- Tags used contextually based on content, never decoratively
+- Expressive tags (turbo-compatible only): `[laughs]`, `[excited]`, `[sighs]`, `[whispers]`, `[slow]`
+- Voice settings: stability=0.40, similarity_boost=0.75, style=0.15
 
 ### Podcast Interruption (THE Killer Feature)
 
@@ -149,9 +187,9 @@ public/
 - Tier 3: Episode description only (fallback)
 
 ### Transitions & Jingles
-- `podcast-intro.mp3`: plays AFTER moderator intro, BEFORE podcast
-- `studio-return.mp3`: plays IMMEDIATELY when podcast stops, BEFORE commentary
-- Music sandwich: fade to 0.05 (3s) → moderator speaks → fade to 0 (2s) → podcast
+- Podcast intro: ambient bridge song (low vol) → moderator speaks → song fades out → jingle → podcast
+- Studio return: podcast stops → jingle → moderator commentary → next song starts → moderator over it
+- Music always playing — no dead air at any point
 
 ### Listener Memory (localStorage)
 Key: `pr:listener-memory:{listenerName}`
@@ -171,9 +209,8 @@ Key: `pr:episode-knowledge:{episodeId}`
 ## 🗺️ Roadmap
 
 ### Phase 1 — Polish before first public demo (CURRENT)
-- [ ] Remove ALL remaining hardcoded moderator strings → everything via Claude
-- [ ] Test `eleven_v3` vs `eleven_turbo_v2_5` — decide which for demo
-- [ ] Fix: language occasionally switches to English for song intros
+- [ ] Fix remaining bugs (see NEXT STEPS above)
+- [ ] Moderator personality prompt: more human, contractions, opinions, max 40 words, no clichés
 - [ ] Fix: Manifest.webmanifest syntax error (cosmetic)
 - [ ] Record 60-second demo video showing the podcast interruption feature
       → Must capture the "holy shit" moment: moderator commenting on what was just said
@@ -199,7 +236,7 @@ Key: `pr:episode-knowledge:{episodeId}`
 - [ ] Publish on Nostr — tag podcast hosts whose shows work especially well
       → These hosts may repost → reach their Bitcoin/Podcast2.0 audience
       → Goal: GitHub stars, community feedback, word of mouth
-- [ ] Curated list: which podcasts give the best PR experience (have transcripts + chapters)
+- [ ] Curated list: which podcasts give the best PR experience (have transcasts + chapters)
 
 ### Phase 5 — OpenSats Grant Application
 - [ ] PR qualifies: open source + Bitcoin/Lightning + Podcast 2.0 + V4V + Nostr
@@ -215,20 +252,15 @@ Key: `pr:episode-knowledge:{episodeId}`
 
 ---
 
-## Open Bugs
-- [ ] Language occasionally switches to English for song intros (strengthen CRITICAL rule)
-- [ ] Manifest.webmanifest syntax error (cosmetic, no functional impact)
-
----
-
 ## ElevenLabs
 
 | Service | Model | Cost |
 |---|---|---|
-| TTS | `eleven_turbo_v2_5` (current) or `eleven_v3` (better quality) | 0.5 / 1 credit per character |
+| TTS | `eleven_turbo_v2_5` | 0.5 credits/character |
 | STT | `scribe_v2` | billed per minute |
 
 → Each user needs their own ElevenLabs API key (or streams sats via NWC).
+→ ElevenLabs key needs: Text to Speech (Access) + Speech to Text (Access) + Voices (Read)
 → See https://elevenlabs.io/pricing for current plan details.
 
 ---
@@ -237,8 +269,8 @@ Key: `pr:episode-knowledge:{episodeId}`
 
 ```
 1. Paste this file as context
-2. Check current state: https://github.com/hiyahlowes/personal-radio
-3. Look at the Roadmap — which Phase are we in? What's the next unchecked item?
+2. Read "NEXT STEPS" section at the top
+3. Check current state: https://github.com/hiyahlowes/personal-radio
 4. Always: git pull --rebase before push, NEVER --force
 5. After push: manually publish on Netlify
 6. Test: check Console for errors, moderator speaking?
@@ -246,5 +278,5 @@ Key: `pr:episode-knowledge:{episodeId}`
 
 ---
 
-*Last updated: March 2026*
+*Last updated: March 15, 2026*
 *Current phase: Phase 1 — Polish before first public demo*
