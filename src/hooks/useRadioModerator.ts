@@ -122,7 +122,11 @@ function getStoredLanguage(): string {
 
 // Shakespeare AI script generator
 
-async function generateScript(prompt: string, longForm = false): Promise<string | null> {
+async function generateScript(
+  prompt: string,
+  longForm = false,
+  memoryContext = '',
+): Promise<string | null> {
   const language = getStoredLanguage();
   console.log(`[Moderator] language="${language}" | longForm=${longForm} | prompt: ${prompt.slice(0, 80)}…`);
   const lengthInstruction = longForm
@@ -155,7 +159,8 @@ async function generateScript(prompt: string, longForm = false): Promise<string 
           'Use them sparingly — max 1-2 tags per moderation, only when it feels natural. ' +
           'Never stack multiple tags back to back. ' +
           'A real radio host uses these moments deliberately, not constantly. ' +
-          'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."',
+          'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."' +
+          (memoryContext ? `\n\nLISTENER CONTEXT: ${memoryContext}` : ''),
         messages: [
           { role: 'user', content: `${prompt}\n${lengthInstruction}` },
         ],
@@ -183,6 +188,11 @@ export interface ModeratorState {
 export function useRadioModerator() {
   const { speak, stop, isSpeaking, isGenerating, error } = useElevenLabs();
   const currentScriptRef = useRef('');
+  const memoryContextRef = useRef('');
+
+  const setMemoryContext = useCallback((ctx: string) => {
+    memoryContextRef.current = ctx;
+  }, []);
 
   const sayScript = useCallback(
     async (script: string): Promise<void> => {
@@ -196,7 +206,7 @@ export function useRadioModerator() {
     async (prompt: string, fallback: string): Promise<void> => {
       // 20% of calls: ask the AI to be more elaborate (3-4 sentences)
       const longForm = Math.random() < 0.2;
-      const aiScript = await generateScript(prompt, longForm);
+      const aiScript = await generateScript(prompt, longForm, memoryContextRef.current);
       await sayScript(aiScript ?? fallback);
     },
     [sayScript]
@@ -451,6 +461,7 @@ export function useRadioModerator() {
     speakPodcastReturn,
     speakSkipTransition,
     speakUserControlReaction,
+    setMemoryContext,
     stop,
     isSpeaking,
     isGenerating,

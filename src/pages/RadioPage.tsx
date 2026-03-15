@@ -18,6 +18,7 @@ import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
 import { usePodcastHistory } from '@/hooks/usePodcastHistory';
 import { useMusicHistory } from '@/hooks/useMusicHistory';
+import { useListenerMemory } from '@/hooks/useListenerMemory';
 import { useRadioContext } from '@/contexts/RadioContext';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getStoredName } from '@/pages/SetupPage';
@@ -243,6 +244,7 @@ export function RadioPage() {
   const likedTracks    = useLikedTracks();
   const podcastHistory = usePodcastHistory();
   const musicHistory   = useMusicHistory();
+  const listenerMemory = useListenerMemory(getStoredName() || 'Listener');
 
   // ── UI state ──────────────────────────────────────────────────────────────
   const [idx, setIdx]         = useState(0);
@@ -305,8 +307,9 @@ export function RadioPage() {
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
   const episodesRef      = useRef<PodcastEpisode[]>([]);
   const podcastIdxRef    = useRef(0); // cycles through episodes
-  const moderatorRef     = useRef(moderator);
-  const nameRef          = useRef(name);
+  const moderatorRef       = useRef(moderator);
+  const listenerMemoryRef  = useRef(listenerMemory);
+  const nameRef            = useRef(name);
   const volumeRef        = useRef(0.9);
   const mutedRef         = useRef(false);
   // Set to true by jumpTo() so the next loop iteration knows to say a brief
@@ -318,8 +321,9 @@ export function RadioPage() {
   const markMusicPlayedRef = useRef<(id: string) => void>(() => {});
 
   // Sync refs to latest state/props
-  useEffect(() => { moderatorRef.current  = moderator;                   }, [moderator]);
-  useEffect(() => { nameRef.current       = name;                        }, [name]);
+  useEffect(() => { moderatorRef.current      = moderator;      }, [moderator]);
+  useEffect(() => { listenerMemoryRef.current = listenerMemory; }, [listenerMemory]);
+  useEffect(() => { nameRef.current           = name;           }, [name]);
   useEffect(() => { volumeRef.current     = volume;                      }, [volume]);
   useEffect(() => { mutedRef.current      = muted;                       }, [muted]);
   useEffect(() => { markPlayedRef.current      = podcastHistory.markPlayed;  }, [podcastHistory.markPlayed]);
@@ -395,6 +399,11 @@ export function RadioPage() {
   // These are the authoritative refs used by advanceLoop.
   useEffect(() => { tracksRef.current   = orderedTracks;   }, [orderedTracks]);
   useEffect(() => { episodesRef.current = orderedEpisodes; }, [orderedEpisodes]);
+
+  // Push listener memory context to the AI moderator whenever memory changes.
+  useEffect(() => {
+    moderatorRef.current.setMemoryContext(listenerMemory.getMemoryContext());
+  }, [listenerMemory.memory]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist queue to localStorage whenever the ordered lists or current index
   // change. This lets us restore the queue instantly on page return without
@@ -689,6 +698,7 @@ export function RadioPage() {
 
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
+        listenerMemoryRef.current.recordSongStart(t);
 
         // Pre-load the next track into nextAudio at volume 0 so it's buffered.
         // Do this early — before speech — so the browser has time to buffer.
@@ -1204,6 +1214,11 @@ export function RadioPage() {
     console.log('[JumpTo]', newIdx, userSkipped ? '(user skip)' : '');
     const wasRunning = runningRef.current;
 
+    // Record skip on the currently playing music track before stopping.
+    if (userSkipped && wasRunning && nowPlayingRef.current?.kind === 'music') {
+      listenerMemoryRef.current.recordSongSkip(nowPlayingRef.current.track.id);
+    }
+
     // Stop the loop and interrupt any in-progress speech immediately.
     // moderator.stop() aborts the ElevenLabs fetch/playback so the awaited
     // speakXxx() promises resolve right away rather than after the full clip.
@@ -1243,6 +1258,12 @@ export function RadioPage() {
   const handlePrev   = useCallback(() => jumpTo((idxRef.current - 1 + tracksRef.current.length) % tracksRef.current.length, true), [jumpTo]);
   const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length, true), [jumpTo]);
   const handleSelect = useCallback((i: number) => jumpTo(i, false), [jumpTo]);
+
+  const handleDislike = useCallback((track: WavlakeTrack) => {
+    listenerMemory.recordSongDislike(track.id);
+    setOrderedTracks(prev => prev.filter(t => t.id !== track.id));
+    handleNext();
+  }, [handleNext, listenerMemory]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handlePodSkip = useCallback((deltaSecs: number) => {
     const pod = podAudioRef.current;
@@ -1451,13 +1472,21 @@ export function RadioPage() {
                 {nowPlaying?.kind === 'music' && nowPlaying.track && (
                   <>
                     <button
-                      onClick={() => likedTracks.toggle(nowPlaying.track)}
+                      onClick={() => { likedTracks.toggle(nowPlaying.track); listenerMemory.recordSongLike(nowPlaying.track); }}
                       aria-label={likedTracks.isLiked(nowPlaying.track.id) ? 'Unlike track' : 'Like track'}
                       className="transition-colors"
                     >
                       <svg className={`w-3.5 h-3.5 transition-colors ${likedTracks.isLiked(nowPlaying.track.id) ? 'text-pink-400 fill-pink-400' : 'text-white/25 fill-none stroke-white/25'}`} viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                         <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
                       </svg>
+                    </button>
+                    <button
+                      onClick={() => handleDislike(nowPlaying.track)}
+                      aria-label="Never play this track again"
+                      title="Never play this track again"
+                      className="text-white/20 hover:text-red-400 transition-colors"
+                    >
+                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                     </button>
                     <a href={`https://wavlake.com/track/${nowPlaying.track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
                       <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
@@ -1870,7 +1899,7 @@ export function RadioPage() {
 
                                 {/* Like button */}
                                 <button
-                                  onClick={e => { e.stopPropagation(); likedTracks.toggle(t); }}
+                                  onClick={e => { e.stopPropagation(); likedTracks.toggle(t); listenerMemory.recordSongLike(t); }}
                                   aria-label={likedTracks.isLiked(t.id) ? 'Unlike track' : 'Like track'}
                                   className="flex-shrink-0 p-1 rounded-full transition-colors hover:bg-white/10"
                                 >
