@@ -57,11 +57,39 @@ type RadioItem =
   | { kind: 'podcast'; episode: PodcastEpisode  };
 
 // ─── Volume ramping via setInterval ──────────────────────────────────────────
-// Note: Web Audio API MediaElementAudioSourceNode requires CORS headers on the
-// media URL. Wavlake's CDN does not send them, so we use audio.volume directly.
 const DUCK_LEVEL     = 0.08;
 const CROSSFADE_SECS = 3;    // seconds before track end to begin crossfade
 const TICK_MS        = 40;   // ~25 steps/s — smooth enough
+
+// ─── Web Audio API — GainNode volume control (iOS-safe) ───────────────────────
+// On iOS Safari, HTMLAudioElement.volume is READ-ONLY and cannot be changed
+// programmatically — it always stays at 1.0. The only reliable approach for
+// volume control on iOS is the Web Audio API via a GainNode.
+//
+// These module-level vars persist across RadioPage route changes (the audio
+// elements themselves also persist in RadioContext above the router).
+// AudioContext must be created/resumed from within a synchronous user gesture
+// handler; we do this in handlePlay().
+//
+// CORS note: createMediaElementSource() requires the media element to be
+// CORS-enabled if the source is cross-origin. Without crossOrigin='anonymous'
+// the call may throw a SecurityError (which we catch). If it throws, _webAudioReady
+// remains false and all volume control falls back to audio.volume (works on
+// desktop, silent no-op on iOS — duck effect absent but music plays normally).
+let _audioCtx:     AudioContext                  | null = null;
+let _musicGain:    GainNode                      | null = null;
+let _musicSource:  MediaElementAudioSourceNode   | null = null;
+let _webAudioReady = false;
+
+/** Set volume on the primary music element: GainNode when connected, audio.volume otherwise. */
+function setVolumeOnAudio(audio: HTMLAudioElement, value: number) {
+  if (_webAudioReady && _musicGain && _audioCtx && audio === (_musicSource?.mediaElement as HTMLAudioElement | undefined)) {
+    _musicGain.gain.cancelScheduledValues(_audioCtx.currentTime);
+    _musicGain.gain.setValueAtTime(value, _audioCtx.currentTime);
+    return; // GainNode is the only control surface on iOS
+  }
+  audio.volume = value;
+}
 
 function rampVolume(
   audio: HTMLAudioElement,
@@ -69,6 +97,25 @@ function rampVolume(
   durationMs: number,
   onDone?: () => void,
 ): () => void {
+  // Use AudioParam scheduling when the GainNode is connected to this element.
+  // This is the only approach that works on iOS (audio.volume is read-only).
+  if (_webAudioReady && _musicGain && _audioCtx && audio === (_musicSource?.mediaElement as HTMLAudioElement | undefined)) {
+    const ctx  = _audioCtx;
+    const gain = _musicGain;
+    const now  = ctx.currentTime;
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.setValueAtTime(gain.gain.value, now);
+    gain.gain.linearRampToValueAtTime(target, now + durationMs / 1000);
+    console.log(`[Ramp] GainNode ${gain.gain.value.toFixed(2)} → ${target.toFixed(2)} over ${durationMs}ms`);
+    const id = setTimeout(onDone ?? (() => {}), durationMs);
+    return () => {
+      clearTimeout(id);
+      const t = ctx.currentTime;
+      gain.gain.cancelScheduledValues(t);
+      gain.gain.setValueAtTime(gain.gain.value, t);
+    };
+  }
+  // Fallback: setInterval on audio.volume (desktop/Android; no-op on iOS)
   const start  = audio.volume;
   const steps  = Math.max(1, Math.round(durationMs / TICK_MS));
   const delta  = (target - start) / steps;
@@ -268,6 +315,7 @@ export function RadioPage() {
   const [buffering, setBuf]   = useState(false);
   const [currentTime, setCT]  = useState(0);
   const [duration, setDur]    = useState(0);
+  const durationRef           = useRef(0);
   const [volume, setVol]      = useState(0.9);
   const [muted, setMuted]     = useState(false);
 
@@ -590,15 +638,17 @@ export function RadioPage() {
     cancelRampRef.current?.();
 
     if (moderator.isSpeaking) {
-      // Set directly — iOS Safari throttles setInterval in the background, making
-      // a ramped fade-down unreliable. A hard cut to DUCK_LEVEL is instantaneous
-      // and works consistently across devices.
-      console.log(`[Duck] duckDown() → ${DUCK_LEVEL} (immediate, iOS-safe)`);
-      audio.volume = DUCK_LEVEL;
+      // Immediate cut to duck level — avoids setInterval throttling on iOS background.
+      // setVolumeOnAudio routes through GainNode when available (iOS-safe),
+      // falls back to audio.volume on desktop.
+      const via = _webAudioReady ? 'Web Audio GainNode (iOS-safe)' : 'audio.volume';
+      console.log(`[Duck] duckDown() → ${DUCK_LEVEL} via ${via}`);
+      setVolumeOnAudio(audio, DUCK_LEVEL);
       cancelRampRef.current = null;
     } else {
       const target = mutedRef.current ? 0 : volumeRef.current;
       console.log(`[Duck] fadeBack() → ${target} over 2000ms`);
+      // rampVolume auto-routes through GainNode when connected (iOS-safe)
       cancelRampRef.current = rampVolume(audio, target, 2000);
     }
     return () => cancelRampRef.current?.();
@@ -613,7 +663,7 @@ export function RadioPage() {
     if (!audio || moderator.isSpeaking) return;
     cancelRampRef.current?.();
     const target = muted ? 0 : volume;
-    audio.volume = target;
+    setVolumeOnAudio(audio, target);
     // Apply to podcast element too — keeps slider in sync when a podcast is playing
     if (pod) pod.volume = target;
     // nextAudio: only force-mute if the user mutes; otherwise let the crossfade
@@ -708,7 +758,7 @@ export function RadioPage() {
           if (audio.volume < expected - 0.05) {
             console.log(`[Crossfade] volume was ${audio.volume.toFixed(2)} — correcting to ${expected.toFixed(2)}`);
             cancelRampRef.current?.();
-            audio.volume = expected;
+            setVolumeOnAudio(audio, expected);
           }
         }
       } else if (resumeMusicRef.current) {
@@ -728,8 +778,8 @@ export function RadioPage() {
       } else {
         // Normal load
         audio.pause();
-        audio.src    = t.liveUrl;
-        audio.volume = DUCK_LEVEL; // always start ducked; speech/crossfade controls volume
+        audio.src = t.liveUrl;
+        setVolumeOnAudio(audio, DUCK_LEVEL); // always start ducked; speech/crossfade controls volume
         audio.load();
         setCT(0);
         setDur(t.duration || 0);
@@ -826,7 +876,7 @@ export function RadioPage() {
           console.log(`[Crossfade] starting ${CROSSFADE_SECS}s crossfade → "${nextTrack.name}"`);
 
           const fadeDurationMs = CROSSFADE_SECS * 1000;
-          const targetVol      = mutedRef.current ? 0 : volumeRef.current;
+          const targetVol = mutedRef.current ? 0 : volumeRef.current;
 
           // Fade out current
           cancelRampRef.current?.();
@@ -933,8 +983,8 @@ export function RadioPage() {
         // Load audio in the background while nextAudio KEEPS PLAYING — this
         // eliminates the gap that occurred when we paused nextAudio first.
         const targetVol = mutedRef.current ? 0 : volumeRef.current;
-        audio.src    = nextTrack!.liveUrl;
-        audio.volume = targetVol;
+        audio.src = nextTrack!.liveUrl;
+        setVolumeOnAudio(audio, targetVol);
         audio.load();
         await new Promise<void>(res => {
           const onCanPlay = () => { audio.removeEventListener('canplay', onCanPlay); res(); };
@@ -951,7 +1001,7 @@ export function RadioPage() {
         // Switch: pause nextAudio only after audio is ready — minimal gap.
         // Volume is already at targetVol; no ramp needed.
         nextAudio!.pause();
-        audio.volume = targetVol; // guard: re-assert in case duck effect fired during load
+        setVolumeOnAudio(audio, targetVol); // guard: re-assert in case duck effect fired during load
         console.log(`[Crossfade] immediate fade-up to ${targetVol.toFixed(2)} on handoff`);
         if (audio.paused) {
           try { await audio.play(); } catch { /* ignore */ }
@@ -1099,51 +1149,37 @@ export function RadioPage() {
             // Pause music (now at vol 0) before handing audio to podcast
             audio.pause();
 
-            // Load podcast audio — direct URL first (works on desktop + Android).
-            // On iOS Safari, CORS-redirected URLs (e.g. anchor.fm → CloudFront)
-            // fail immediately with a media error. If that happens, resolve the
-            // final CDN URL server-side (follows 302s without touching audio bytes)
-            // and retry with the direct CDN URL which has no redirect to block.
-            console.log(`[Loop] podcast src: ${episode.audioUrl}`);
-            pod.src    = episode.audioUrl;
+            // Always resolve the final CDN URL via the server-side proxy before
+            // loading. Podcast hosts (fountain.fm, anchor.fm) issue 302 redirects
+            // to CloudFront URLs that lack CORS headers — iOS Safari blocks these
+            // on <audio> elements. The resolver follows the chain server-side and
+            // returns only the direct CDN URL; zero audio bytes are transferred.
+            console.log(`[Podcast] resolving audio URL via proxy: ${episode.audioUrl}`);
+            let audioSrc = episode.audioUrl;
+            try {
+              const resolverUrl = `/.netlify/functions/podcast-proxy?action=audioresolver&url=${encodeURIComponent(episode.audioUrl)}`;
+              const resolveRes = await fetch(resolverUrl, { signal: AbortSignal.timeout(10_000) });
+              if (resolveRes.ok) {
+                const finalUrl = (await resolveRes.text()).trim();
+                if (finalUrl) {
+                  console.log(`[Podcast] resolved URL: ${finalUrl}`);
+                  audioSrc = finalUrl;
+                }
+              }
+            } catch (resolveErr) {
+              console.warn('[Podcast] URL resolution failed — falling back to direct URL:', resolveErr);
+            }
+
+            pod.src    = audioSrc;
             pod.volume = mutedRef.current ? 0 : volumeRef.current;
             pod.load();
 
-            // Wait for canplay (success) or error (CORS redirect blocked on iOS).
-            // Resolve true = ready to play, false = error fired.
             if (pod.readyState < 3 /* HAVE_FUTURE_DATA */) {
-              const directOk = await new Promise<boolean>(resolve => {
-                pod.addEventListener('canplay', () => resolve(true),  { once: true });
-                pod.addEventListener('error',   () => resolve(false), { once: true });
-                setTimeout(() => resolve(true), 8000); // slow connection fallback
+              await new Promise<void>(resolve => {
+                pod.addEventListener('canplay', () => resolve(), { once: true });
+                pod.addEventListener('error',   () => resolve(), { once: true });
+                setTimeout(resolve, 8000); // slow connection fallback
               });
-
-              if (!directOk) {
-                // Direct URL failed (likely iOS CORS redirect) — resolve the
-                // final CDN URL server-side and retry. The resolver only fetches
-                // response headers, never buffers audio bytes, so it is tiny.
-                console.log('[Podcast] direct URL failed — resolving redirect via proxy');
-                try {
-                  const resolverUrl = `/.netlify/functions/podcast-proxy?action=audioresolver&url=${encodeURIComponent(episode.audioUrl)}`;
-                  const resolveRes = await fetch(resolverUrl, { signal: AbortSignal.timeout(10_000) });
-                  if (resolveRes.ok) {
-                    const finalUrl = (await resolveRes.text()).trim();
-                    console.log(`[Podcast] resolved URL: ${finalUrl}`);
-                    pod.src = finalUrl;
-                    pod.load();
-                    // Wait for the resolved URL to buffer
-                    if (pod.readyState < 3) {
-                      await new Promise<void>(resolve => {
-                        pod.addEventListener('canplay', () => resolve(), { once: true });
-                        pod.addEventListener('error',   () => resolve(), { once: true });
-                        setTimeout(resolve, 8000);
-                      });
-                    }
-                  }
-                } catch (resolveErr) {
-                  console.warn('[Podcast] URL resolution failed:', resolveErr);
-                }
-              }
             }
 
             // Seek to saved position if this episode was partially played before
@@ -1236,8 +1272,8 @@ export function RadioPage() {
                       if (!runningRef.current) break;
 
                       // Load & play on the music element (no CORS, as always)
-                      audio.src    = breakTrack.liveUrl;
-                      audio.volume = DUCK_LEVEL;
+                      audio.src = breakTrack.liveUrl;
+                      setVolumeOnAudio(audio, DUCK_LEVEL);
                       audio.load();
 
                       loopGenRef.current++;
@@ -1408,6 +1444,40 @@ export function RadioPage() {
       // when pod.play() will be called many async steps later in advanceLoop.
       const pod = podAudioRef.current;
       if (pod && !pod.getAttribute('src')) pod.play().catch(() => {});
+    }
+
+    // Web Audio GainNode — must be created/resumed synchronously in the gesture
+    // handler. iOS suspends AudioContext by default; resume() here activates it.
+    if (!_audioCtx) {
+      try {
+        _audioCtx = new (window.AudioContext ?? (window as any).webkitAudioContext)();
+      } catch (e) {
+        console.warn('[Duck] AudioContext unavailable:', e);
+      }
+    }
+    if (_audioCtx?.state === 'suspended') {
+      _audioCtx.resume().catch(() => {});
+    }
+    // Connect GainNode to the primary music audio element (once per element lifetime).
+    // createMediaElementSource() can only be called once per element — subsequent
+    // calls throw, so we guard with _musicSource check.
+    if (_audioCtx && !_musicSource && audioRef.current) {
+      try {
+        _musicSource = _audioCtx.createMediaElementSource(audioRef.current);
+        _musicGain   = _audioCtx.createGain();
+        _musicGain.gain.value = volumeRef.current;
+        _musicSource.connect(_musicGain);
+        _musicGain.connect(_audioCtx.destination);
+        _webAudioReady = true;
+        console.log('[Duck] Web Audio GainNode connected (iOS-safe)');
+      } catch (e) {
+        // Throws SecurityError when audio source is cross-origin without CORS headers.
+        // Fall back to audio.volume (works on desktop, read-only no-op on iOS).
+        console.warn('[Duck] createMediaElementSource failed — falling back to audio.volume:', e);
+        _musicSource = null;
+        _musicGain   = null;
+        _webAudioReady = false;
+      }
     }
     if (!greetedRef.current) {
       startRadio();
@@ -1591,19 +1661,26 @@ export function RadioPage() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Keep durationRef in sync so seekToX always sees the current duration
+  // without creating a new function reference every time duration changes.
+  useEffect(() => { durationRef.current = duration; }, [duration]);
+
   // Seek bar ref — used to attach a native non-passive touchmove listener so
   // e.preventDefault() actually prevents scroll on iOS Safari. React's synthetic
   // onTouchMove is passive by default and cannot call preventDefault().
   const seekBarRef = useRef<HTMLDivElement>(null);
 
+  // Stable callback — reads duration via ref so the native touch listeners
+  // registered below never go stale even as duration changes.
   const seekToX = useCallback((clientX: number, rect: DOMRect) => {
     const pod   = podAudioRef.current;
     const audio = audioRef.current;
     const el    = (pod && !pod.paused) ? pod : audio;
-    if (!el || !duration) return;
+    const dur   = durationRef.current;
+    if (!el || !dur) return;
     const r = (clientX - rect.left) / rect.width;
-    el.currentTime = Math.max(0, Math.min(1, r)) * duration;
-  }, [duration]); // eslint-disable-line react-hooks/exhaustive-deps
+    el.currentTime = Math.max(0, Math.min(1, r)) * dur;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Attach native (non-passive) touch listeners to the seek bar so touchmove
   // can call preventDefault() to prevent page scroll while dragging on iOS.
