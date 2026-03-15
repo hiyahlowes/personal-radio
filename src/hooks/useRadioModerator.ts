@@ -330,6 +330,11 @@ async function generateScript(
 
 // Hook
 
+export interface ResumeContext {
+  lastPosition: number;   // seconds already heard
+  topics: string[];       // topics covered so far (from EpisodeRecord.topics)
+}
+
 export interface ModeratorState {
   isSpeaking: boolean;
   isGenerating: boolean;
@@ -444,44 +449,74 @@ export function useRadioModerator() {
   }, [sayScript]);
 
   const speakPodcastTransition = useCallback(
-    async (episodeTitle: string, showName: string, description?: string, author?: string): Promise<void> => {
-      const isNews = isNewsShow(showName, episodeTitle);
+    async (
+      episodeTitle: string,
+      showName: string,
+      description?: string,
+      author?: string,
+      resumeCtx?: ResumeContext,
+    ): Promise<void> => {
+      const isResuming = !!resumeCtx && resumeCtx.lastPosition > 60;
+      const isNews     = isNewsShow(showName, episodeTitle);
       const isDateDump = episodeTitleIsDateDump(episodeTitle);
 
-      // Optional context from the RSS feed to enrich the AI prompt
-      const rssContext = [
-        author ? `Host/author: ${author}.` : '',
-        description ? `Episode description: "${description}"` : '',
-      ].filter(Boolean).join(' ');
-
-      let prompt: string;
       const noSongRule =
         'Do NOT mention what song was just playing or what music comes next. ' +
         'Focus only on the podcast. No "coming up after this" or "stay tuned for more music".';
 
-      if (isNews) {
+      let prompt: string;
+
+      if (isResuming) {
+        const minutesHeard   = Math.floor(resumeCtx.lastPosition / 60);
+        const recentTopics   = resumeCtx.topics.slice(-2);
+        const lastTopic      = recentTopics[recentTopics.length - 1];
+        const topicsContext  = recentTopics.length > 0
+          ? `Topics covered so far: ${recentTopics.join(', ')}.`
+          : '';
+
         prompt =
-          `You're a radio host transitioning from music to a news segment. ` +
-          `The news show is called ${showName}. ` +
-          (rssContext ? `${rssContext} ` : '') +
-          `Say something like "time to check in with the headlines" or "let's see what's happening in the world". ` +
-          `Mention the show name. Never mention dates, times, or episode numbers. ${noSongRule}`;
-      } else if (isDateDump) {
-        prompt =
-          `You're a radio host transitioning from music to a podcast segment. ` +
-          `The show is called ${showName}. ` +
-          (rssContext ? `${rssContext} ` : '') +
-          `Introduce it naturally using only the show name, do not mention the episode title at all. ` +
-          `Keep it smooth and conversational. ${noSongRule}`;
+          `You're a radio host picking up a podcast the listener was already partway through. ` +
+          `Show: ${showName}. ` +
+          `The listener has already heard ${minutesHeard} minute${minutesHeard !== 1 ? 's' : ''} of this episode. ` +
+          (lastTopic ? `Last known topic: ${lastTopic}. ` : '') +
+          (topicsContext ? `${topicsContext} ` : '') +
+          `Write a SHORT resume intro — max 25 words. ` +
+          `Reference the show name and how far in they are. ` +
+          `If there's a known topic, reference something specific from it. ` +
+          `Do NOT introduce the episode as if it's new. Do NOT repeat the episode description. ` +
+          `Sound like a host who remembers where you left off. ${noSongRule}`;
       } else {
-        prompt =
-          `You're a radio host transitioning from music to a podcast segment. ` +
-          `Show: ${showName}. Episode: ${episodeTitle}. ` +
-          (rssContext ? `${rssContext} ` : '') +
-          `Give a warm, natural on-air introduction — like "let's check in on ${showName}" or "time for some ${showName}". ` +
-          `Use the show name primarily. Only mention the episode title if it is genuinely descriptive and adds real value. ` +
-          `Never mention dates, times, or episode numbers. ${noSongRule}`;
+        // Optional context from the RSS feed to enrich the AI prompt
+        const rssContext = [
+          author ? `Host/author: ${author}.` : '',
+          description ? `Episode description: "${description}"` : '',
+        ].filter(Boolean).join(' ');
+
+        if (isNews) {
+          prompt =
+            `You're a radio host transitioning from music to a news segment. ` +
+            `The news show is called ${showName}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Say something like "time to check in with the headlines" or "let's see what's happening in the world". ` +
+            `Mention the show name. Never mention dates, times, or episode numbers. ${noSongRule}`;
+        } else if (isDateDump) {
+          prompt =
+            `You're a radio host transitioning from music to a podcast segment. ` +
+            `The show is called ${showName}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Introduce it naturally using only the show name, do not mention the episode title at all. ` +
+            `Keep it smooth and conversational. ${noSongRule}`;
+        } else {
+          prompt =
+            `You're a radio host transitioning from music to a podcast segment. ` +
+            `Show: ${showName}. Episode: ${episodeTitle}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Give a warm, natural on-air introduction — like "let's check in on ${showName}" or "time for some ${showName}". ` +
+            `Use the show name primarily. Only mention the episode title if it is genuinely descriptive and adds real value. ` +
+            `Never mention dates, times, or episode numbers. ${noSongRule}`;
+        }
       }
+
       await buildAndSpeak(prompt, fallbackPodcastTransition(showName, episodeTitle));
     },
     [buildAndSpeak]

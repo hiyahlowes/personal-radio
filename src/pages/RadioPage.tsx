@@ -12,7 +12,7 @@ import {
 
 import { useWavlakeTracks, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, useSingleFeedEpisodes, getStoredFeeds, type PodcastEpisode, type PodcastFeed } from '@/hooks/usePodcastFeeds';
-import { useRadioModerator } from '@/hooks/useRadioModerator';
+import { useRadioModerator, type ResumeContext } from '@/hooks/useRadioModerator';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
@@ -954,8 +954,19 @@ export function RadioPage() {
           }
 
           // 2. Moderator speaks the transition (music still at 0.05 underneath).
+          // Check if the listener has been here before (> 60 s heard).
+          const epRecord = listenerMemoryRef.current.memory.episodeHistory
+            .find(e => e.episodeId === episode.id);
+          const resumeCtx: ResumeContext | undefined =
+            epRecord && epRecord.lastPosition > 60
+              ? { lastPosition: epRecord.lastPosition, topics: epRecord.topics }
+              : undefined;
+          console.log(
+            `[Loop] podcast transition — isResuming=${!!resumeCtx}`,
+            resumeCtx ? `lastPosition=${Math.round(resumeCtx.lastPosition)}s topics=[${resumeCtx.topics.join(', ')}]` : '',
+          );
           await moderatorRef.current.speakPodcastTransition(
-            episode.title, episode.feedTitle, episode.description, episode.author,
+            episode.title, episode.feedTitle, episode.description, episode.author, resumeCtx,
           );
 
           if (!runningRef.current) {
