@@ -737,13 +737,13 @@ export function RadioPage() {
         console.log('[Loop] greeting + track intro over music');
         await moderatorRef.current.speakGreeting(nameRef.current);
         await sleep(400);
-        await moderatorRef.current.speakTrackIntro(t, t.isTopChart);
+        await moderatorRef.current.speakTrackIntro(t, t.isTopChart, listenerMemoryRef.current.memory.likedSongs.includes(t.id));
       } else if (silentCountRef.current >= silentBudgetRef.current && recentTracksRef.current.length > 0) {
         // Time for a DJ break — review recent tracks and intro this one
         const played = recentTracksRef.current;
         recentTracksRef.current = [];
         console.log('[Loop] moderation — speakReviewAndIntro over music');
-        await moderatorRef.current.speakReviewAndIntro(played, t, t.isTopChart);
+        await moderatorRef.current.speakReviewAndIntro(played, t, t.isTopChart, listenerMemoryRef.current.memory.likedSongs.includes(t.id));
         // Reset the silent counter AFTER speaking so the podcast check below
         // still has access to the accumulated count before we cleared it.
         silentCountRef.current  = 0;

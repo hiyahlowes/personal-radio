@@ -263,22 +263,6 @@ export function useListenerMemory(listenerName: string) {
       }
     }
 
-    // Liked songs: look up titles from playedSongs, most recently liked last
-    const likedTitles = memory.likedSongs
-      .slice(-5)
-      .map(id => {
-        // Find last occurrence in play history (most recent listen)
-        for (let i = memory.playedSongs.length - 1; i >= 0; i--) {
-          if (memory.playedSongs[i].id === id) return memory.playedSongs[i];
-        }
-        return null;
-      })
-      .filter((s): s is PlayedSong => s !== null)
-      .map(s => `${s.title} by ${s.artist}`);
-    if (likedTitles.length > 0) {
-      parts.push(`Songs the listener has liked: ${likedTitles.join(', ')}.`);
-    }
-
     return parts.join(' ');
   }, [memory]);
 

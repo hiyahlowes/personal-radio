@@ -294,7 +294,8 @@ async function handleTts(event) {
     };
   }
 
-  const { text, voice_id, model_id = 'eleven_turbo_v2_5' } = parsed;
+  const { text, voice_id } = parsed;
+  const model_id = 'eleven_turbo_v2_5'; // hardcoded server-side — client value ignored
   const voice_settings = {
     stability:        0.40,
     similarity_boost: 0.75,

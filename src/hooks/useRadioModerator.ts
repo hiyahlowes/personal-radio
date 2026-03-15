@@ -249,23 +249,26 @@ function fallbackSkipTransition(nextLabel: string): string {
 
 // Shakespeare AI script generator
 
+/** Maps the stored display name (e.g. "Deutsch") to the English language name Claude understands. */
+function toClangName(stored: string): string {
+  if (stored === 'Deutsch')  return 'German';
+  if (stored === 'Français') return 'French';
+  return 'English';
+}
+
 async function generateScript(
   prompt: string,
   longForm = false,
   memoryContext = '',
 ): Promise<string | null> {
-  const language = getStoredLanguage();
-  console.log(`[Moderator] language="${language}" | longForm=${longForm} | prompt: ${prompt.slice(0, 80)}…`);
+  const storedLang = getStoredLanguage();
+  const language   = toClangName(storedLang);
+  console.log(`[Moderator] storedLang="${storedLang}" → claudeLang="${language}" | longForm=${longForm} | prompt: ${prompt.slice(0, 80)}…`);
   const lengthInstruction = longForm
     ? 'Be a bit more elaborate this time: use 3 to 4 sentences.'
     : 'Keep it to 1 to 2 sentences.';
   try {
-    const response = await fetch('/.netlify/functions/claude-proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        system:
+    const systemPrompt =
           `CRITICAL: You MUST respond ONLY in ${language}. ` +
           `Every single word of your response must be in ${language}. ` +
           `Never switch to English or any other language, even for artist names, song titles, or technical terms. ` +
@@ -300,7 +303,16 @@ async function generateScript(
           'Never stack multiple tags back to back. ' +
           'A real radio host uses these moments deliberately, not constantly. ' +
           'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."' +
-          (memoryContext ? `\n\nLISTENER CONTEXT: ${memoryContext}` : ''),
+          (memoryContext ? `\n\nLISTENER CONTEXT: ${memoryContext}` : '');
+
+    console.log('[Moderator] system prompt language header:', systemPrompt.slice(0, 120));
+
+    const response = await fetch('/.netlify/functions/claude-proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        system: systemPrompt,
         messages: [
           { role: 'user', content: `${prompt}\n${lengthInstruction}` },
         ],
@@ -368,16 +380,20 @@ export function useRadioModerator() {
   );
 
   const speakTrackIntro = useCallback(
-    async (track: WavlakeTrack, isTopChart = false): Promise<void> => {
+    async (track: WavlakeTrack, isTopChart = false, isLiked = false): Promise<void> => {
       const cleanTitle = cleanTrackTitle(track.name);
       const chartContext = isTopChart
         ? `This track is one of the top-earning songs on Wavlake, ranked by Bitcoin Lightning tips from listeners. Mention this naturally. `
+        : '';
+      const likedContext = isLiked
+        ? `The listener has liked this song before. You may acknowledge that naturally — e.g. a favourite returning — but only if it fits and feels genuine. Do not force it. `
         : '';
       const prompt =
         `Introduce the next song on air. ` +
         `Artist: ${track.artist}. Song title: ${cleanTitle}. ` +
         `Album: ${track.albumTitle || 'their latest work'}. ` +
         chartContext +
+        likedContext +
         `Sound like a natural radio DJ handing off to the track. Keep it to 1 to 2 sentences. ` +
         `Vary your phrasing, do not start with Here's. Do not put the title in quotes. ` +
         `Do not add version tags or extra info, just the artist and clean title.`;
@@ -387,7 +403,7 @@ export function useRadioModerator() {
   );
 
   const speakReviewAndIntro = useCallback(
-    async (played: WavlakeTrack[], next: WavlakeTrack, isNextTopChart = false): Promise<void> => {
+    async (played: WavlakeTrack[], next: WavlakeTrack, isNextTopChart = false, isNextLiked = false): Promise<void> => {
       const playedList = played
         .map(t => `${t.artist} with ${cleanTrackTitle(t.name)}`)
         .join(' and then ');
@@ -395,11 +411,15 @@ export function useRadioModerator() {
       const chartContext = isNextTopChart
         ? `The next track is one of the top-earning songs on Wavlake, ranked by Bitcoin Lightning tips. Work that in naturally. `
         : '';
+      const likedContext = isNextLiked
+        ? `The listener has liked the next track before. You may acknowledge that naturally if it fits. `
+        : '';
       const prompt =
         `You just played ${playedList} on air without commentary. ` +
         `Give a brief warm reaction to that music, one sentence. ` +
         `Then introduce the next track: ${next.artist} with ${cleanNextTitle}. ` +
         chartContext +
+        likedContext +
         `Keep the whole thing to 2 to 3 sentences. Sound like a natural radio DJ, not a robot. ` +
         `Do not put titles in quotes or add version tags.`;
       await buildAndSpeak(prompt, fallbackReviewAndIntro(played, next, cleanNextTitle));
