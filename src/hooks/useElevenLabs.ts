@@ -1,17 +1,29 @@
 import { useRef, useState, useCallback } from 'react';
 
 // ── Env vars ───────────────────────────────────────────────────────────────────
-// VITE_ELEVENLABS_VOICE_ID is safe to bundle (not a secret).
+// Voice IDs are safe to bundle (not secrets).
 // The API key is kept server-side in ELEVENLABS_API_KEY (no VITE_ prefix) and
 // accessed only through the podcast-proxy Netlify Function.
-const VOICE_ID   = import.meta.env.VITE_ELEVENLABS_VOICE_ID as string | undefined;
-const TTS_PROXY  = '/.netlify/functions/podcast-proxy?action=tts';
+const VOICE_ID_EN = import.meta.env.VITE_ELEVENLABS_VOICE_ID    as string | undefined;
+const VOICE_ID_DE = import.meta.env.VITE_ELEVENLABS_VOICE_ID_DE as string | undefined;
+const TTS_PROXY   = '/.netlify/functions/podcast-proxy?action=tts';
 
-if (!VOICE_ID) {
+if (!VOICE_ID_EN) {
   console.warn(
     '[ElevenLabs] VITE_ELEVENLABS_VOICE_ID is not set. ' +
     'TTS will be disabled — the AI host will not speak.',
   );
+}
+
+/** Reads the current language from localStorage and returns the matching voice ID. */
+function getVoiceId(): string | undefined {
+  const lang = (() => {
+    try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; }
+  })();
+  console.log(`[ElevenLabs] Language from localStorage (pr:language): "${lang}"`);
+  const id = lang === 'Deutsch' ? (VOICE_ID_DE ?? VOICE_ID_EN) : VOICE_ID_EN;
+  console.log(`[ElevenLabs] Selected voice_id: ${id ?? '(none)'} (lang=${lang})`);
+  return id;
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -42,9 +54,11 @@ export function useElevenLabs() {
   };
 
   const speak = useCallback(async (text: string, opts: ElevenLabsOptions = {}): Promise<void> => {
+    const voiceId = getVoiceId();
+
     // Graceful no-op when voice ID is missing
-    if (!VOICE_ID) {
-      console.warn('[ElevenLabs] Skipping TTS — VITE_ELEVENLABS_VOICE_ID not configured.');
+    if (!voiceId) {
+      console.warn('[ElevenLabs] Skipping TTS — no voice ID configured for current language.');
       return;
     }
 
@@ -68,7 +82,7 @@ export function useElevenLabs() {
     try {
       const body = {
         text,
-        voice_id: VOICE_ID,
+        voice_id: voiceId,
         model_id: 'eleven_turbo_v2_5',
         voice_settings: {
           stability: opts.stability ?? 0.45,
