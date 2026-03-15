@@ -65,6 +65,11 @@ export function useLikedTracks() {
       if (liked.length === 0) return tracks;
 
       const likedIds = new Set(liked.map(t => t.id));
+      const likedInList = tracks.filter(t => likedIds.has(t.id)).length;
+      if (likedInList > 0) {
+        console.log(`[Memory] Weighted shuffle: ${likedInList} liked songs get 2x frequency`);
+      }
+
       const withDupes = [...tracks];
 
       // Insert an extra copy of each liked track
@@ -79,6 +84,15 @@ export function useLikedTracks() {
       for (let i = rest.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [rest[i], rest[j]] = [rest[j], rest[i]];
+      }
+
+      // Remove consecutive duplicates: swap each duplicate with the nearest
+      // later non-duplicate so the same song never plays back-to-back.
+      for (let i = 1; i < rest.length; i++) {
+        if (rest[i].id === rest[i - 1].id) {
+          const swap = rest.findIndex((t, j) => j > i && t.id !== rest[i].id);
+          if (swap !== -1) [rest[i], rest[swap]] = [rest[swap], rest[i]];
+        }
       }
 
       return current ? [current, ...rest] : rest;
