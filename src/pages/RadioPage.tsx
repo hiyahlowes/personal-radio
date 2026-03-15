@@ -62,51 +62,22 @@ const CROSSFADE_SECS = 3;    // seconds before track end to begin crossfade
 const TICK_MS        = 40;   // ~25 steps/s — smooth enough
 
 // ─── Web Audio API — GainNode volume control (iOS-safe) ───────────────────────
-// ── Shared AudioContext ────────────────────────────────────────────────────────
-// A single AudioContext instance is used for both the iOS warm-up (Blake Kus
-// pattern) and the GainNode volume control. Using separate instances was the
-// root cause of audio not routing to the speaker on iOS — the GainNode must
-// connect to the SAME context that was unlocked by the user gesture.
-//
-// _warmIOSAudio fires on the first touchend anywhere on the page, creates the
-// shared context, plays a 1-sample silent buffer to satisfy iOS's gesture
-// requirement, then removes itself. handlePlay and advanceLoop reuse _audioCtx.
-//
+// ── iOS audio unlock (Blake Kus pattern) ──────────────────────────────────────
+// Warms the audio session on the first touchend anywhere on the page.
 // Based on: https://gist.github.com/kus/3f01d60569eeadefe3a1
-//
-// CORS note: createMediaElementSource() requires the media element to be
-// CORS-enabled if the source is cross-origin. Without crossOrigin='anonymous'
-// the call may throw a SecurityError (which we catch). If it throws, _webAudioReady
-// remains false and all volume control falls back to audio.volume (works on
-// desktop, silent no-op on iOS — duck effect absent but music plays normally).
-const _AudioCtx = (window.AudioContext ?? (window as any).webkitAudioContext) as typeof AudioContext | undefined;
-let _audioCtx:     AudioContext                  | null = null;
-let _musicGain:    GainNode                      | null = null;
-let _musicSource:  MediaElementAudioSourceNode   | null = null;
-let _webAudioReady = false;
-
 const _warmIOSAudio = () => {
-  if (_audioCtx || !_AudioCtx) return;
-  _audioCtx = new _AudioCtx();
-  const buffer = _audioCtx.createBuffer(1, 1, 22050);
-  const source = _audioCtx.createBufferSource();
+  const AudioCtxCtor = window.AudioContext ?? (window as any).webkitAudioContext as typeof AudioContext | undefined;
+  if (!AudioCtxCtor) return;
+  const ctx    = new AudioCtxCtor();
+  const buffer = ctx.createBuffer(1, 1, 22050);
+  const source = ctx.createBufferSource();
   source.buffer = buffer;
-  source.connect(_audioCtx.destination);
+  source.connect(ctx.destination);
   source.start(0);
   document.removeEventListener('touchend', _warmIOSAudio);
   console.log('[iOS] AudioContext warmed on first touch');
 };
 document.addEventListener('touchend', _warmIOSAudio);
-
-/** Set volume on the primary music element: GainNode when connected, audio.volume otherwise. */
-function setVolumeOnAudio(audio: HTMLAudioElement, value: number) {
-  if (_webAudioReady && _musicGain && _audioCtx && audio === (_musicSource?.mediaElement as HTMLAudioElement | undefined)) {
-    _musicGain.gain.cancelScheduledValues(_audioCtx.currentTime);
-    _musicGain.gain.setValueAtTime(value, _audioCtx.currentTime);
-    return; // GainNode is the only control surface on iOS
-  }
-  audio.volume = value;
-}
 
 function rampVolume(
   audio: HTMLAudioElement,
@@ -114,30 +85,11 @@ function rampVolume(
   durationMs: number,
   onDone?: () => void,
 ): () => void {
-  // Use AudioParam scheduling when the GainNode is connected to this element.
-  // This is the only approach that works on iOS (audio.volume is read-only).
-  if (_webAudioReady && _musicGain && _audioCtx && audio === (_musicSource?.mediaElement as HTMLAudioElement | undefined)) {
-    const ctx  = _audioCtx;
-    const gain = _musicGain;
-    const now  = ctx.currentTime;
-    gain.gain.cancelScheduledValues(now);
-    gain.gain.setValueAtTime(gain.gain.value, now);
-    gain.gain.linearRampToValueAtTime(target, now + durationMs / 1000);
-    console.log(`[Ramp] GainNode ${gain.gain.value.toFixed(2)} → ${target.toFixed(2)} over ${durationMs}ms`);
-    const id = setTimeout(onDone ?? (() => {}), durationMs);
-    return () => {
-      clearTimeout(id);
-      const t = ctx.currentTime;
-      gain.gain.cancelScheduledValues(t);
-      gain.gain.setValueAtTime(gain.gain.value, t);
-    };
-  }
-  // Fallback: setInterval on audio.volume (desktop/Android; no-op on iOS)
-  const start  = audio.volume;
-  const steps  = Math.max(1, Math.round(durationMs / TICK_MS));
-  const delta  = (target - start) / steps;
-  let   count  = 0;
-  const id     = setInterval(() => {
+  const start = audio.volume;
+  const steps = Math.max(1, Math.round(durationMs / TICK_MS));
+  const delta = (target - start) / steps;
+  let   count = 0;
+  const id    = setInterval(() => {
     count++;
     audio.volume = count >= steps
       ? target
@@ -649,17 +601,12 @@ export function RadioPage() {
     cancelRampRef.current?.();
 
     if (moderator.isSpeaking) {
-      // Immediate cut to duck level — avoids setInterval throttling on iOS background.
-      // setVolumeOnAudio routes through GainNode when available (iOS-safe),
-      // falls back to audio.volume on desktop.
-      const via = _webAudioReady ? 'Web Audio GainNode (iOS-safe)' : 'audio.volume';
-      console.log(`[Duck] duckDown() → ${DUCK_LEVEL} via ${via}`);
-      setVolumeOnAudio(audio, DUCK_LEVEL);
+      console.log(`[Duck] duckDown() → ${DUCK_LEVEL}`);
+      audio.volume = DUCK_LEVEL;
       cancelRampRef.current = null;
     } else {
       const target = mutedRef.current ? 0 : volumeRef.current;
       console.log(`[Duck] fadeBack() → ${target} over 2000ms`);
-      // rampVolume auto-routes through GainNode when connected (iOS-safe)
       cancelRampRef.current = rampVolume(audio, target, 2000);
     }
     return () => cancelRampRef.current?.();
@@ -674,7 +621,7 @@ export function RadioPage() {
     if (!audio || moderator.isSpeaking) return;
     cancelRampRef.current?.();
     const target = muted ? 0 : volume;
-    setVolumeOnAudio(audio, target);
+    audio.volume = target;
     // Apply to podcast element too — keeps slider in sync when a podcast is playing
     if (pod) pod.volume = target;
     // nextAudio: only force-mute if the user mutes; otherwise let the crossfade
@@ -769,7 +716,7 @@ export function RadioPage() {
           if (audio.volume < expected - 0.05) {
             console.log(`[Crossfade] volume was ${audio.volume.toFixed(2)} — correcting to ${expected.toFixed(2)}`);
             cancelRampRef.current?.();
-            setVolumeOnAudio(audio, expected);
+            audio.volume = expected;
           }
         }
       } else if (resumeMusicRef.current) {
@@ -789,8 +736,8 @@ export function RadioPage() {
       } else {
         // Normal load
         audio.pause();
-        audio.src = t.liveUrl;
-        setVolumeOnAudio(audio, DUCK_LEVEL); // always start ducked; speech/crossfade controls volume
+        audio.src    = t.liveUrl;
+        audio.volume = DUCK_LEVEL; // always start ducked; speech/crossfade controls volume
         audio.load();
         setCT(0);
         setDur(t.duration || 0);
@@ -822,25 +769,6 @@ export function RadioPage() {
         try {
           await audio.play();
           console.log('[Loop] audio.play() resolved at duck level');
-          // Connect GainNode NOW — after play() — iOS requires the element to
-          // be playing before createMediaElementSource() can route its output.
-          // Guard: _musicSource check prevents re-connecting on subsequent tracks.
-          if (_audioCtx && !_musicSource) {
-            try {
-              _musicSource = _audioCtx.createMediaElementSource(audio);
-              _musicGain   = _audioCtx.createGain();
-              _musicGain.gain.value = DUCK_LEVEL;
-              _musicSource.connect(_musicGain);
-              _musicGain.connect(_audioCtx.destination);
-              _webAudioReady = true;
-              console.log('[Duck] GainNode connected to shared iOS AudioContext');
-            } catch (e) {
-              console.warn('[Duck] GainNode failed, falling back to audio.volume:', e);
-              _musicSource   = null;
-              _musicGain     = null;
-              _webAudioReady = false;
-            }
-          }
         } catch (e) {
           console.error('[Loop] audio.play() failed — skipping to next track:', e);
           // Skip to next track rather than freezing the loop.
@@ -1013,8 +941,8 @@ export function RadioPage() {
         // Load audio in the background while nextAudio KEEPS PLAYING — this
         // eliminates the gap that occurred when we paused nextAudio first.
         const targetVol = mutedRef.current ? 0 : volumeRef.current;
-        audio.src = nextTrack!.liveUrl;
-        setVolumeOnAudio(audio, targetVol);
+        audio.src    = nextTrack!.liveUrl;
+        audio.volume = targetVol;
         audio.load();
         await new Promise<void>(res => {
           const onCanPlay = () => { audio.removeEventListener('canplay', onCanPlay); res(); };
@@ -1031,7 +959,7 @@ export function RadioPage() {
         // Switch: pause nextAudio only after audio is ready — minimal gap.
         // Volume is already at targetVol; no ramp needed.
         nextAudio!.pause();
-        setVolumeOnAudio(audio, targetVol); // guard: re-assert in case duck effect fired during load
+        audio.volume = targetVol; // guard: re-assert in case duck effect fired during load
         console.log(`[Crossfade] immediate fade-up to ${targetVol.toFixed(2)} on handoff`);
         if (audio.paused) {
           try { await audio.play(); } catch { /* ignore */ }
@@ -1302,8 +1230,8 @@ export function RadioPage() {
                       if (!runningRef.current) break;
 
                       // Load & play on the music element (no CORS, as always)
-                      audio.src = breakTrack.liveUrl;
-                      setVolumeOnAudio(audio, DUCK_LEVEL);
+                      audio.src    = breakTrack.liveUrl;
+                      audio.volume = DUCK_LEVEL;
                       audio.load();
 
                       loopGenRef.current++;
@@ -1462,22 +1390,6 @@ export function RadioPage() {
     // If the loop is already running (e.g. we navigated away and came back),
     // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
-
-    // ── AudioContext: ensure the shared context exists + is running ──────────
-    // _warmIOSAudio (touchend) should have created _audioCtx already. If the
-    // play button was tapped before any touchend fired (e.g. desktop mouse click
-    // on first interaction), create it now as a fallback.
-    if (!_audioCtx && _AudioCtx) {
-      try {
-        _audioCtx = new _AudioCtx();
-        console.log('[Duck] AudioContext created in handlePlay (touchend fallback)');
-      } catch (e) {
-        console.warn('[Duck] AudioContext unavailable:', e);
-      }
-    }
-    if (_audioCtx?.state === 'suspended') {
-      _audioCtx.resume().catch(() => {});
-    }
 
     // ── Pre-unlock the podcast element within the gesture ─────────────────────
     // pod.play() is called 10+ seconds after the gesture (bridge fade + TTS +
