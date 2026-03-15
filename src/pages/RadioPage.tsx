@@ -1099,23 +1099,51 @@ export function RadioPage() {
             // Pause music (now at vol 0) before handing audio to podcast
             audio.pause();
 
-            // Route podcast audio through the Netlify proxy so iOS Safari can
-            // play it without being blocked by CORS redirects (anchor.fm → CloudFront).
-            // The proxy follows redirects server-side and returns audio/mpeg from the
-            // same origin, which needs no CORS credentials on the <audio> element.
-            const podSrc = `/.netlify/functions/podcast-proxy?action=audio&url=${encodeURIComponent(episode.audioUrl)}`;
-            console.log(`[Loop] podcast src (proxied): ${podSrc}`);
-            pod.src    = podSrc;
+            // Load podcast audio — direct URL first (works on desktop + Android).
+            // On iOS Safari, CORS-redirected URLs (e.g. anchor.fm → CloudFront)
+            // fail immediately with a media error. If that happens, resolve the
+            // final CDN URL server-side (follows 302s without touching audio bytes)
+            // and retry with the direct CDN URL which has no redirect to block.
+            console.log(`[Loop] podcast src: ${episode.audioUrl}`);
+            pod.src    = episode.audioUrl;
             pod.volume = mutedRef.current ? 0 : volumeRef.current;
             pod.load();
 
-            // Wait for enough data before playing — prevents dead air / spinner.
+            // Wait for canplay (success) or error (CORS redirect blocked on iOS).
+            // Resolve true = ready to play, false = error fired.
             if (pod.readyState < 3 /* HAVE_FUTURE_DATA */) {
-              await new Promise<void>(resolve => {
-                pod.addEventListener('canplay', () => resolve(), { once: true });
-                pod.addEventListener('error',   () => resolve(), { once: true });
-                setTimeout(resolve, 8000); // fallback — slow connections
+              const directOk = await new Promise<boolean>(resolve => {
+                pod.addEventListener('canplay', () => resolve(true),  { once: true });
+                pod.addEventListener('error',   () => resolve(false), { once: true });
+                setTimeout(() => resolve(true), 8000); // slow connection fallback
               });
+
+              if (!directOk) {
+                // Direct URL failed (likely iOS CORS redirect) — resolve the
+                // final CDN URL server-side and retry. The resolver only fetches
+                // response headers, never buffers audio bytes, so it is tiny.
+                console.log('[Podcast] direct URL failed — resolving redirect via proxy');
+                try {
+                  const resolverUrl = `/.netlify/functions/podcast-proxy?action=audioresolver&url=${encodeURIComponent(episode.audioUrl)}`;
+                  const resolveRes = await fetch(resolverUrl, { signal: AbortSignal.timeout(10_000) });
+                  if (resolveRes.ok) {
+                    const finalUrl = (await resolveRes.text()).trim();
+                    console.log(`[Podcast] resolved URL: ${finalUrl}`);
+                    pod.src = finalUrl;
+                    pod.load();
+                    // Wait for the resolved URL to buffer
+                    if (pod.readyState < 3) {
+                      await new Promise<void>(resolve => {
+                        pod.addEventListener('canplay', () => resolve(), { once: true });
+                        pod.addEventListener('error',   () => resolve(), { once: true });
+                        setTimeout(resolve, 8000);
+                      });
+                    }
+                  }
+                } catch (resolveErr) {
+                  console.warn('[Podcast] URL resolution failed:', resolveErr);
+                }
+              }
             }
 
             // Seek to saved position if this episode was partially played before

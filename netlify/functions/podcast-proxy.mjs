@@ -268,15 +268,19 @@ async function handlePodcastIndex(action, params) {
   }
 }
 
-// ── action=audio ──────────────────────────────────────────────────────────────
-// Proxies a podcast MP3 / audio file through the Netlify function, resolving
-// any CORS-blocked redirects (e.g. anchor.fm → CloudFront) server-side so that
-// iOS Safari can play the audio.
+// ── action=audioresolver ───────────────────────────────────────────────────────
+// Follows the redirect chain for a podcast audio URL server-side and returns
+// only the final CDN URL as plain text — NOT the audio bytes.
 //
-// Supports HTTP Range header forwarding so iOS can issue byte-range requests
-// for seeking and progressive buffering without fetching the whole file.
+// Why: iOS Safari blocks CORS redirects on <audio> elements (e.g. anchor.fm
+// issues a 302 → CloudFront URL that has no CORS headers). By resolving the
+// chain here and handing the direct CDN URL back to the browser, iOS can load
+// the audio without any CORS redirect in the way.
+//
+// This fetches only the response headers (no body) so it is tiny and fast,
+// well within Netlify Function size and timeout limits.
 
-async function handleAudio(event, params) {
+async function handleAudioResolver(params) {
   const url = params.url ?? '';
   if (!url) {
     return {
@@ -293,54 +297,33 @@ async function handleAudio(event, params) {
     };
   }
 
-  // Forward any Range header so iOS byte-range / seeking requests work.
-  const rangeHeader =
-    event.headers['range'] ?? event.headers['Range'] ?? '';
-  const upstreamHeaders = { 'User-Agent': 'PersonalRadio/1.0 (audio proxy)' };
-  if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
-
   try {
+    // Follow all redirects but cancel the body immediately — we only need
+    // res.url (the final URL after all 30x hops). Using GET rather than HEAD
+    // because some podcast hosts reject HEAD requests.
     const res = await fetch(url, {
-      headers: upstreamHeaders,
-      redirect: 'follow', // resolve anchor.fm → CloudFront etc. server-side
-      signal: AbortSignal.timeout(30_000),
+      method: 'GET',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(10_000),
+      headers: { 'User-Agent': 'PersonalRadio/1.0 (url-resolver)' },
     });
-
-    // Pass non-2xx / non-206 errors back to the client.
-    if (!res.ok && res.status !== 206) {
-      return {
-        statusCode: res.status,
-        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: `Upstream returned HTTP ${res.status}` }),
-      };
-    }
-
-    const buffer = await res.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-
-    const responseHeaders = {
-      ...corsHeaders(),
-      'Content-Type':  res.headers.get('content-type')  ?? 'audio/mpeg',
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'public, max-age=3600',
-    };
-    // Forward Content-Range so the browser knows which byte range we returned.
-    const contentRange = res.headers.get('content-range');
-    if (contentRange) responseHeaders['Content-Range'] = contentRange;
-    const contentLength = res.headers.get('content-length');
-    if (contentLength) responseHeaders['Content-Length'] = contentLength;
+    // Discard the body without buffering any audio bytes.
+    await res.body?.cancel();
 
     return {
-      statusCode: res.status, // preserve 206 Partial Content
-      headers: responseHeaders,
-      body: base64,
-      isBase64Encoded: true,
+      statusCode: 200,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+      },
+      body: res.url,
     };
   } catch (err) {
     return {
       statusCode: 502,
       headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: `Audio proxy failed: ${String(err)}` }),
+      body: JSON.stringify({ error: `URL resolution failed: ${String(err)}` }),
     };
   }
 }
@@ -500,11 +483,11 @@ export const handler = async (event) => {
   const params = event.queryStringParameters ?? {};
   const action = params.action ?? 'search';
 
-  if (action === 'rss')   return handleRss(params);
-  if (action === 'json')  return handleJson(params);
-  if (action === 'text')  return handleText(params);
-  if (action === 'audio') return handleAudio(event, params);
-  if (action === 'tts')   return handleTts(event);
-  if (action === 'stt')   return handleStt(event);
+  if (action === 'rss')           return handleRss(params);
+  if (action === 'json')          return handleJson(params);
+  if (action === 'text')          return handleText(params);
+  if (action === 'audioresolver') return handleAudioResolver(params);
+  if (action === 'tts')           return handleTts(event);
+  if (action === 'stt')           return handleStt(event);
   return handlePodcastIndex(action, params);
 };
