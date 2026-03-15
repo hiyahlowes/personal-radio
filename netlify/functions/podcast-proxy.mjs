@@ -412,6 +412,47 @@ async function handleStt(event) {
   }
 }
 
+// ── action=voiceinfo (TEMPORARY — remove after use) ───────────────────────────
+
+async function handleVoiceInfo(params) {
+  const apiKey  = process.env.ELEVENLABS_API_KEY;
+  const voiceId = params.voice_id ?? '';
+
+  if (!apiKey) {
+    return {
+      statusCode: 500,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'ELEVENLABS_API_KEY not configured' }),
+    };
+  }
+  if (!voiceId) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing voice_id query param' }),
+    };
+  }
+
+  try {
+    const res = await fetch(`https://api.elevenlabs.io/v1/voices/${voiceId}`, {
+      headers: { 'xi-api-key': apiKey },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await res.text();
+    return {
+      statusCode: res.status,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `Voice info fetch failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export const handler = async (event) => {
@@ -425,8 +466,9 @@ export const handler = async (event) => {
   if (action === 'rss')  return handleRss(params);
   if (action === 'json') return handleJson(params);
   if (action === 'text') return handleText(params);
-  if (action === 'tts')  return handleTts(event);
-  if (action === 'stt')  return handleStt(event);
+  if (action === 'tts')       return handleTts(event);
+  if (action === 'stt')       return handleStt(event);
+  if (action === 'voiceinfo') return handleVoiceInfo(params);
 
   return handlePodcastIndex(action, params);
 };
