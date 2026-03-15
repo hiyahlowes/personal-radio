@@ -828,6 +828,25 @@ export function RadioPage() {
         try {
           await audio.play();
           console.log('[Loop] audio.play() resolved at duck level');
+          // Connect GainNode NOW — after play() — iOS requires the element to
+          // be playing before createMediaElementSource() can route its output.
+          // Guard: _musicSource check prevents re-connecting on subsequent tracks.
+          if (_audioCtx && !_musicSource) {
+            try {
+              _musicSource = _audioCtx.createMediaElementSource(audio);
+              _musicGain   = _audioCtx.createGain();
+              _musicGain.gain.value = DUCK_LEVEL;
+              _musicSource.connect(_musicGain);
+              _musicGain.connect(_audioCtx.destination);
+              _webAudioReady = true;
+              console.log('[Duck] Web Audio GainNode connected after play()');
+            } catch (e) {
+              console.warn('[Duck] GainNode failed, falling back to audio.volume:', e);
+              _musicSource   = null;
+              _musicGain     = null;
+              _webAudioReady = false;
+            }
+          }
         } catch (e) {
           console.error('[Loop] audio.play() failed — skipping to next track:', e);
           // Skip to next track rather than freezing the loop.
@@ -1450,10 +1469,11 @@ export function RadioPage() {
     // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
 
-    // ── GainNode setup (synchronous in gesture handler) ───────────────────────
-    // iOS audio context is already warmed by the _warmIOSAudio touchend listener
-    // (fires on ANY first touch, before this button tap resolves). We still
-    // create + connect the GainNode here so it is ready before advanceLoop plays.
+    // ── AudioContext: create + resume synchronously in gesture handler ───────
+    // The GainNode is connected AFTER audio.play() resolves (in advanceLoop) —
+    // iOS requires play() to be called on the element first, then the graph
+    // can be wired up. AudioContext itself is pre-warmed by the touchend
+    // listener (_warmIOSAudio) so it is running before we get here.
     if (!_audioCtx) {
       try {
         _audioCtx = new (window.AudioContext ?? (window as any).webkitAudioContext)();
@@ -1464,23 +1484,19 @@ export function RadioPage() {
     if (_audioCtx?.state === 'suspended') {
       _audioCtx.resume().catch(() => {});
     }
-    // Connect GainNode once per element lifetime — guard prevents re-calling
-    // after route changes (createMediaElementSource throws on a second call).
-    if (_audioCtx && !_musicSource && audioRef.current) {
-      try {
-        _musicSource = _audioCtx.createMediaElementSource(audioRef.current);
-        _musicGain   = _audioCtx.createGain();
-        _musicGain.gain.value = volumeRef.current;
-        _musicSource.connect(_musicGain);
-        _musicGain.connect(_audioCtx.destination);
-        _webAudioReady = true;
-        console.log('[Duck] Web Audio GainNode connected (iOS-safe)');
-      } catch (e) {
-        console.warn('[Duck] GainNode failed, falling back to audio.volume:', e);
-        _musicSource   = null;
-        _musicGain     = null;
-        _webAudioReady = false;
-      }
+
+    // ── Pre-unlock the podcast element within the gesture ─────────────────────
+    // pod.play() is called 10+ seconds after the gesture (bridge fade + TTS +
+    // jingle). iOS revokes the gesture token after ~1 second of async work.
+    // Calling muted play()+pause() here "stamps" the element as gesture-unlocked
+    // so the real pod.play() later is allowed even without a fresh gesture.
+    const pod = podAudioRef.current;
+    if (pod) {
+      pod.muted = true;
+      pod.play().catch(() => {});
+      pod.pause();
+      pod.muted = false;
+      console.log('[iOS] podcast element pre-unlocked');
     }
     if (!greetedRef.current) {
       startRadio();
