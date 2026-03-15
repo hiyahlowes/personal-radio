@@ -412,68 +412,6 @@ async function handleStt(event) {
   }
 }
 
-// ── action=voiceinfo (TEMPORARY — remove after use) ───────────────────────────
-
-async function handleVoiceInfo(params) {
-  const apiKey  = process.env.ELEVENLABS_API_KEY;
-  const voiceId = params.voice_id ?? '';
-
-  if (!apiKey) {
-    return {
-      statusCode: 500,
-      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: 'ELEVENLABS_API_KEY not configured' }),
-    };
-  }
-  if (!voiceId) {
-    return {
-      statusCode: 400,
-      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: 'Missing voice_id query param' }),
-    };
-  }
-
-  try {
-    const res = await fetch(`https://api.elevenlabs.io/v1/voices/${voiceId}`, {
-      headers: { 'xi-api-key': apiKey },
-      signal: AbortSignal.timeout(10_000),
-    });
-    const body = await res.text();
-
-    if (!res.ok) {
-      const headersObj = {};
-      res.headers.forEach((value, key) => { headersObj[key] = value; });
-      console.error('[voiceinfo] ElevenLabs error response:', {
-        status: res.status,
-        statusText: res.statusText,
-        headers: headersObj,
-        body,
-        apiKeyPresent: !!apiKey,
-        apiKeyPrefix: apiKey ? apiKey.slice(0, 8) + '…' : 'none',
-        voiceId,
-      });
-    }
-
-    return {
-      statusCode: res.status,
-      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body: res.ok ? body : JSON.stringify({
-        error: `ElevenLabs returned ${res.status}`,
-        elevenlabs_body: body,
-        api_key_present: !!apiKey,
-        api_key_prefix: apiKey ? apiKey.slice(0, 8) + '…' : 'none',
-        voice_id: voiceId,
-      }),
-    };
-  } catch (err) {
-    return {
-      statusCode: 502,
-      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: `Voice info fetch failed: ${String(err)}` }),
-    };
-  }
-}
-
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export const handler = async (event) => {
@@ -489,7 +427,5 @@ export const handler = async (event) => {
   if (action === 'text') return handleText(params);
   if (action === 'tts')       return handleTts(event);
   if (action === 'stt')       return handleStt(event);
-  if (action === 'voiceinfo') return handleVoiceInfo(params);
-
   return handlePodcastIndex(action, params);
 };
