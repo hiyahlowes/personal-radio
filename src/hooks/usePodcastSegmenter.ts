@@ -500,12 +500,35 @@ async function generateCommentary(
   }
 }
 
+function getSegmenterLangCode(): 'en' | 'de' | 'fr' {
+  try {
+    const lang = localStorage.getItem('pr:language') || 'English';
+    if (lang === 'Deutsch')  return 'de';
+    if (lang === 'Français') return 'fr';
+  } catch { /* ignore */ }
+  return 'en';
+}
+
 function fallbackCommentary(podcastTitle: string): string {
-  const options = [
-    `That's some thought-provoking stuff from ${podcastTitle}. We'll let that sink in — but first, we're taking a quick music break. Stay with us.`,
-    `Fascinating segment from ${podcastTitle} — lots to think about there. We're going to drop some tracks while you process that. Back in a bit.`,
-    `Great conversation on ${podcastTitle}. Before we hear more, let's take a little musical detour. You won't want to change the dial.`,
-  ];
+  const lang = getSegmenterLangCode();
+  const t: Record<'en' | 'de' | 'fr', string[]> = {
+    en: [
+      `That's some thought-provoking stuff from ${podcastTitle}. We'll let that sink in — but first, we're taking a quick music break. Stay with us.`,
+      `Fascinating segment from ${podcastTitle} — lots to think about there. We're going to drop some tracks while you process that. Back in a bit.`,
+      `Great conversation on ${podcastTitle}. Before we hear more, let's take a little musical detour. You won't want to change the dial.`,
+    ],
+    de: [
+      `Nachdenklicher Stoff von ${podcastTitle}. Das lassen wir kurz sacken — aber zuerst eine kurze Musikpause. Bleibt dran.`,
+      `Faszinierend von ${podcastTitle} — viel zum Nachdenken. Wir spielen ein paar Tracks, während ihr das verarbeitet. Gleich zurück.`,
+      `Tolles Gespräch bei ${podcastTitle}. Bevor wir mehr hören, ein kleiner musikalischer Umweg. Nicht wegschalten.`,
+    ],
+    fr: [
+      `C'est du contenu qui fait réfléchir de la part de ${podcastTitle}. On laisse ça reposer — mais d'abord, une petite pause musicale. Restez avec nous.`,
+      `Segment fascinant de ${podcastTitle} — beaucoup de choses à digérer. On va poser quelques morceaux le temps que vous processiez ça. On revient bientôt.`,
+      `Bonne conversation sur ${podcastTitle}. Avant d'en entendre plus, un petit détour musical. Ne changez pas de station.`,
+    ],
+  };
+  const options = t[lang];
   return options[Math.floor(Math.random() * options.length)];
 }
 

@@ -66,58 +66,185 @@ function episodeTitleIsDateDump(episodeTitle: string): boolean {
 // Fallback scripts (no AI required)
 
 function fallbackGreeting(name: string): string {
-  const tod = getTimeOfDay();
-  const firstName = name.split(' ')[0];
-  const scripts: Record<TimeOfDay, string> = {
-    morning: `Good morning, ${firstName}. You're tuned in to PR, your personal radio station. It's a great morning for music, so let's kick things off right.`,
-    afternoon: `Good afternoon, ${firstName}. Welcome back to PR. The afternoon playlist is ready and it's a good one. Let's get into it.`,
-    evening: `Good evening, ${firstName}. You're listening to PR. The day is winding down and the evening set is ready. This one's for you.`,
-    night: `Hey, ${firstName}. Late night, good music. You're tuned in to PR. Let's go.`,
+  const tod  = getTimeOfDay();
+  const lang = getLangCode();
+  const n    = name.split(' ')[0];
+  const scripts: Record<'en' | 'de' | 'fr', Record<TimeOfDay, string>> = {
+    en: {
+      morning:   `Good morning, ${n}. You're tuned in to PR, your personal radio station. It's a great morning for music, so let's kick things off right.`,
+      afternoon: `Good afternoon, ${n}. Welcome back to PR. The afternoon playlist is ready and it's a good one. Let's get into it.`,
+      evening:   `Good evening, ${n}. You're listening to PR. The day is winding down and the evening set is ready. This one's for you.`,
+      night:     `Hey, ${n}. Late night, good music. You're tuned in to PR. Let's go.`,
+    },
+    de: {
+      morning:   `Guten Morgen, ${n}. Du hörst PR, deinen persönlichen Radiosender. Ein toller Morgen für Musik — lass uns loslegen.`,
+      afternoon: `Guten Tag, ${n}. Willkommen zurück bei PR. Die Nachmittagsplaylist ist bereit. Lass uns einsteigen.`,
+      evening:   `Guten Abend, ${n}. Du hörst PR. Der Tag neigt sich dem Ende — das Abendprogramm ist bereit. Für dich.`,
+      night:     `Hey, ${n}. Später Abend, gute Musik. Du hörst PR. Los geht's.`,
+    },
+    fr: {
+      morning:   `Bonjour, ${n}. Vous écoutez PR, votre radio personnelle. C'est une belle matinée pour la musique — c'est parti.`,
+      afternoon: `Bon après-midi, ${n}. Bienvenue sur PR. La playlist de l'après-midi est prête. On y va.`,
+      evening:   `Bonsoir, ${n}. Vous êtes sur PR. La journée se termine — la sélection du soir est prête. Elle est pour vous.`,
+      night:     `Salut, ${n}. Nuit tardive, bonne musique. Vous écoutez PR. C'est parti.`,
+    },
   };
-  return scripts[tod];
+  return scripts[lang][tod];
 }
 
 function fallbackTrackIntro(track: WavlakeTrack): string {
   const title = cleanTrackTitle(track.name);
-  const templates = [
-    `Up next, ${track.artist} with ${title}.`,
-    `Here's ${title} from ${track.artist}.`,
-    `Coming up, ${track.artist} with ${title}.`,
-    `Next on the playlist, ${title} by ${track.artist}.`,
-    `And now from ${track.artist}, ${title}.`,
-  ];
-  return templates[track.id.charCodeAt(0) % templates.length];
+  const lang  = getLangCode();
+  const a     = track.artist;
+  const t     = title;
+  const templates: Record<'en' | 'de' | 'fr', string[]> = {
+    en: [
+      `Up next, ${a} with ${t}.`,
+      `Here's ${t} from ${a}.`,
+      `Coming up, ${a} with ${t}.`,
+      `Next on the playlist, ${t} by ${a}.`,
+      `And now from ${a}, ${t}.`,
+    ],
+    de: [
+      `Als nächstes: ${a} mit ${t}.`,
+      `Hier ist ${t} von ${a}.`,
+      `Gleich: ${a} mit ${t}.`,
+      `Als nächstes in der Playlist: ${t} von ${a}.`,
+      `Und jetzt von ${a}: ${t}.`,
+    ],
+    fr: [
+      `Tout de suite, ${a} avec ${t}.`,
+      `Voici ${t} par ${a}.`,
+      `Ensuite, ${a} avec ${t}.`,
+      `Prochain sur la playlist, ${t} par ${a}.`,
+      `Et maintenant, ${a} avec ${t}.`,
+    ],
+  };
+  const list = templates[lang];
+  return list[track.id.charCodeAt(0) % list.length];
 }
 
 function fallbackPodcastTransition(showName: string, episodeTitle: string): string {
+  const lang = getLangCode();
+  const idx  = showName.charCodeAt(0);
+  const s    = showName;
+
   if (isNewsShow(showName, episodeTitle)) {
-    const templates = [
-      `Time to check in with the latest. Here's ${showName}.`,
-      `Let's see what's happening in the world. ${showName} is up next.`,
-      `Time for the news. Here's ${showName}.`,
-    ];
-    return templates[showName.charCodeAt(0) % templates.length];
+    const t: Record<'en' | 'de' | 'fr', string[]> = {
+      en: [`Time to check in with the latest. Here's ${s}.`, `Let's see what's happening in the world. ${s} is up next.`, `Time for the news. Here's ${s}.`],
+      de: [`Zeit für die neuesten Nachrichten. Hier ist ${s}.`, `Schauen wir, was in der Welt passiert. ${s} kommt als nächstes.`, `Zeit für die Nachrichten. Hier ist ${s}.`],
+      fr: [`L'heure de faire le point sur l'actualité. Voici ${s}.`, `Voyons ce qui se passe dans le monde. ${s} arrive tout de suite.`, `Place aux informations. Voici ${s}.`],
+    };
+    return t[lang][idx % 3];
   }
   if (episodeTitleIsDateDump(episodeTitle)) {
-    const templates = [
-      `Coming up, the latest from ${showName}. Stay with us.`,
-      `That's the music for now. Here's ${showName}.`,
-      `And now for something a little different. Here's ${showName}.`,
-    ];
-    return templates[showName.charCodeAt(0) % templates.length];
+    const t: Record<'en' | 'de' | 'fr', string[]> = {
+      en: [`Coming up, the latest from ${s}. Stay with us.`, `That's the music for now. Here's ${s}.`, `And now for something a little different. Here's ${s}.`],
+      de: [`Gleich kommt das Neueste von ${s}. Bleibt dran.`, `Das war die Musik für jetzt. Hier ist ${s}.`, `Und jetzt etwas anderes. Hier ist ${s}.`],
+      fr: [`Dans un instant, les dernières nouvelles de ${s}. Restez avec nous.`, `C'est tout pour la musique pour l'instant. Voici ${s}.`, `Et maintenant, quelque chose de différent. Voici ${s}.`],
+    };
+    return t[lang][idx % 3];
   }
-  const templates = [
-    `Let's check in with ${showName}.`,
-    `Time for some ${showName}.`,
-    `And now for something a little different. Here's ${showName}.`,
-  ];
-  return templates[showName.charCodeAt(0) % templates.length];
+  const t: Record<'en' | 'de' | 'fr', string[]> = {
+    en: [`Let's check in with ${s}.`, `Time for some ${s}.`, `And now for something a little different. Here's ${s}.`],
+    de: [`Schauen wir mal rein bei ${s}.`, `Zeit für ${s}.`, `Und jetzt etwas anderes. Hier ist ${s}.`],
+    fr: [`On fait un tour du côté de ${s}.`, `L'heure de ${s}.`, `Et maintenant, quelque chose de différent. Voici ${s}.`],
+  };
+  return t[lang][idx % 3];
 }
 
-// Language helper
+// Language helpers
 
 function getStoredLanguage(): string {
   try { return localStorage.getItem('pr:language') || 'English'; } catch { return 'English'; }
+}
+
+function getLangCode(): 'en' | 'de' | 'fr' {
+  const lang = getStoredLanguage();
+  if (lang === 'Deutsch')  return 'de';
+  if (lang === 'Français') return 'fr';
+  return 'en';
+}
+
+function fallbackReviewAndIntro(played: WavlakeTrack[], next: WavlakeTrack, cleanNextTitle: string): string {
+  const lang = getLangCode();
+  const artists = played.map(t => t.artist).join(lang === 'fr' ? ' et ' : ' and ');
+  const first   = played[0];
+  if (played.length > 1) {
+    const t: Record<'en' | 'de' | 'fr', string> = {
+      en: `Great music from ${artists}, hope you enjoyed that. Coming up next, ${next.artist} with ${cleanNextTitle}.`,
+      de: `Tolle Musik von ${artists} — hoffe, das hat euch gefallen. Als nächstes: ${next.artist} mit ${cleanNextTitle}.`,
+      fr: `Belle musique de ${artists}, j'espère que vous avez apprécié. Ensuite, ${next.artist} avec ${cleanNextTitle}.`,
+    };
+    return t[lang];
+  }
+  const t: Record<'en' | 'de' | 'fr', string> = {
+    en: `That was ${first.artist} with ${cleanTrackTitle(first.name)}. Now let's keep it going, here's ${next.artist} with ${cleanNextTitle}.`,
+    de: `Das war ${first.artist} mit ${cleanTrackTitle(first.name)}. Und weiter geht's — ${next.artist} mit ${cleanNextTitle}.`,
+    fr: `C'était ${first.artist} avec ${cleanTrackTitle(first.name)}. On continue avec ${next.artist} et ${cleanNextTitle}.`,
+  };
+  return t[lang];
+}
+
+function fallbackPodcastIntro(episode: { feedTitle: string; title: string }, isNewsOrDateDump: boolean): string {
+  const lang = getLangCode();
+  if (isNewsOrDateDump) {
+    const t: Record<'en' | 'de' | 'fr', string> = {
+      en: `Up next, ${episode.feedTitle}. Take a listen.`,
+      de: `Als nächstes: ${episode.feedTitle}. Hör rein.`,
+      fr: `Tout de suite, ${episode.feedTitle}. Bonne écoute.`,
+    };
+    return t[lang];
+  }
+  const t: Record<'en' | 'de' | 'fr', string> = {
+    en: `Coming up, from ${episode.feedTitle}: ${episode.title}. Sit back and enjoy.`,
+    de: `Gleich: ${episode.feedTitle} mit der Episode ${episode.title}. Lehn dich zurück.`,
+    fr: `Dans un instant, ${episode.feedTitle} : ${episode.title}. Installez-vous confortablement.`,
+  };
+  return t[lang];
+}
+
+function fallbackPodcastReturn(podcastTitle: string, partNumber: number): string {
+  const lang = getLangCode();
+  const t: Record<'en' | 'de' | 'fr', string[]> = {
+    en: [
+      `And we're back, here's part ${partNumber} of ${podcastTitle}.`,
+      `Welcome back. Picking up where we left off, ${podcastTitle}, part ${partNumber}.`,
+      `Alright, back to it. Here's the next part of ${podcastTitle}.`,
+    ],
+    de: [
+      `Und wir sind zurück — hier ist Teil ${partNumber} von ${podcastTitle}.`,
+      `Willkommen zurück. Weiter geht es mit ${podcastTitle}, Teil ${partNumber}.`,
+      `Gut, weiter. Hier ist der nächste Teil von ${podcastTitle}.`,
+    ],
+    fr: [
+      `Et nous revoilà, voici la partie ${partNumber} de ${podcastTitle}.`,
+      `Bienvenue de retour. On reprend là où on s'est arrêté — ${podcastTitle}, partie ${partNumber}.`,
+      `Allez, on reprend. Voici la suite de ${podcastTitle}.`,
+    ],
+  };
+  return t[lang][partNumber % 3];
+}
+
+function fallbackPodcastOutro(feedTitle: string, nextArtist: string, cleanNextTitle: string): string {
+  const lang = getLangCode();
+  const t: Record<'en' | 'de' | 'fr', string> = {
+    en: `That was ${feedTitle}. Back to music now, here's ${nextArtist} with ${cleanNextTitle}.`,
+    de: `Das war ${feedTitle}. Zurück zur Musik — hier ist ${nextArtist} mit ${cleanNextTitle}.`,
+    fr: `C'était ${feedTitle}. Retour à la musique avec ${nextArtist} et ${cleanNextTitle}.`,
+  };
+  return t[lang];
+}
+
+function fallbackSkipTransition(nextLabel: string): string {
+  const lang = getLangCode();
+  const t: Record<'en' | 'de' | 'fr', string[]> = {
+    en: [`Skipping ahead — here's ${nextLabel}.`, `Sure, let's move on. Here's ${nextLabel}.`, `Alright, jumping to ${nextLabel}.`, `Moving right along — ${nextLabel} is up.`],
+    de: [`Weiter — hier ist ${nextLabel}.`, `Klar, machen wir weiter. Hier ist ${nextLabel}.`, `Gut, springen wir zu ${nextLabel}.`, `Gleich weiter — ${nextLabel} kommt.`],
+    fr: [`On avance — voici ${nextLabel}.`, `Bien sûr, on passe à la suite. Voici ${nextLabel}.`, `D'accord, on saute à ${nextLabel}.`, `On avance — ${nextLabel} arrive.`],
+  };
+  const list = t[lang];
+  return list[Math.floor(Math.random() * list.length)];
 }
 
 // Shakespeare AI script generator
@@ -262,11 +389,7 @@ export function useRadioModerator() {
         chartContext +
         `Keep the whole thing to 2 to 3 sentences. Sound like a natural radio DJ, not a robot. ` +
         `Do not put titles in quotes or add version tags.`;
-      const fallback =
-        played.length > 1
-          ? `Great music from ${played.map(t => t.artist).join(' and ')}, hope you enjoyed that. Coming up next, ${next.artist} with ${cleanNextTitle}.`
-          : `That was ${played[0].artist} with ${cleanTrackTitle(played[0].name)}. Now let's keep it going, here's ${next.artist} with ${cleanNextTitle}.`;
-      await buildAndSpeak(prompt, fallback);
+      await buildAndSpeak(prompt, fallbackReviewAndIntro(played, next, cleanNextTitle));
     },
     [buildAndSpeak]
   );
@@ -366,12 +489,7 @@ export function useRadioModerator() {
           `Never mention dates, times, or episode numbers.`;
       }
 
-      const fallback =
-        isNews || isDateDump
-          ? `Up next, ${episode.feedTitle}. Take a listen.`
-          : `Coming up, from ${episode.feedTitle}: ${episode.title}. Sit back and enjoy.`;
-
-      await buildAndSpeak(prompt, fallback);
+      await buildAndSpeak(prompt, fallbackPodcastIntro(episode, isNews || isDateDump));
     },
     [buildAndSpeak]
   );
@@ -390,12 +508,7 @@ export function useRadioModerator() {
         `Podcast: ${podcastTitle}. This is part ${partNumber} of the episode. ` +
         `Say something warm and brief, 1 sentence, like And we're back, here's part ${partNumber} of ${podcastTitle}. ` +
         `Vary the phrasing. Sound natural, not scripted.`;
-      const fallback = [
-        `And we're back, here's part ${partNumber} of ${podcastTitle}.`,
-        `Welcome back. Picking up where we left off, ${podcastTitle}, part ${partNumber}.`,
-        `Alright, back to it. Here's the next part of ${podcastTitle}.`,
-      ][partNumber % 3];
-      await buildAndSpeak(prompt, fallback);
+      await buildAndSpeak(prompt, fallbackPodcastReturn(podcastTitle, partNumber));
     },
     [buildAndSpeak]
   );
@@ -413,9 +526,7 @@ export function useRadioModerator() {
         `Now going back to music, next up: ${nextTrack.artist} with ${cleanNextTitle}. ` +
         `Keep it to 1 to 2 sentences. Sound natural. Do not mention dates or episode titles.`;
 
-      const fallback = `That was ${episode.feedTitle}. Back to music now, here's ${nextTrack.artist} with ${cleanNextTitle}.`;
-
-      await buildAndSpeak(prompt, fallback);
+      await buildAndSpeak(prompt, fallbackPodcastOutro(episode.feedTitle, nextTrack.artist, cleanNextTitle));
     },
     [buildAndSpeak]
   );
@@ -432,20 +543,13 @@ export function useRadioModerator() {
       } else {
         nextLabel = next.feedTitle;
       }
-      const prompts = [
-        `Skipping ahead — here's ${nextLabel}.`,
-        `Sure, let's move on. Here's ${nextLabel}.`,
-        `Alright, jumping to ${nextLabel}.`,
-        `Moving right along — ${nextLabel} is up.`,
-      ];
-      const fallback = prompts[Math.floor(Math.random() * prompts.length)];
       const aiScript = await generateScript(
         `You are a radio host. The listener just skipped the current track. ` +
         `Say something very brief (one short sentence) acknowledging the skip ` +
         `and introducing the next item: ${nextLabel}. ` +
         `Sound natural and unbothered, not apologetic. No stage directions.`,
       );
-      await sayScript(aiScript ?? fallback);
+      await sayScript(aiScript ?? fallbackSkipTransition(nextLabel));
     },
     [sayScript],
   );
