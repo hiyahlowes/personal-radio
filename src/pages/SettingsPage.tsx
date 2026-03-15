@@ -19,6 +19,7 @@ import {
   setStoredName,
   GENRES_KEY,
 } from '@/pages/SetupPage';
+import { loadListenerMemory, saveListenerMemory, type ListenerMemory } from '@/hooks/useListenerMemory';
 
 // Emoji map (shared style with SetupPage)
 const genreEmoji: Record<string, string> = {
@@ -188,6 +189,26 @@ export function SettingsPage() {
     setHistoryClearedMsg(true);
     setTimeout(() => setHistoryClearedMsg(false), 2000);
   };
+
+  // ── Song Graveyard ─────────────────────────────────────────────────────────
+  const [graveyardMemory, setGraveyardMemory] = useState<ListenerMemory>(
+    () => loadListenerMemory(getStoredName() || 'Listener')
+  );
+  const [restoredId, setRestoredId] = useState<string | null>(null);
+
+  const resurrect = (trackId: string) => {
+    setGraveyardMemory(prev => {
+      const next = { ...prev, dislikedSongs: prev.dislikedSongs.filter(id => id !== trackId) };
+      saveListenerMemory(prev.listenerName, next);
+      return next;
+    });
+    setRestoredId(trackId);
+    setTimeout(() => setRestoredId(null), 2000);
+  };
+
+  // Look up the most recent playedSongs entry for a given ID
+  const songInfo = (trackId: string) =>
+    [...graveyardMemory.playedSongs].reverse().find(s => s.id === trackId);
 
   return (
     <div className="min-h-screen gradient-bg text-white">
@@ -548,6 +569,64 @@ export function SettingsPage() {
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+        </section>
+
+        {/* ── Song Graveyard ──────────────────────────────────────────────── */}
+        <section className="fade-in-up-delay-2 space-y-3">
+          <div className="flex items-center justify-between px-1">
+            <div>
+              <h2 className="text-sm font-semibold text-white/60 uppercase tracking-widest">🪦 Song Graveyard</h2>
+              <p className="text-xs text-white/30 mt-1">Songs you've banished — resurrect them if you had a change of heart</p>
+            </div>
+            {graveyardMemory.dislikedSongs.length > 0 && (
+              <span className="text-xs text-white/25">{graveyardMemory.dislikedSongs.length} banished</span>
+            )}
+          </div>
+
+          {graveyardMemory.dislikedSongs.length === 0 ? (
+            <div className="rounded-2xl px-5 py-8 text-center bg-black/20 border border-white/[0.06]">
+              <p className="text-sm text-white/30">No songs banished yet. Long may they play. 🎵</p>
+            </div>
+          ) : (
+            <div className="rounded-2xl overflow-hidden divide-y divide-white/[0.05] bg-black/20 border border-white/[0.06]">
+              {graveyardMemory.dislikedSongs.map(trackId => {
+                const info = songInfo(trackId);
+                const justRestored = restoredId === trackId;
+                return (
+                  <div key={trackId} className="flex items-center gap-3 px-4 py-3">
+                    {/* Tombstone icon */}
+                    <div className="w-9 h-9 rounded-lg bg-white/[0.04] border border-white/[0.07] flex items-center justify-center flex-shrink-0 text-base select-none">
+                      🪦
+                    </div>
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white/50 truncate">
+                        {info?.title ?? trackId}
+                      </p>
+                      {info?.artist && (
+                        <p className="text-xs text-white/25 truncate">{info.artist}</p>
+                      )}
+                    </div>
+                    {/* Resurrect button / confirmation */}
+                    {justRestored ? (
+                      <span className="flex-shrink-0 text-xs text-emerald-400 font-semibold flex items-center gap-1">
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                        Song restored to the living
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => resurrect(trackId)}
+                        className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/40 border border-white/10 hover:border-emerald-500/40 hover:text-emerald-300 hover:bg-emerald-900/20 transition-all"
+                        aria-label="Resurrect track"
+                      >
+                        🧟 Resurrect
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>
