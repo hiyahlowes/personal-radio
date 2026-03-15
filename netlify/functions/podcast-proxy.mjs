@@ -439,10 +439,31 @@ async function handleVoiceInfo(params) {
       signal: AbortSignal.timeout(10_000),
     });
     const body = await res.text();
+
+    if (!res.ok) {
+      const headersObj = {};
+      res.headers.forEach((value, key) => { headersObj[key] = value; });
+      console.error('[voiceinfo] ElevenLabs error response:', {
+        status: res.status,
+        statusText: res.statusText,
+        headers: headersObj,
+        body,
+        apiKeyPresent: !!apiKey,
+        apiKeyPrefix: apiKey ? apiKey.slice(0, 8) + '…' : 'none',
+        voiceId,
+      });
+    }
+
     return {
       statusCode: res.status,
       headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body,
+      body: res.ok ? body : JSON.stringify({
+        error: `ElevenLabs returned ${res.status}`,
+        elevenlabs_body: body,
+        api_key_present: !!apiKey,
+        api_key_prefix: apiKey ? apiKey.slice(0, 8) + '…' : 'none',
+        voice_id: voiceId,
+      }),
     };
   } catch (err) {
     return {
