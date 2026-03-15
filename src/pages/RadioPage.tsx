@@ -69,7 +69,9 @@ const TICK_MS        = 40;   // ~25 steps/s — smooth enough
 // These module-level vars persist across RadioPage route changes (the audio
 // elements themselves also persist in RadioContext above the router).
 // AudioContext must be created/resumed from within a synchronous user gesture
-// handler; we do this in handlePlay().
+// handler (handlePlay). On iOS a silent oscillator is also fired to prove the
+// gesture — without it, audio routed through the GainNode stays blocked even
+// after resume() because iOS checks per-context gesture provenance.
 //
 // CORS note: createMediaElementSource() requires the media element to be
 // CORS-enabled if the source is cross-origin. Without crossOrigin='anonymous'
@@ -1433,21 +1435,21 @@ export function RadioPage() {
     // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
 
-    // iOS Safari: unlock web audio on the first user tap.
-    // play() must be called synchronously inside the gesture handler — any await
-    // before it breaks the user-activation chain on iOS. Calling it here (before
-    // startRadio / advanceLoop) ensures ALL subsequent async play() calls succeed.
-    if (!iosAudioUnlockedRef.current) {
-      iosAudioUnlockedRef.current = true;
-      _iosUnlockAudio.play().catch(() => {});
-      // Prime the podcast element specifically — iOS requires per-element activation
-      // when pod.play() will be called many async steps later in advanceLoop.
-      const pod = podAudioRef.current;
-      if (pod && !pod.getAttribute('src')) pod.play().catch(() => {});
-    }
+    // ── Web Audio setup (all synchronous — must stay inside the gesture handler) ──
+    //
+    // Order matters on iOS:
+    //   1. Create AudioContext (suspended by default on iOS)
+    //   2. Resume it
+    //   3. Fire a silent oscillator (iOS-only) to prove user gesture to the context
+    //   4. Connect GainNode to the music element
+    //   5. Unlock TTS/podcast elements via separate play() (not in GainNode chain)
+    //
+    // Step 3 is the key fix: once the music element is routed through AudioContext
+    // via createMediaElementSource(), the old _iosUnlockAudio.play() trick no
+    // longer unlocks it. The oscillator fires through the same AudioContext and
+    // proves the gesture, unlocking everything routed through it.
 
-    // Web Audio GainNode — must be created/resumed synchronously in the gesture
-    // handler. iOS suspends AudioContext by default; resume() here activates it.
+    // 1. Create AudioContext once
     if (!_audioCtx) {
       try {
         _audioCtx = new (window.AudioContext ?? (window as any).webkitAudioContext)();
@@ -1455,12 +1457,30 @@ export function RadioPage() {
         console.warn('[Duck] AudioContext unavailable:', e);
       }
     }
+
+    // 2. Resume if suspended (iOS always starts suspended; desktop may too)
     if (_audioCtx?.state === 'suspended') {
       _audioCtx.resume().catch(() => {});
     }
-    // Connect GainNode to the primary music audio element (once per element lifetime).
-    // createMediaElementSource() can only be called once per element — subsequent
-    // calls throw, so we guard with _musicSource check.
+
+    // 3. iOS-only: fire a silent oscillator to prove this is a user gesture.
+    //    On desktop Chrome/Firefox the AudioContext is already running — skip.
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    if (isIOS && _audioCtx) {
+      try {
+        const osc = _audioCtx.createOscillator();
+        osc.connect(_audioCtx.destination);
+        osc.start();
+        osc.stop(_audioCtx.currentTime + 0.001);
+        console.log('[iOS] AudioContext unlocked via oscillator');
+      } catch (e) {
+        console.warn('[iOS] oscillator unlock failed:', e);
+      }
+    }
+
+    // 4. Connect GainNode to the primary music element (once per element lifetime).
+    //    createMediaElementSource() can only be called once per element; the
+    //    _musicSource guard prevents re-calling after re-mount.
     if (_audioCtx && !_musicSource && audioRef.current) {
       try {
         _musicSource = _audioCtx.createMediaElementSource(audioRef.current);
@@ -1471,13 +1491,27 @@ export function RadioPage() {
         _webAudioReady = true;
         console.log('[Duck] Web Audio GainNode connected (iOS-safe)');
       } catch (e) {
-        // Throws SecurityError when audio source is cross-origin without CORS headers.
-        // Fall back to audio.volume (works on desktop, read-only no-op on iOS).
-        console.warn('[Duck] createMediaElementSource failed — falling back to audio.volume:', e);
-        _musicSource = null;
-        _musicGain   = null;
+        // SecurityError if cross-origin without CORS, or element already connected.
+        // Fall back to audio.volume (works on desktop; read-only no-op on iOS —
+        // duck effect absent but music plays normally).
+        console.warn('[Duck] GainNode failed, falling back to audio.volume:', e);
+        _musicSource   = null;
+        _musicGain     = null;
         _webAudioReady = false;
       }
+    }
+
+    // 5. Unlock TTS blob URLs and the podcast element — these are NOT connected
+    //    to the GainNode chain, so they need their own per-element activation.
+    //    _iosUnlockAudio.play() on a silent element primes the iOS media session
+    //    for these elements. Only needed once per page session.
+    if (!iosAudioUnlockedRef.current) {
+      iosAudioUnlockedRef.current = true;
+      _iosUnlockAudio.play().catch(() => {});
+      // Prime podcast element — iOS requires activation many async steps before
+      // pod.play() is called inside advanceLoop.
+      const pod = podAudioRef.current;
+      if (pod && !pod.getAttribute('src')) pod.play().catch(() => {});
     }
     if (!greetedRef.current) {
       startRadio();
