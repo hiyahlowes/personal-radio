@@ -310,8 +310,11 @@ export function RadioPage() {
   // route changes (e.g. navigating to Settings and back).
   const audioRef    = radioCtx.audioRef;
   const podAudioRef = radioCtx.podAudioRef;
-  const howlRef     = useRef<Howl | null>(null);
-  const nextHowlRef = useRef<Howl | null>(null);
+  const howlRef        = useRef<Howl | null>(null);
+  const nextHowlRef    = useRef<Howl | null>(null);
+  // Tracks the last-set Howler music volume independently of howl.volume(),
+  // which is unreliable in html5:true mode on iOS.
+  const musicVolumeRef = useRef<number>(0.9);
   const howlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runningRef  = radioCtx.runningRef;
   const greetedRef  = radioCtx.greetedRef;
@@ -618,10 +621,12 @@ export function RadioPage() {
     if (moderator.isSpeaking) {
       const howl = howlRef.current;
       if (howl) {
-        const curVol = howl.volume() as number;
+        const curVol = musicVolumeRef.current;
+        console.log(`[Duck] musicVolumeRef: ${curVol.toFixed(2)} before duck`);
         if (curVol > 0.2) {
-          console.log(`[Duck] Howler duckDown: current=${curVol.toFixed(2)} → ${DUCK_LEVEL} over 300ms`);
-          howl.fade(curVol, DUCK_LEVEL, 300); // short but non-zero — iOS ignores 0ms/50ms
+          console.log(`[Duck] Howler duckDown: ${curVol.toFixed(2)} → ${DUCK_LEVEL} over 300ms`);
+          howl.fade(curVol, DUCK_LEVEL, 300);
+          musicVolumeRef.current = DUCK_LEVEL;
         } else {
           console.log(`[Duck] skipped — already at duck level (${curVol.toFixed(2)})`);
         }
@@ -653,8 +658,9 @@ export function RadioPage() {
       const target = mutedRef.current ? 0 : volumeRef.current;
       const howl = howlRef.current;
       if (howl) {
-        console.log(`[Duck] Howler fade: ${DUCK_LEVEL} → ${target} over 2000ms`);
-        howl.fade(DUCK_LEVEL, target, 2000);
+        console.log(`[Duck] Howler fadeBack: ${DUCK_LEVEL} → 0.9 over 2000ms`);
+        howl.fade(DUCK_LEVEL, 0.9, 2000);
+        musicVolumeRef.current = 0.9;
       }
       // Also restore bridge to its playback volume
       const bridge = bridgeHowlRef.current;
@@ -899,6 +905,7 @@ export function RadioPage() {
         const howl = howlRef.current;
         if (howl) {
           howl.volume(DUCK_LEVEL);
+          musicVolumeRef.current = DUCK_LEVEL;
           howl.play();
           console.log(`[Howler] playing: ${t.name}`);
         } else {
@@ -950,6 +957,7 @@ export function RadioPage() {
         if (howlNoSpeech) {
           console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
           howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
+          musicVolumeRef.current = target;
         } else {
           cancelRampRef.current = rampVolume(audio, target, 1000);
         }
@@ -994,8 +1002,9 @@ export function RadioPage() {
               crossfadeTimerRef.current = null;
               if (loopGenRef.current === myGen) {
                 currentHowl.unload();
-                howlRef.current     = nextHowl;
-                nextHowlRef.current = null;
+                howlRef.current        = nextHowl;
+                nextHowlRef.current    = null;
+                musicVolumeRef.current = targetVol;
                 console.log('[Howler] crossfade complete');
                 howlerCrossfadeDone = true;
                 cleanup();
