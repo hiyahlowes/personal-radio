@@ -305,6 +305,7 @@ export function RadioPage() {
   const audioRef    = radioCtx.audioRef;
   const podAudioRef = radioCtx.podAudioRef;
   const howlRef     = useRef<Howl | null>(null);
+  const howlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runningRef  = radioCtx.runningRef;
   const greetedRef  = radioCtx.greetedRef;
   const idxRef      = radioCtx.idxRef;
@@ -670,6 +671,7 @@ export function RadioPage() {
   // Initialises a Howl alongside the existing audioRef system so we can verify
   // Howler loads correctly before migrating playback. Never calls .play().
   const _initHowl = useCallback((url: string) => {
+    if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
     howlRef.current?.unload();
     howlRef.current = new Howl({
       src: [url],
@@ -677,9 +679,32 @@ export function RadioPage() {
       volume: 0.9,
       onload:      () => console.log('[Howler] loaded:', url),
       onloaderror: (_id: number, err: unknown) => console.warn('[Howler] load error:', err),
+      onplay: () => {
+        setPlaying(true);
+        const dur = howlRef.current?.duration() ?? 0;
+        if (dur > 0) setDur(dur);
+        howlPollRef.current = setInterval(() => {
+          const h = howlRef.current;
+          if (!h) return;
+          const ct = h.seek() as number;
+          if (isFinite(ct)) setCT(ct);
+          const d = h.duration() ?? 0;
+          if (d > 0 && isFinite(d)) setDur(d);
+        }, 250);
+      },
+      onpause: () => {
+        setPlaying(false);
+        if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
+      },
+      onstop: () => {
+        if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
+      },
+      onend: () => {
+        if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
+      },
     });
     console.log('[Howler] initialized (not playing)');
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const advanceLoop = useCallback(async () => {
     const audio     = audioRef.current;
@@ -1489,6 +1514,10 @@ export function RadioPage() {
         // Resuming music — src is still loaded, signal the loop to skip reload.
         console.log('[PlayPause] resuming music from', audioRef.current.currentTime.toFixed(1));
         resumeMusicRef.current = true;
+        if (howlRef.current) {
+          howlRef.current.play();
+          console.log('[Howler] resume');
+        }
         advanceLoop();
       } else {
         // No src loaded yet (edge case) — restart the loop so it loads the next track.
@@ -1512,6 +1541,10 @@ export function RadioPage() {
       console.log('[PlayPause] handlePause — set resumePodcastEpisodeRef:', nowPlayingRef.current.episode.title);
     }
 
+    if (howlRef.current) {
+      howlRef.current.pause();
+      console.log('[Howler] pause');
+    }
     audioRef.current?.pause();
     podAudioRef.current?.pause(); // also pause podcast if one is playing
   }, []);
@@ -1676,8 +1709,16 @@ export function RadioPage() {
     const el    = (pod && !pod.paused) ? pod : audio;
     const dur   = durationRef.current;
     if (!el || !dur) return;
-    const r = (clientX - rect.left) / rect.width;
-    el.currentTime = Math.max(0, Math.min(1, r)) * dur;
+    const r       = (clientX - rect.left) / rect.width;
+    const newTime = Math.max(0, Math.min(1, r)) * dur;
+    const howl    = howlRef.current;
+    if (howl && nowPlayingRef.current?.kind === 'music') {
+      howl.seek(newTime);
+      setCT(newTime);
+      console.log(`[Howler] seek: ${newTime.toFixed(1)}s`);
+    } else {
+      el.currentTime = newTime;
+    }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Attach native (non-passive) touch listeners to the seek bar so touchmove
