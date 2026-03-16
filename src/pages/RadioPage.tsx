@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Howl } from 'howler';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -303,6 +304,7 @@ export function RadioPage() {
   // route changes (e.g. navigating to Settings and back).
   const audioRef    = radioCtx.audioRef;
   const podAudioRef = radioCtx.podAudioRef;
+  const howlRef     = useRef<Howl | null>(null);
   const runningRef  = radioCtx.runningRef;
   const greetedRef  = radioCtx.greetedRef;
   const idxRef      = radioCtx.idxRef;
@@ -652,6 +654,21 @@ export function RadioPage() {
   }, [volume, muted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Core loop — stable, reads everything via refs ─────────────────────────
+  // ── Howler.js shadow instance (parallel, not playing yet) ─────────────────
+  // Initialises a Howl alongside the existing audioRef system so we can verify
+  // Howler loads correctly before migrating playback. Never calls .play().
+  const _initHowl = useCallback((url: string) => {
+    howlRef.current?.unload();
+    howlRef.current = new Howl({
+      src: [url],
+      html5: true, // required for streaming audio
+      volume: 0.9,
+      onload:      () => console.log('[Howler] loaded:', url),
+      onloaderror: (_id: number, err: unknown) => console.warn('[Howler] load error:', err),
+    });
+    console.log('[Howler] initialized (not playing)');
+  }, []);
+
   const advanceLoop = useCallback(async () => {
     const audio     = audioRef.current;
     const nextAudio = nextAudioRef.current;
@@ -758,6 +775,7 @@ export function RadioPage() {
         audio.src    = t.liveUrl;
         audio.volume = DUCK_LEVEL; // always start ducked; speech/crossfade controls volume
         audio.load();
+        _initHowl(t.liveUrl); // shadow Howl — verifies loading, never plays
         setCT(0);
         setDur(t.duration || 0);
         setIdx(currentIdx);
