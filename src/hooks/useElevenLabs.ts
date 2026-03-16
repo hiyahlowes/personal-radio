@@ -36,22 +36,37 @@ export interface ElevenLabsOptions {
   use_speaker_boost?: boolean;
 }
 
-/** Converts text to speech via ElevenLabs and plays it. Returns a promise that resolves when playback ends. */
-// Module-level singleton — pre-created so RadioPage's _warmIOSAudio can
-// unlock it on first gesture. iOS requires play() to be called within the
-// gesture chain; lazy creation (new Audio() inside speak()) is too late.
-export const ttsAudio = new Audio();
+// Module-level singleton — lazily created on first unlock gesture so iOS
+// treats play() as user-initiated. Do NOT use `new Audio()` at module load.
+let _ttsAudio: HTMLAudioElement | null = null;
 
+/** Call inside a touchend/click handler to create + unlock the TTS element. */
+export function unlockTTSAudio(): void {
+  if (!_ttsAudio) _ttsAudio = new Audio();
+  const el = _ttsAudio;
+  // Silent 1-frame WAV — smallest valid audio data iOS will accept.
+  el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+  el.muted = true;
+  el.play().then(() => {
+    el.pause();
+    el.muted = false;
+    console.log('[ElevenLabs] iOS pre-unlock complete');
+  }).catch(() => { el.muted = false; });
+}
+
+/** Converts text to speech via ElevenLabs and plays it. Returns a promise that resolves when playback ends. */
 export function useElevenLabs() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const voiceAudioRef = useRef<HTMLAudioElement>(ttsAudio);
   const currentBlobUrl = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const getOrCreateAudio = (): HTMLAudioElement => voiceAudioRef.current;
+  const getOrCreateAudio = (): HTMLAudioElement => {
+    if (!_ttsAudio) _ttsAudio = new Audio();
+    return _ttsAudio;
+  };
 
   const speak = useCallback(async (text: string, opts: ElevenLabsOptions = {}): Promise<void> => {
     const voiceId = getVoiceId();
@@ -195,7 +210,7 @@ export function useElevenLabs() {
   const stop = useCallback(() => {
     console.log('[ElevenLabs] stop() called');
     abortRef.current?.abort();
-    ttsAudio.pause();
+    _ttsAudio?.pause();
     setIsSpeaking(false);
     setIsGenerating(false);
   }, []);

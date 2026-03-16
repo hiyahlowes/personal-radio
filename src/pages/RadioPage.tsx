@@ -14,7 +14,7 @@ import {
 import { useWavlakeTracks, fetchAmbientBridgePool, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, useSingleFeedEpisodes, getStoredFeeds, type PodcastEpisode, type PodcastFeed } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator, type ResumeContext } from '@/hooks/useRadioModerator';
-import { ttsAudio } from '@/hooks/useElevenLabs';
+import { unlockTTSAudio } from '@/hooks/useElevenLabs';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
@@ -79,14 +79,9 @@ const _warmIOSAudio = () => {
   // Also resume Howler's shared AudioContext if it already exists
   // (created lazily by the first Howl instance — may be undefined here).
   (Howler as any).ctx?.resume();
-  // Pre-unlock the TTS audio element — iOS blocks play() unless called within
-  // a gesture; the element is reused for all ElevenLabs playback.
-  ttsAudio.muted = true;
-  ttsAudio.play().then(() => {
-    ttsAudio.pause();
-    ttsAudio.muted = false;
-    console.log('[ElevenLabs] iOS pre-unlock complete');
-  }).catch(() => { ttsAudio.muted = false; });
+  // Create + unlock the TTS element within the gesture so iOS allows play()
+  // later without a fresh gesture token.
+  unlockTTSAudio();
   document.removeEventListener('touchend', _warmIOSAudio);
   console.log('[iOS] AudioContext warmed on first touch');
   console.log('[Howler] iOS unlock triggered');
@@ -626,8 +621,8 @@ export function RadioPage() {
       const howl = howlRef.current;
       if (howl) {
         const curVol = howl.volume() as number;
-        console.log(`[Duck] Howler duckDown: current=${curVol.toFixed(2)} → ${DUCK_LEVEL} over 50ms`);
-        howl.fade(curVol, DUCK_LEVEL, 50); // 0ms is ignored on iOS — use 50ms minimum
+        console.log(`[Duck] Howler duckDown: current=${curVol.toFixed(2)} → ${DUCK_LEVEL} over 300ms`);
+        howl.fade(curVol, DUCK_LEVEL, 300); // short but non-zero — iOS ignores 0ms/50ms
       } else {
         // audio.volume is read-only on iOS Safari (PWA and browser).
         // Wavlake CDN sends no CORS headers so GainNode is not an option either.
@@ -1364,6 +1359,10 @@ export function RadioPage() {
             try {
               await pod.play();
               podStarted = true;
+              console.log(`[Podcast] volume after play: ${pod.volume}`);
+              pod.volume = 1.0; // assert full volume — iOS may reset to 0
+              (Howler as any).ctx?.resume(); // keep shared AudioContext active
+              console.log('[Podcast] iOS audio session resumed');
               console.log('[Loop] podcast play() resolved — podcast playing');
             } catch (e) {
               console.error('[Loop] podcast play failed — resetting state:', e);
