@@ -60,6 +60,7 @@ type RadioItem =
 
 // ─── Volume ramping via setInterval ──────────────────────────────────────────
 const DUCK_LEVEL     = 0.08;
+const BRIDGE_VOLUME  = 0.3;  // ambient bridge playback volume
 const CROSSFADE_SECS = 3;    // seconds before track end to begin crossfade
 const TICK_MS        = 40;   // ~25 steps/s — smooth enough
 
@@ -115,28 +116,25 @@ function randInt(min: number, max: number) {
 }
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-// Pre-load the podcast-intro jingle so it plays instantly when needed.
-// The same element is reused (currentTime reset) on each call.
-const _jingleAudio = new Audio('/podcast-intro.mp3');
-_jingleAudio.preload = 'auto';
-_jingleAudio.load();
-console.log('[Preload] jingles cached');
-
+// Pre-load jingles as Howl instances — HTMLAudioElement is not gesture-unlocked
+// on iOS; Howler handles the iOS AudioContext unlock internally.
+const _introHowl  = new Howl({ src: ['/podcast-intro.mp3'],  html5: true, preload: true, volume: 1.0 });
+const _returnHowl = new Howl({ src: ['/studio-return.mp3'],  html5: true, preload: true, volume: 1.0 });
+console.log('[Preload] jingles loaded via Howler');
 
 /**
  * Play a jingle at full volume and resolve when it ends.
- * For '/podcast-intro.mp3' the preloaded singleton is reused so playback
- * starts instantly. Other paths get a fresh Audio element.
- * Errors are swallowed so a missing file never stalls the radio loop.
+ * Uses Howl instances (iOS-safe). Errors are swallowed so a missing
+ * file never stalls the radio loop.
  */
 function playJingle(src: string): Promise<void> {
   return new Promise<void>(resolve => {
-    const jingle = src === '/podcast-intro.mp3' ? _jingleAudio : new Audio(src);
-    if (src === '/podcast-intro.mp3') jingle.currentTime = 0;
-    jingle.volume = 1.0;
-    jingle.addEventListener('ended', () => resolve(), { once: true });
-    jingle.addEventListener('error', () => resolve(), { once: true });
-    jingle.play().catch(() => resolve());
+    const howl = src === '/studio-return.mp3' ? _returnHowl : _introHowl;
+    const id = howl.play();
+    howl.once('end',   () => resolve(), id);
+    howl.once('playerror', () => resolve(), id);
+    // Fallback: resolve after a generous timeout so we never hang
+    setTimeout(resolve, 15_000);
   });
 }
 function fmt(s: number) {
@@ -641,6 +639,15 @@ export function RadioPage() {
           audio.volume = DUCK_LEVEL;
         }
       }
+      // Also duck the ambient bridge if it's playing
+      const bridge = bridgeHowlRef.current;
+      if (bridge) {
+        const bVol = bridge.volume() as number;
+        if (bVol > 0.2) {
+          bridge.fade(bVol, DUCK_LEVEL, 300);
+          console.log(`[Duck] bridge duckDown: ${bVol.toFixed(2)} → ${DUCK_LEVEL}`);
+        }
+      }
       cancelRampRef.current = null;
     } else {
       const target = mutedRef.current ? 0 : volumeRef.current;
@@ -648,7 +655,14 @@ export function RadioPage() {
       if (howl) {
         console.log(`[Duck] Howler fade: ${DUCK_LEVEL} → ${target} over 2000ms`);
         howl.fade(DUCK_LEVEL, target, 2000);
-      } else {
+      }
+      // Also restore bridge to its playback volume
+      const bridge = bridgeHowlRef.current;
+      if (bridge) {
+        bridge.fade(bridge.volume() as number, BRIDGE_VOLUME, 2000);
+        console.log(`[Duck] bridge fadeBack → ${BRIDGE_VOLUME}`);
+      }
+      if (!howl) {
         const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
         if (isIOS) {
           // Resume music after TTS — play() is async but this fires after speech
@@ -1224,7 +1238,7 @@ export function RadioPage() {
               bridgeHowlRef.current = bh;
               setTimeout(resolve, 3000); // don't block forever
             });
-            bridgeHowlRef.current?.volume(0.3);
+            bridgeHowlRef.current?.volume(BRIDGE_VOLUME);
             bridgeHowlRef.current?.play();
             console.log(`[Bridge] using ambient track: ${bridgeTrack.name} by ${bridgeTrack.artist}`);
           } else {
@@ -1322,10 +1336,13 @@ export function RadioPage() {
             pod.volume = mutedRef.current ? 0 : volumeRef.current;
             pod.load();
 
-            // Always wait for canplay — iOS silently fails play() at readyState=0.
-            // The conditional check was unreliable; unconditional wait is safer.
+            // Wait for canplay — iOS silently fails play() at readyState=0.
             console.log(`[Podcast] waiting for canplay — readyState: ${pod.readyState}`);
             await new Promise<void>(resolve => {
+              if (pod.readyState >= 3) {
+                console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
+                return resolve();
+              }
               const onCanPlay = () => {
                 console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
                 pod.removeEventListener('canplay', onCanPlay);
