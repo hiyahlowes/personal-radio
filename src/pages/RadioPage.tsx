@@ -621,8 +621,12 @@ export function RadioPage() {
       const howl = howlRef.current;
       if (howl) {
         const curVol = howl.volume() as number;
-        console.log(`[Duck] Howler duckDown: current=${curVol.toFixed(2)} → ${DUCK_LEVEL} over 300ms`);
-        howl.fade(curVol, DUCK_LEVEL, 300); // short but non-zero — iOS ignores 0ms/50ms
+        if (curVol > 0.2) {
+          console.log(`[Duck] Howler duckDown: current=${curVol.toFixed(2)} → ${DUCK_LEVEL} over 300ms`);
+          howl.fade(curVol, DUCK_LEVEL, 300); // short but non-zero — iOS ignores 0ms/50ms
+        } else {
+          console.log(`[Duck] skipped — already at duck level (${curVol.toFixed(2)})`);
+        }
       } else {
         // audio.volume is read-only on iOS Safari (PWA and browser).
         // Wavlake CDN sends no CORS headers so GainNode is not an option either.
@@ -1318,13 +1322,25 @@ export function RadioPage() {
             pod.volume = mutedRef.current ? 0 : volumeRef.current;
             pod.load();
 
-            if (pod.readyState < 3 /* HAVE_FUTURE_DATA */) {
-              await new Promise<void>(resolve => {
-                pod.addEventListener('canplay', () => resolve(), { once: true });
-                pod.addEventListener('error',   () => resolve(), { once: true });
-                setTimeout(resolve, 8000); // slow connection fallback
-              });
-            }
+            // Always wait for canplay — iOS silently fails play() at readyState=0.
+            // The conditional check was unreliable; unconditional wait is safer.
+            console.log(`[Podcast] waiting for canplay — readyState: ${pod.readyState}`);
+            await new Promise<void>(resolve => {
+              const onCanPlay = () => {
+                console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
+                pod.removeEventListener('canplay', onCanPlay);
+                pod.removeEventListener('error',   onError);
+                resolve();
+              };
+              const onError = () => {
+                pod.removeEventListener('canplay', onCanPlay);
+                pod.removeEventListener('error',   onError);
+                resolve(); // resolve not reject — let play() surface the error
+              };
+              pod.addEventListener('canplay', onCanPlay);
+              pod.addEventListener('error',   onError);
+              setTimeout(resolve, 5000); // 5s fallback — don't block forever
+            });
 
             // Seek to saved position if this episode was partially played before.
             // The canplay wait above means loadedmetadata has already fired —
