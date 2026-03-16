@@ -2,7 +2,7 @@
 
 > Paste this file at the start of any new chat session to restore full context.
 > Never commit API keys here — use `.env.local` locally or Netlify Dashboard.
-> When returning after a break: check the "Next Steps" section first!
+> When returning after a break: check the Roadmap section to see what's next.
 
 ---
 
@@ -16,39 +16,6 @@
 
 **Live:** https://personal-radio.netlify.app  
 **GitHub:** https://github.com/hiyahlowes/personal-radio
-
----
-
-## ⚡ NEXT STEPS (start here after a break)
-
-### Immediate fixes still to test/verify:
-1. **Resume Bug** — `isResuming=false` even when episode is 70% heard. 
-   Episode IDs from RSS feed may not match IDs saved in `pr:podcast-position` 
-   and `pr:listener-memory`. Need to verify ID consistency.
-
-2. **Audio Tags spoken aloud** — `[pause]`, `[rushed]`, `[drawn out]` don't 
-   work with `eleven_turbo_v2_5` and get spoken as text. Remove these from 
-   moderator system prompt. Keep only: `[laughs]`, `[excited]`, `[sighs]`, 
-   `[whispers]`, `[slow]`.
-
-3. **"Sats/Wavlake" in track intros** — moderator keeps mentioning Wavlake 
-   and sats counts. Add to prompt: "Never mention Wavlake, sats, charts, 
-   or streaming numbers. Talk about the music itself."
-
-4. **Post-podcast dead air** — after podcast stops, music should start 
-   BEFORE moderator speaks, not after. Music at 0.3 → moderator over it → 
-   fade up to 0.9.
-
-5. **Ambient bridge pool** — always fetch 5 ambient tracks from Wavlake 
-   regardless of user genre selection. Store separately from main playlist. 
-   Use as bridge under podcast intro moderation.
-
-6. **Crossfade gap** — brief silence after crossfade handoff. Fade-up should 
-   start immediately when nextAudio is promoted to audio.
-
-### Still to prompt (not yet sent to Claude Code):
-- Moderator personality prompt update (more human, contractions, opinions, 
-  no clichés, max 40 words)
 
 ---
 
@@ -79,7 +46,7 @@
 |---|---|---|
 | `ELEVENLABS_API_KEY` | Server-side (no VITE_) | TTS + STT via Netlify Function |
 | `VITE_ELEVENLABS_VOICE_ID` | Client-side | Default voice ID (English) |
-| `VITE_ELEVENLABS_VOICE_ID_DE` | Client-side | German voice: `87AwpS6yC86wa2WglbsK` |
+| `VITE_ELEVENLABS_VOICE_ID_DE` | Client-side | German voice ID: `87AwpS6yC86wa2WglbsK` |
 | `ANTHROPIC_API_KEY` | Server-side (no VITE_) | Claude Moderator via Netlify Function |
 | `PODCASTINDEX_API_KEY` | Server-side | PodcastIndex API |
 | `PODCASTINDEX_API_SECRET` | Server-side | PodcastIndex API |
@@ -93,12 +60,13 @@
 /.netlify/functions/claude-proxy     → Anthropic API
 /.netlify/functions/podcast-proxy    → PodcastIndex + RSS + ElevenLabs TTS/STT
   actions:
-    action=search     PodcastIndex search
-    action=trending   Trending podcasts
-    action=feed       RSS Feed fetch (CORS-safe)
-    action=text       Transcript fetch (CORS-safe)
-    action=tts        ElevenLabs Text-to-Speech (server-side key)
-    action=stt        ElevenLabs Scribe v2 Speech-to-Text
+    action=search        PodcastIndex search
+    action=trending      Trending podcasts
+    action=feed          RSS Feed fetch (CORS-safe)
+    action=text          Transcript fetch (CORS-safe)
+    action=tts           ElevenLabs Text-to-Speech (server-side key)
+    action=stt           ElevenLabs Scribe v2 Speech-to-Text
+    action=audioresolver Follows audio URL redirects, returns final CDN URL
 ```
 
 ---
@@ -117,7 +85,7 @@ src/
 │   ├── useListenerMemory.ts      # localStorage memory (songs, podcasts, topics)
 │   └── useZaps.ts                # Bitcoin Lightning / Nostr Zaps
 ├── pages/
-│   ├── RadioPage.tsx             # Main page, loop logic, jingles, play/pause
+│   ├── RadioPage.tsx             # Main page, loop logic, jingles, transitions
 │   ├── SettingsPage.tsx          # Settings incl. Song Graveyard
 │   └── SetupPage.tsx             # Onboarding (language → name → genres → podcasts)
 netlify/functions/
@@ -125,7 +93,11 @@ netlify/functions/
 └── podcast-proxy.mjs
 public/
 ├── podcast-intro.mp3             # Jingle: plays AFTER moderator intro, BEFORE podcast
-└── studio-return.mp3             # Jingle: plays IMMEDIATELY when podcast stops
+├── studio-return.mp3             # Jingle: plays IMMEDIATELY when podcast stops
+├── manifest.webmanifest          # PWA manifest (valid JSON, fixes syntax error)
+├── sw.js                         # Service worker for PWA offline support
+├── icon-192.png                  # PWA icon (purple placeholder, replace later)
+└── icon-512.png                  # PWA icon (purple placeholder, replace later)
 ```
 
 ---
@@ -140,8 +112,8 @@ public/
 - Dislike/ban (✕) → Song Graveyard, never plays again
 - Song Graveyard in Settings → songs can be resurrected
 - Crossfade between songs
-- Duck effect: music lowers to 0.08 when moderator speaks
-- Ambient bridge pool: always available for podcast transitions (separate from main playlist)
+- Duck effect: music pauses on iOS (volume read-only), lowers to 0.08 on desktop
+- Ambient bridge pool: always fetched in background for podcast transitions
 
 ### Podcasts
 - PodcastIndex RSS feeds (CORS-safe via proxy)
@@ -152,18 +124,18 @@ public/
 - Drag-to-reorder podcast queue
 - Resume position saved (pr:podcast-position)
 - "X:XX left" display in podcast list
-- Manual play/pause + +30s / -30s skip buttons (for skipping ads)
-- Resume-aware intro: "Wir kommen zurück zu..." when episode already partially heard
+- Manual play/pause + +30s / -30s skip buttons
+- Audio URL resolver: follows redirects server-side (fixes iOS CORS)
 
 ### AI Moderator
 - Claude Haiku generates ALL moderation text — NO hardcoded strings
-- Language-aware fallbacks in all 3 languages (en/de/fr)
+- Language-aware fallbacks in all 3 languages (de/en/fr)
 - ElevenLabs TTS via server-side proxy
-- Language-aware voice selection: German uses voice `87AwpS6yC86wa2WglbsK`
+- Language-aware voice: Deutsch → 87AwpS6yC86wa2WglbsK, others → default
 - Languages: 🇩🇪 Deutsch / 🇬🇧 English / 🇫🇷 Français (stored: `pr:language`)
 - CRITICAL language rule: always responds in selected language
-- Expressive tags (turbo-compatible only): `[laughs]`, `[excited]`, `[sighs]`, `[whispers]`, `[slow]`
-- Voice settings: stability=0.40, similarity_boost=0.75, style=0.15
+- Expressive tags (turbo_v2_5 compatible only): `[laughs]`, `[excited]`, `[sighs]`, `[whispers]`, `[slow]`
+- NOTE: `[pause]`, `[rushed]`, `[drawn out]` are v3-only — do NOT use with turbo!
 
 ### Podcast Interruption (THE Killer Feature)
 
@@ -187,9 +159,15 @@ public/
 - Tier 3: Episode description only (fallback)
 
 ### Transitions & Jingles
-- Podcast intro: ambient bridge song (low vol) → moderator speaks → song fades out → jingle → podcast
-- Studio return: podcast stops → jingle → moderator commentary → next song starts → moderator over it
-- Music always playing — no dead air at any point
+- Ambient bridge: quiet ambient song plays under podcast intro moderation
+- `podcast-intro.mp3`: plays AFTER moderator intro, BEFORE podcast
+- `studio-return.mp3`: plays IMMEDIATELY when podcast stops, BEFORE commentary
+- Post-podcast: next song starts BEFORE commentary (radio always playing)
+
+### Resume-Aware Introductions
+- If episode already heard (lastPosition > 60s): "Wir kommen zurück zu..."
+- References last known topic from episodeKnowledge
+- Max 25 words, never re-introduces as new
 
 ### Listener Memory (localStorage)
 Key: `pr:listener-memory:{listenerName}`
@@ -204,14 +182,38 @@ Key: `pr:episode-knowledge:{episodeId}`
 - Next session: moderator already knows the episode
 - Prevents repeating the same observations
 
+### PWA (Progressive Web App)
+- Installable on iOS and Android homescreen
+- Works offline (app shell cached via service worker)
+- iOS: Safari → Share → "Add to Home Screen"
+- theme-color: #7c3aed (purple)
+- Icons: purple placeholders — replace with final art before public launch
+
+### iOS Audio (current state)
+- Music plays ✅ (via direct HTMLAudioElement, no GainNode)
+- Moderator TTS plays ✅
+- Podcast plays ✅ (audio URL resolved via proxy to bypass CORS redirects)
+- Duck effect: music PAUSES when moderator speaks (not volume fade) ⚠️
+- Real ducking requires Howler.js migration (planned)
+
 ---
 
 ## 🗺️ Roadmap
 
 ### Phase 1 — Polish before first public demo (CURRENT)
-- [ ] Fix remaining bugs (see NEXT STEPS above)
-- [ ] Moderator personality prompt: more human, contractions, opinions, max 40 words, no clichés
-- [ ] Fix: Manifest.webmanifest syntax error (cosmetic)
+
+**Next up: Howler.js Migration**
+- [ ] Migrate music playback from HTMLAudioElement to Howler.js
+      → Fixes iOS duck effect (real volume fade instead of pause/resume)
+      → Works on iOS, Android, Desktop with same code
+      → Git tag v1.0-pre-howler already set as restore point
+      → Keep podcast element as HTMLAudioElement (separate concern)
+      → Keep ElevenLabs TTS as HTMLAudioElement (blob URLs, separate)
+      → Keep MediaRecorder/Scribe unchanged
+
+**Before launch:**
+- [ ] Replace purple placeholder icons with real PR artwork
+- [ ] Fix: language occasionally switches to English for song intros
 - [ ] Record 60-second demo video showing the podcast interruption feature
       → Must capture the "holy shit" moment: moderator commenting on what was just said
 
@@ -234,21 +236,25 @@ Key: `pr:episode-knowledge:{episodeId}`
 - [ ] Consider a new, cooler name for the project
 - [ ] Write a good README for GitHub
 - [ ] Publish on Nostr — tag podcast hosts whose shows work especially well
-      → These hosts may repost → reach their Bitcoin/Podcast2.0 audience
       → Goal: GitHub stars, community feedback, word of mouth
-- [ ] Curated list: which podcasts give the best PR experience (have transcasts + chapters)
+- [ ] Curated list: which podcasts give the best PR experience (transcripts + chapters)
 
 ### Phase 5 — OpenSats Grant Application
 - [ ] PR qualifies: open source + Bitcoin/Lightning + Podcast 2.0 + V4V + Nostr
 - [ ] Document what makes PR unique vs existing podcast players
-- [ ] Build out grant roadmap: what would funding enable?
 - [ ] Apply at https://opensats.org
 
 ### Phase 6 — Scale & Service
 - [ ] Outreach Bot: contact musicians/labels to join Wavlake / Lightning
 - [ ] Wavlake playlist export (liked songs)
-- [ ] Mobile app (PWA first, then native)
+- [ ] Native mobile app (after funding)
 - [ ] Multi-user / social features via Nostr
+
+---
+
+## Git Tags (Restore Points)
+- `v1.0-pre-pwa` — stable desktop, before PWA setup
+- `v1.0-pre-howler` — PWA working, before Howler.js migration
 
 ---
 
@@ -259,9 +265,11 @@ Key: `pr:episode-knowledge:{episodeId}`
 | TTS | `eleven_turbo_v2_5` | 0.5 credits/character |
 | STT | `scribe_v2` | billed per minute |
 
+**Important:** Only use these expressive tags with turbo model:
+`[laughs]`, `[excited]`, `[sighs]`, `[whispers]`, `[slow]`
+DO NOT use: `[pause]`, `[rushed]`, `[drawn out]` — v3-only, get spoken aloud!
+
 → Each user needs their own ElevenLabs API key (or streams sats via NWC).
-→ ElevenLabs key needs: Text to Speech (Access) + Speech to Text (Access) + Voices (Read)
-→ See https://elevenlabs.io/pricing for current plan details.
 
 ---
 
@@ -269,8 +277,8 @@ Key: `pr:episode-knowledge:{episodeId}`
 
 ```
 1. Paste this file as context
-2. Read "NEXT STEPS" section at the top
-3. Check current state: https://github.com/hiyahlowes/personal-radio
+2. Check current state: https://github.com/hiyahlowes/personal-radio
+3. Look at the Roadmap — which Phase are we in? What's next?
 4. Always: git pull --rebase before push, NEVER --force
 5. After push: manually publish on Netlify
 6. Test: check Console for errors, moderator speaking?
@@ -278,5 +286,5 @@ Key: `pr:episode-knowledge:{episodeId}`
 
 ---
 
-*Last updated: March 15, 2026*
-*Current phase: Phase 1 — Polish before first public demo*
+*Last updated: March 2026*
+*Current phase: Phase 1 — Howler.js migration next*

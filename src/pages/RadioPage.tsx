@@ -603,31 +603,43 @@ export function RadioPage() {
     cancelRampRef.current?.();
 
     if (moderator.isSpeaking) {
-      // audio.volume is read-only on iOS Safari (PWA and browser).
-      // Wavlake CDN sends no CORS headers so GainNode is not an option either.
-      // On iOS we pause the music instead of ducking; on desktop we duck to
-      // DUCK_LEVEL so there is still background music under TTS.
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-      if (isIOS) {
-        console.log('[Duck] iOS — pausing music during TTS (volume read-only, no CORS)');
-        if (!audio.paused) audio.pause();
+      const howl = howlRef.current;
+      if (howl) {
+        console.log(`[Duck] Howler fade: ${howl.volume().toFixed(2)} → ${DUCK_LEVEL} (instant)`);
+        howl.fade(howl.volume() as number, DUCK_LEVEL, 0);
       } else {
-        console.log(`[Duck] duckDown() → ${DUCK_LEVEL}`);
-        audio.volume = DUCK_LEVEL;
+        // audio.volume is read-only on iOS Safari (PWA and browser).
+        // Wavlake CDN sends no CORS headers so GainNode is not an option either.
+        // On iOS we pause the music instead of ducking; on desktop we duck to
+        // DUCK_LEVEL so there is still background music under TTS.
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        if (isIOS) {
+          console.log('[Duck] iOS — pausing music during TTS (volume read-only, no CORS)');
+          if (!audio.paused) audio.pause();
+        } else {
+          console.log(`[Duck] duckDown() → ${DUCK_LEVEL}`);
+          audio.volume = DUCK_LEVEL;
+        }
       }
       cancelRampRef.current = null;
     } else {
       const target = mutedRef.current ? 0 : volumeRef.current;
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-      if (isIOS) {
-        // Resume music after TTS — play() is async but this fires after speech
-        // so the gesture token is stale; iOS should still allow it because the
-        // element was already unlocked in handlePlay.
-        console.log('[Duck] iOS — resuming music after TTS');
-        audio.play().catch(e => console.warn('[Duck] iOS resume failed:', e));
+      const howl = howlRef.current;
+      if (howl) {
+        console.log(`[Duck] Howler fade: ${DUCK_LEVEL} → ${target} over 2000ms`);
+        howl.fade(DUCK_LEVEL, target, 2000);
       } else {
-        console.log(`[Duck] fadeBack() → ${target} over 2000ms`);
-        cancelRampRef.current = rampVolume(audio, target, 2000);
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        if (isIOS) {
+          // Resume music after TTS — play() is async but this fires after speech
+          // so the gesture token is stale; iOS should still allow it because the
+          // element was already unlocked in handlePlay.
+          console.log('[Duck] iOS — resuming music after TTS');
+          audio.play().catch(e => console.warn('[Duck] iOS resume failed:', e));
+        } else {
+          console.log(`[Duck] fadeBack() → ${target} over 2000ms`);
+          cancelRampRef.current = rampVolume(audio, target, 2000);
+        }
       }
     }
     return () => cancelRampRef.current?.();
@@ -803,16 +815,23 @@ export function RadioPage() {
           });
         }
 
-        try {
-          await audio.play();
-          console.log('[Loop] audio.play() resolved at duck level');
-        } catch (e) {
-          console.error('[Loop] audio.play() failed — skipping to next track:', e);
-          // Skip to next track rather than freezing the loop.
-          // (Autoplay-blocked errors will be caught by the user pressing play again.)
-          idxRef.current = (currentIdx + 1) % tracks.length;
-          await sleep(200);
-          continue;
+        const howl = howlRef.current;
+        if (howl) {
+          howl.volume(DUCK_LEVEL);
+          howl.play();
+          console.log(`[Howler] playing: ${t.name}`);
+        } else {
+          try {
+            await audio.play();
+            console.log('[Loop] audio.play() resolved at duck level');
+          } catch (e) {
+            console.error('[Loop] audio.play() failed — skipping to next track:', e);
+            // Skip to next track rather than freezing the loop.
+            // (Autoplay-blocked errors will be caught by the user pressing play again.)
+            idxRef.current = (currentIdx + 1) % tracks.length;
+            await sleep(200);
+            continue;
+          }
         }
       }
 
@@ -846,7 +865,13 @@ export function RadioPage() {
         console.log('[Loop] no speech — fading up now');
         cancelRampRef.current?.();
         const target = mutedRef.current ? 0 : volumeRef.current;
-        cancelRampRef.current = rampVolume(audio, target, 1000);
+        const howlNoSpeech = howlRef.current;
+        if (howlNoSpeech) {
+          console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
+          howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
+        } else {
+          cancelRampRef.current = rampVolume(audio, target, 1000);
+        }
       }
 
       if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
