@@ -493,6 +493,9 @@ export function RadioPage() {
     const onMusicTime  = () => {
       // If pod is the active element, let its listener take precedence
       if (nowPlayingRef.current?.kind === 'podcast') return;
+      // If Howler is active, its 250ms poll is the sole source of truth for
+      // position — skip audioRef.currentTime to prevent jitter from two sources.
+      if (howlRef.current) return;
       setCT(audio.currentTime);
     };
     const onMusicDur   = () => {
@@ -700,7 +703,11 @@ export function RadioPage() {
         if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
       },
       onend: () => {
+        console.log('[Howler] onend — track finished naturally');
         if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
+        // The loop awaits 'ended' on audioRef; Howler bypasses that element,
+        // so dispatch the event manually to unblock the advancement promise.
+        audioRef.current?.dispatchEvent(new Event('ended'));
       },
     });
     console.log('[Howler] initialized (not playing)');
