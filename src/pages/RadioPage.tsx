@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Howl } from 'howler';
+import { Howl, Howler } from 'howler';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -75,8 +75,12 @@ const _warmIOSAudio = () => {
   source.buffer = buffer;
   source.connect(ctx.destination);
   source.start(0);
+  // Also resume Howler's shared AudioContext if it already exists
+  // (created lazily by the first Howl instance — may be undefined here).
+  (Howler as any).ctx?.resume();
   document.removeEventListener('touchend', _warmIOSAudio);
   console.log('[iOS] AudioContext warmed on first touch');
+  console.log('[Howler] iOS unlock triggered');
 };
 document.addEventListener('touchend', _warmIOSAudio);
 
@@ -335,6 +339,7 @@ export function RadioPage() {
   const resumeMusicRef = useRef(false);
   const tracksRef          = useRef<WavlakeTrack[]>([]);
   const ambientBridgeRef   = useRef<WavlakeTrack[]>([]); // separate bridge pool, never in playlist
+  const bridgeHowlRef      = useRef<Howl | null>(null);
   const silentCountRef   = useRef(0);
   const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
@@ -683,6 +688,12 @@ export function RadioPage() {
       volume: 0.9,
       onload:      () => console.log('[Howler] loaded:', url),
       onloaderror: (_id: number, err: unknown) => console.warn('[Howler] load error:', err),
+      onplayerror: (_id: number, err: unknown) => {
+        // iOS may block play() until the AudioContext is resumed.
+        // Howler's built-in unlock mechanism handles this — retry on unlock.
+        console.log('[Howler] play error — trying unlock:', err);
+        howlRef.current?.once('unlock', () => howlRef.current?.play());
+      },
       onplay: () => {
         setPlaying(true);
         const dur = howlRef.current?.duration() ?? 0;
@@ -1170,27 +1181,33 @@ export function RadioPage() {
             ? bridgePool[Math.floor(Math.random() * bridgePool.length)]
             : null;
 
-          let bridgeAudio: HTMLAudioElement | null = null;
+          bridgeHowlRef.current?.stop();
+          bridgeHowlRef.current = null;
+
           if (bridgeTrack) {
-            bridgeAudio          = new Audio(bridgeTrack.liveUrl);
-            bridgeAudio.preload  = 'auto';
-            bridgeAudio.volume   = 0;
-            bridgeAudio.load();
-            // Wait up to 3 s for enough data, then start regardless
+            // Use Howler for the bridge — .stop() releases the iOS audio session
+            // cleanly; .pause() keeps it loaded and can block podcast playback.
             await new Promise<void>(resolve => {
-              bridgeAudio!.addEventListener('canplay', () => resolve(), { once: true });
-              bridgeAudio!.addEventListener('error',   () => resolve(), { once: true });
-              setTimeout(resolve, 3000);
+              const bh = new Howl({
+                src:   [bridgeTrack.liveUrl],
+                html5: true,
+                volume: 0,
+                onload:  () => resolve(),
+                onerror: () => resolve(),
+              });
+              bridgeHowlRef.current = bh;
+              setTimeout(resolve, 3000); // don't block forever
             });
-            bridgeAudio.volume = 0.3;
-            bridgeAudio.play().catch(() => {});
+            bridgeHowlRef.current?.volume(0.3);
+            bridgeHowlRef.current?.play();
             console.log(`[Bridge] using ambient track: ${bridgeTrack.name} by ${bridgeTrack.artist}`);
           } else {
             console.log('[Loop] podcast bridge — no ambient tracks available, skipping');
           }
 
           if (!runningRef.current) {
-            bridgeAudio?.pause();
+            bridgeHowlRef.current?.stop();
+            bridgeHowlRef.current = null;
             podcastTransitionRef.current = false;
             break;
           }
@@ -1212,16 +1229,23 @@ export function RadioPage() {
           );
 
           if (!runningRef.current) {
-            bridgeAudio?.pause();
+            bridgeHowlRef.current?.stop();
+            bridgeHowlRef.current = null;
             podcastTransitionRef.current = false;
             break;
           }
 
           // 3. Fade bridge to 0 (await) — jingle must play into silence.
-          if (bridgeAudio) {
-            await new Promise<void>(res => { rampVolume(bridgeAudio!, 0, 3000, res); });
-            bridgeAudio.pause();
-            console.log('[Loop] podcast bridge faded out');
+          if (bridgeHowlRef.current) {
+            const bh = bridgeHowlRef.current;
+            await new Promise<void>(res => {
+              bh.once('fade', res);
+              bh.fade(bh.volume() as number, 0, 3000);
+              setTimeout(res, 3500); // fallback
+            });
+            bh.stop(); // .stop() releases iOS audio session; .pause() does not
+            bridgeHowlRef.current = null;
+            console.log('[Bridge] ambient Howl stopped');
           }
 
           // 4. Jingle plays after full silence — THEN podcast starts.
