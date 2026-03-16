@@ -339,7 +339,8 @@ export function RadioPage() {
   // Timestamp of last podcast position save (throttle to every 5 s).
   const lastPodSaveRef          = useRef(0);
   // Set true after a crossfade completes so the loop top skips re-loading audio
-  const crossfadeActiveRef = useRef(false);
+  const crossfadeActiveRef  = useRef(false);
+  const crossfadeTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Set true while the podcast transition ramp sequence is running so the generic
   // duck effect does not interfere (we own the volume during that window).
   const podcastTransitionRef = useRef(false);
@@ -976,7 +977,8 @@ export function RadioPage() {
             currentHowl.fade(currentVol, 0, fadeDurationMs);
             nextHowl.play();
             nextHowl.fade(0, targetVol, fadeDurationMs);
-            setTimeout(() => {
+            crossfadeTimerRef.current = setTimeout(() => {
+              crossfadeTimerRef.current = null;
               if (loopGenRef.current === myGen) {
                 currentHowl.unload();
                 howlRef.current     = nextHowl;
@@ -1180,7 +1182,22 @@ export function RadioPage() {
           // ── Transition: ambient bridge → moderator → fade → jingle → podcast
           podcastTransitionRef.current = true;
 
-          // 1. Stop current music; find an ambient bridge track.
+          // Cancel any in-flight Howler crossfade — the podcast slot takes over.
+          if (crossfadeTimerRef.current !== null) {
+            clearTimeout(crossfadeTimerRef.current);
+            crossfadeTimerRef.current = null;
+            console.log('[Howler] crossfade cancelled — podcast slot');
+          }
+
+          // 1. Stop current music (and preloaded next track); find ambient bridge.
+          if (howlRef.current) {
+            howlRef.current.stop();
+            console.log('[Howler] stopped for podcast transition');
+          }
+          if (nextHowlRef.current) {
+            nextHowlRef.current.stop();
+            nextHowlRef.current = null;
+          }
           audio.pause();
           // Prefer the dedicated bridge pool (always ambient, never in playlist).
           // Fall back to ambient tracks in the main queue if the pool is empty.
