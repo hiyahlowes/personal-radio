@@ -21,4 +21,12 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });
+
+  // When the SW activates a new version it sends RELOAD so the client
+  // picks up the new bundle without the user having to restart the PWA.
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data?.type === 'RELOAD') {
+      window.location.reload();
+    }
+  });
 }
