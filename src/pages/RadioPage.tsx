@@ -624,8 +624,9 @@ export function RadioPage() {
     if (moderator.isSpeaking) {
       const howl = howlRef.current;
       if (howl) {
-        console.log(`[Duck] Howler fade: ${howl.volume().toFixed(2)} → ${DUCK_LEVEL} (instant)`);
-        howl.fade(howl.volume() as number, DUCK_LEVEL, 0);
+        const curVol = howl.volume() as number;
+        console.log(`[Duck] Howler duckDown: current=${curVol.toFixed(2)} → ${DUCK_LEVEL} over 50ms`);
+        howl.fade(curVol, DUCK_LEVEL, 50); // 0ms is ignored on iOS — use 50ms minimum
       } else {
         // audio.volume is read-only on iOS Safari (PWA and browser).
         // Wavlake CDN sends no CORS headers so GainNode is not an option either.
@@ -1236,6 +1237,7 @@ export function RadioPage() {
           await moderatorRef.current.speakPodcastTransition(
             episode.title, episode.feedTitle, episode.description, episode.author, resumeCtx,
           );
+          console.log('[Loop] podcast intro done');
 
           if (!runningRef.current) {
             bridgeHowlRef.current?.stop();
@@ -1341,10 +1343,11 @@ export function RadioPage() {
             setNowPlaying({ kind: 'podcast', episode });
 
             let podStarted = false;
+            console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
             try {
               await pod.play();
               podStarted = true;
-              console.log('[Loop] podcast playing via dedicated element');
+              console.log('[Loop] podcast play() resolved — podcast playing');
             } catch (e) {
               console.error('[Loop] podcast play failed — resetting state:', e);
               // Reset everything so the user can press Play to retry.
