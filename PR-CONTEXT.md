@@ -30,6 +30,7 @@
 | Speech-to-Text | ElevenLabs Scribe v2 (natural cut points) |
 | Music | Wavlake API (Bitcoin Lightning Top Charts) |
 | Podcasts | PodcastIndex API + RSS Feeds via Fountain.fm |
+| Music Playback | **Howler.js v2.2.4** (replaces HTMLAudioElement for music) |
 | Payments | Bitcoin Lightning / Value4Value (Nostr/Zaps via useZaps.ts) |
 
 ---
@@ -38,7 +39,8 @@
 
 - **Auto-Deploy: DISABLED** — always publish manually after push!
 - Deploys → Trigger deploy → Deploy project → "Publish deploy"
-- Always `git pull --rebase` before push, NEVER `--force`
+- Always: `git add -A && git commit -m "..." && git pull --rebase && git push`
+- NEVER use `--force`
 
 ### Netlify Environment Variables
 
@@ -82,179 +84,133 @@ src/
 │   ├── usePodcastIndex.ts        # PodcastIndex API, fetchSuggestedPodcasts
 │   ├── useWavlakeTracks.ts       # Wavlake API, weighted shuffle, ambient pool
 │   ├── useElevenLabs.ts          # TTS via Netlify Proxy, language-aware voice
+│   │                               ttsAudio singleton — unlocked lazily inside
+│   │                               unlockTTSAudio() called from touchend handler
 │   ├── useListenerMemory.ts      # localStorage memory (songs, podcasts, topics)
 │   └── useZaps.ts                # Bitcoin Lightning / Nostr Zaps
 ├── pages/
 │   ├── RadioPage.tsx             # Main page, loop logic, jingles, transitions
+│   │                               howlRef + nextHowlRef = Howler music playback
+│   │                               bridgeHowlRef = ambient bridge Howl
+│   │                               _introHowl + _returnHowl = jingle Howls
+│   │                               crossfadeTimerRef = cancelled on podcast slot
 │   ├── SettingsPage.tsx          # Settings incl. Song Graveyard
 │   └── SetupPage.tsx             # Onboarding (language → name → genres → podcasts)
 netlify/functions/
 ├── claude-proxy.mjs
 └── podcast-proxy.mjs
 public/
-├── podcast-intro.mp3             # Jingle: plays AFTER moderator intro, BEFORE podcast
-├── studio-return.mp3             # Jingle: plays IMMEDIATELY when podcast stops
-├── manifest.webmanifest          # PWA manifest (valid JSON, fixes syntax error)
-├── sw.js                         # Service worker for PWA offline support
-├── icon-192.png                  # PWA icon (purple placeholder, replace later)
-└── icon-512.png                  # PWA icon (purple placeholder, replace later)
+├── podcast-intro.mp3             # Jingle: AFTER moderator intro, BEFORE podcast
+├── studio-return.mp3             # Jingle: IMMEDIATELY when podcast stops
+├── manifest.webmanifest          # PWA manifest (valid JSON)
+├── sw.js                         # Service worker — network-first for HTML,
+│                                   stale-while-revalidate for assets
+│                                   cache key: pr-shell-v2
+│                                   on activate: deletes old caches + broadcasts RELOAD
+├── icon-192.png                  # PWA icon (purple placeholder)
+└── icon-512.png                  # PWA icon (purple placeholder)
 ```
 
 ---
 
 ## Features (Live)
 
-### Music
+### Music (via Howler.js)
 - Wavlake Top Charts (Bitcoin Lightning music, V4V)
 - Auto-shuffle on load (Fisher-Yates after full API load)
-- Weighted shuffle: liked songs 2x more frequent, consecutive duplicate guard
-- Like button (♥) → weighted playback
-- Dislike/ban (✕) → Song Graveyard, never plays again
-- Song Graveyard in Settings → songs can be resurrected
-- Crossfade between songs
-- Duck effect: music pauses on iOS (volume read-only), lowers to 0.08 on desktop
-- Ambient bridge pool: always fetched in background for podcast transitions
+- Weighted shuffle: liked songs 2x, consecutive duplicate guard
+- Like (♥) / Dislike (✕) → Song Graveyard in Settings
+- Crossfade between songs via Howler fade()
+- Duck effect: howl.fade(vol, 0.08, 300ms) — works iOS + Desktop
+- Ambient bridge: Howler instance, ducked during moderator speech
 
 ### Podcasts
 - PodcastIndex RSS feeds (CORS-safe via proxy)
 - Round-robin queue (5 episodes per feed, 15 total)
-- Green checkmark ✓ for episodes with transcripts ("Best Experience")
-- Transcript episodes prioritized at top of queue
-- Settings show curated transcript-ready shows
-- Drag-to-reorder podcast queue
+- Green checkmark ✓ for transcript-ready episodes
+- Drag-to-reorder queue
 - Resume position saved (pr:podcast-position)
-- "X:XX left" display in podcast list
-- Manual play/pause + +30s / -30s skip buttons
-- Audio URL resolver: follows redirects server-side (fixes iOS CORS)
+- Manual play/pause + ±30s skip
+- Audio URL resolver: follows redirects server-side
+- canplay wait before pod.play() on iOS
 
 ### AI Moderator
-- Claude Haiku generates ALL moderation text — NO hardcoded strings
-- Language-aware fallbacks in all 3 languages (de/en/fr)
+- Claude Haiku generates ALL text — NO hardcoded strings
+- Language-aware: 🇩🇪 Deutsch / 🇬🇧 English / 🇫🇷 Français
 - ElevenLabs TTS via server-side proxy
-- Language-aware voice: Deutsch → 87AwpS6yC86wa2WglbsK, others → default
-- Languages: 🇩🇪 Deutsch / 🇬🇧 English / 🇫🇷 Français (stored: `pr:language`)
-- CRITICAL language rule: always responds in selected language
-- Expressive tags (turbo_v2_5 compatible only): `[laughs]`, `[excited]`, `[sighs]`, `[whispers]`, `[slow]`
-- NOTE: `[pause]`, `[rushed]`, `[drawn out]` are v3-only — do NOT use with turbo!
+- Expressive tags (turbo_v2_5 ONLY): `[laughs]` `[excited]` `[sighs]` `[whispers]` `[slow]`
+- ⚠️ NEVER use: `[pause]` `[rushed]` `[drawn out]` — v3-only, spoken aloud on turbo!
 
 ### Podcast Interruption (THE Killer Feature)
-
-**Strategy A: Episode has chapters + transcript**
-1. 30s before chapter end: `findNaturalCutPoint()` reads transcript
-2. Finds sentence ending (. ? !) + gap ≥ 1.5s to next entry
-3. Interrupts at natural speech pause, never mid-sentence
-4. Context Tier 1: transcript window (±2min around currentTime) ~400 tokens
-
-**Strategy B: No chapters (Scribe Lookahead)**
-1. Random target: 8-15 minutes into episode
-2. At target-90s: MediaRecorder starts (lookahead phase)
-3. At target-30s: 60s audio blob sent to ElevenLabs Scribe v2
-4. Scribe returns word-level timestamps → largest pause in 20-40s window
-5. Scribe has ~25s buffer before target is reached
-6. Fallback: target+30s if Scribe is too slow
-
-**Context Tiers for moderator commentary:**
-- Tier 1: Transcript window (what was just said) ✅ best
-- Tier 2: Chapter titles + episode description
-- Tier 3: Episode description only (fallback)
+- Strategy A: chapters + transcript → natural cut point at sentence end + pause ≥1.5s
+- Strategy B: no chapters → Scribe lookahead, largest pause in 20-40s window
+- Context Tier 1: transcript window | Tier 2: chapters + description | Tier 3: description
 
 ### Transitions & Jingles
-- Ambient bridge: quiet ambient song plays under podcast intro moderation
-- `podcast-intro.mp3`: plays AFTER moderator intro, BEFORE podcast
-- `studio-return.mp3`: plays IMMEDIATELY when podcast stops, BEFORE commentary
-- Post-podcast: next song starts BEFORE commentary (radio always playing)
+- Ambient bridge: Howler, ducked during moderator (bridgeHowlRef in duck effect)
+- `_introHowl`: podcast-intro.mp3 — AFTER moderator, BEFORE podcast (Howler, iOS-safe)
+- `_returnHowl`: studio-return.mp3 — IMMEDIATELY when podcast stops (Howler, iOS-safe)
+- crossfadeTimerRef: cleared when podcast slot fires
 
-### Resume-Aware Introductions
-- If episode already heard (lastPosition > 60s): "Wir kommen zurück zu..."
-- References last known topic from episodeKnowledge
-- Max 25 words, never re-introduces as new
-
-### Listener Memory (localStorage)
-Key: `pr:listener-memory:{listenerName}`
-- Played/skipped/liked/banned songs
-- Episode history with topics and resume position
-- Recent podcast topics → cross-episode references for moderator
-- Cap: 200 songs, 10 chunks per episode
-
-### Episode Knowledge Memory
-Key: `pr:episode-knowledge:{episodeId}`
-- Saves what moderator has already commented about an episode
-- Next session: moderator already knows the episode
-- Prevents repeating the same observations
-
-### PWA (Progressive Web App)
-- Installable on iOS and Android homescreen
-- Works offline (app shell cached via service worker)
+### PWA
+- Installable on iOS + Android homescreen
+- Network-first SW, auto-reload on new deploy
 - iOS: Safari → Share → "Add to Home Screen"
-- theme-color: #7c3aed (purple)
-- Icons: purple placeholders — replace with final art before public launch
 
 ### iOS Audio (current state)
-- Music plays ✅ (via direct HTMLAudioElement, no GainNode)
-- Moderator TTS plays ✅
-- Podcast plays ✅ (audio URL resolved via proxy to bypass CORS redirects)
-- Duck effect: music PAUSES when moderator speaks (not volume fade) ⚠️
-- Real ducking requires Howler.js migration (planned)
+- Music ✅ | Crossfades ✅ | Moderator TTS ✅
+- Duck effect: howl.fade(vol, 0.08, 300ms) ✅ logs correctly
+- Ambient ducking ✅ | Jingles via Howler ✅
+- Podcast audio: ⚠️ **UNTESTED** — ElevenLabs credits exhausted
+- ⚠️ ElevenLabs Starter (30K/month) depleted March 2026, resets ~April 9
 
 ---
 
 ## 🗺️ Roadmap
 
-### Phase 1 — Polish before first public demo (CURRENT)
+### Phase 1 — Polish before demo (CURRENT)
 
-**Next up: Howler.js Migration**
-- [ ] Migrate music playback from HTMLAudioElement to Howler.js
-      → Fixes iOS duck effect (real volume fade instead of pause/resume)
-      → Works on iOS, Android, Desktop with same code
-      → Git tag v1.0-pre-howler already set as restore point
-      → Keep podcast element as HTMLAudioElement (separate concern)
-      → Keep ElevenLabs TTS as HTMLAudioElement (blob URLs, separate)
-      → Keep MediaRecorder/Scribe unchanged
+**Next up when credits reset:**
+- [ ] Test iOS podcast audio — does it play?
+- [ ] Test duck effect audibly on iOS
+- [ ] Fix: slow initial load — lazy-load podcast chapters (only when episode about to play)
+- [ ] Fix: play button spins too long on first PWA open
+- [ ] Fix: manual podcast start from queue (play button in queue broken)
+- [ ] Replace placeholder icons with real PR artwork
+- [ ] Record 60s demo video of podcast interruption feature
 
-**Before launch:**
-- [ ] Replace purple placeholder icons with real PR artwork
-- [ ] Fix: language occasionally switches to English for song intros
-- [ ] Record 60-second demo video showing the podcast interruption feature
-      → Must capture the "holy shit" moment: moderator commenting on what was just said
+### Phase 2 — User API Keys (URGENT before public launch)
+- [ ] Settings: user enters own ElevenLabs API key
+- [ ] Settings: user enters own Anthropic API key
+- [ ] Keys in localStorage, passed to proxy functions
+- [ ] Prevents depleting shared keys during testing
 
-### Phase 2 — Nostr Integration
-- [ ] npub input in Setup and Settings
-- [ ] Fetch user profile from npub → moderator context (knows the listener)
-- [ ] Fetch user's recent Nostr posts → moderator references them naturally
-- [ ] Podcast Nostr profiles → some podcasts have their own npub, use as context
-- [ ] Migrate listener memory from localStorage → Nostr (NIP-78 app-specific data)
-- [ ] NWC (Nostr Wallet Connect) integration for Lightning payments
+### Phase 3 — Nostr Integration
+- [ ] npub input in Setup/Settings
+- [ ] Fetch user profile from npub → moderator context
+- [ ] Migrate listener memory → Nostr NIP-78
+- [ ] NWC for Lightning payments
 
-### Phase 3 — API Cost Model (Value4Value for infrastructure)
-- [ ] Option A: User enters their own API keys (ElevenLabs + Anthropic) in Settings
-- [ ] Option B: Use shared API → stream sats to cover costs via NWC
-- [ ] Build this in a charming, user-friendly way — explain WHY, make it feel like V4V
-- [ ] Not a paywall — a value exchange
+### Phase 4 — API Cost Model (V4V)
+- [ ] Stream sats via NWC to cover shared API costs
 
-### Phase 4 — First Public Launch on Nostr
-- [ ] Test with a small group of friends first → collect feedback
-- [ ] Consider a new, cooler name for the project
-- [ ] Write a good README for GitHub
-- [ ] Publish on Nostr — tag podcast hosts whose shows work especially well
-      → Goal: GitHub stars, community feedback, word of mouth
-- [ ] Curated list: which podcasts give the best PR experience (transcripts + chapters)
+### Phase 5 — First Public Launch on Nostr
+- [ ] Test with friends first
+- [ ] Consider new project name
+- [ ] Write README
+- [ ] Publish on Nostr, tag podcast hosts
 
-### Phase 5 — OpenSats Grant Application
-- [ ] PR qualifies: open source + Bitcoin/Lightning + Podcast 2.0 + V4V + Nostr
-- [ ] Document what makes PR unique vs existing podcast players
+### Phase 6 — OpenSats Grant
 - [ ] Apply at https://opensats.org
 
-### Phase 6 — Scale & Service
-- [ ] Outreach Bot: contact musicians/labels to join Wavlake / Lightning
-- [ ] Wavlake playlist export (liked songs)
-- [ ] Native mobile app (after funding)
-- [ ] Multi-user / social features via Nostr
+### Phase 7 — Scale
+- [ ] Outreach Bot, Wavlake playlist export, native app
 
 ---
 
 ## Git Tags (Restore Points)
-- `v1.0-pre-pwa` — stable desktop, before PWA setup
-- `v1.0-pre-howler` — PWA working, before Howler.js migration
+- `v1.0-pre-pwa` — stable desktop, before PWA
+- `v1.0-pre-howler` — PWA working, before Howler migration
 
 ---
 
@@ -262,14 +218,41 @@ Key: `pr:episode-knowledge:{episodeId}`
 
 | Service | Model | Cost |
 |---|---|---|
-| TTS | `eleven_turbo_v2_5` | 0.5 credits/character |
-| STT | `scribe_v2` | billed per minute |
+| TTS | `eleven_turbo_v2_5` | 0.5 credits/char |
+| STT | `scribe_v2` | per minute |
 
-**Important:** Only use these expressive tags with turbo model:
-`[laughs]`, `[excited]`, `[sighs]`, `[whispers]`, `[slow]`
-DO NOT use: `[pause]`, `[rushed]`, `[drawn out]` — v3-only, get spoken aloud!
+**⚠️ Credits:** Starter = 30K/month. Depleted March 2026. Resets ~April 9.
+Consider Creator Plan (100K/month, $22) for heavy testing.
 
-→ Each user needs their own ElevenLabs API key (or streams sats via NWC).
+---
+
+## Howler.js Architecture
+
+| Ref | Usage |
+|---|---|
+| `howlRef` | Current music track |
+| `nextHowlRef` | Preloaded next track for crossfade |
+| `bridgeHowlRef` | Ambient bridge during podcast transition |
+| `_introHowl` | podcast-intro.mp3 jingle |
+| `_returnHowl` | studio-return.mp3 jingle |
+| `crossfadeTimerRef` | setTimeout ID — cleared on podcast slot |
+
+**Duck pattern:**
+```js
+// isSpeaking=true:
+if (howl.volume() > 0.2) howl.fade(howl.volume(), 0.08, 300)
+if (bridge?.volume() > 0.2) bridge.fade(bridge.volume(), 0.08, 300)
+
+// isSpeaking=false:
+howl.fade(0.08, 0.9, 2000)
+bridge?.fade(DUCK_LEVEL, BRIDGE_VOLUME, 2000)  // BRIDGE_VOLUME = 0.3
+```
+
+**iOS unlock chain (touchend handler):**
+1. `_audioCtx = new AudioContext()` → warm up
+2. `Howler.ctx?.resume()` → unlock Howler's internal context
+3. `unlockTTSAudio()` → create + unlock ttsAudio singleton lazily
+4. `podAudioRef` pre-unlock via muted play/pause
 
 ---
 
@@ -277,14 +260,15 @@ DO NOT use: `[pause]`, `[rushed]`, `[drawn out]` — v3-only, get spoken aloud!
 
 ```
 1. Paste this file as context
-2. Check current state: https://github.com/hiyahlowes/personal-radio
-3. Look at the Roadmap — which Phase are we in? What's next?
-4. Always: git pull --rebase before push, NEVER --force
-5. After push: manually publish on Netlify
-6. Test: check Console for errors, moderator speaking?
+2. Check: https://github.com/hiyahlowes/personal-radio
+3. Look at Roadmap — what's next?
+4. Always: git add -A && git commit -m "..." && git pull --rebase && git push
+5. NEVER --force
+6. After push: manually publish on Netlify
 ```
 
 ---
 
 *Last updated: March 2026*
-*Current phase: Phase 1 — Howler.js migration next*
+*Current phase: Phase 1 — iOS testing blocked by ElevenLabs credit exhaustion*
+*Next session: test iOS podcast audio once credits reset (~April 9), then lazy-load chapters*
