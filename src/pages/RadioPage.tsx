@@ -14,6 +14,7 @@ import {
 import { useWavlakeTracks, fetchAmbientBridgePool, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, useSingleFeedEpisodes, getStoredFeeds, type PodcastEpisode, type PodcastFeed } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator, type ResumeContext } from '@/hooks/useRadioModerator';
+import { ttsAudio } from '@/hooks/useElevenLabs';
 import { usePodcastSegmenter } from '@/hooks/usePodcastSegmenter';
 import { useGenreSelection } from '@/hooks/useGenreSelection';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
@@ -78,6 +79,14 @@ const _warmIOSAudio = () => {
   // Also resume Howler's shared AudioContext if it already exists
   // (created lazily by the first Howl instance — may be undefined here).
   (Howler as any).ctx?.resume();
+  // Pre-unlock the TTS audio element — iOS blocks play() unless called within
+  // a gesture; the element is reused for all ElevenLabs playback.
+  ttsAudio.muted = true;
+  ttsAudio.play().then(() => {
+    ttsAudio.pause();
+    ttsAudio.muted = false;
+    console.log('[ElevenLabs] iOS pre-unlock complete');
+  }).catch(() => { ttsAudio.muted = false; });
   document.removeEventListener('touchend', _warmIOSAudio);
   console.log('[iOS] AudioContext warmed on first touch');
   console.log('[Howler] iOS unlock triggered');

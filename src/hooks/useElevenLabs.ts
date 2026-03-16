@@ -37,21 +37,21 @@ export interface ElevenLabsOptions {
 }
 
 /** Converts text to speech via ElevenLabs and plays it. Returns a promise that resolves when playback ends. */
+// Module-level singleton — pre-created so RadioPage's _warmIOSAudio can
+// unlock it on first gesture. iOS requires play() to be called within the
+// gesture chain; lazy creation (new Audio() inside speak()) is too late.
+export const ttsAudio = new Audio();
+
 export function useElevenLabs() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const voiceAudioRef = useRef<HTMLAudioElement | null>(null);
+  const voiceAudioRef = useRef<HTMLAudioElement>(ttsAudio);
   const currentBlobUrl = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const getOrCreateAudio = (): HTMLAudioElement => {
-    if (!voiceAudioRef.current) {
-      voiceAudioRef.current = new Audio();
-    }
-    return voiceAudioRef.current;
-  };
+  const getOrCreateAudio = (): HTMLAudioElement => voiceAudioRef.current;
 
   const speak = useCallback(async (text: string, opts: ElevenLabsOptions = {}): Promise<void> => {
     const voiceId = getVoiceId();
@@ -195,7 +195,7 @@ export function useElevenLabs() {
   const stop = useCallback(() => {
     console.log('[ElevenLabs] stop() called');
     abortRef.current?.abort();
-    voiceAudioRef.current?.pause();
+    ttsAudio.pause();
     setIsSpeaking(false);
     setIsGenerating(false);
   }, []);
