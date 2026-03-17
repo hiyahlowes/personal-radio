@@ -894,13 +894,10 @@ export function RadioPage() {
             onloaderror: (_id: number, err: unknown) => console.warn('[Howler] next load error:', err),
           });
           console.log(`[Crossfade] pre-loading next: "${nextTrack.name}"`);
-          // Also pre-load into nextAudio as fallback
-          if (nextAudio) {
-            nextAudio.pause();
-            nextAudio.src    = nextUrl;
-            nextAudio.volume = 0;
-            nextAudio.load();
-          }
+          // nextAudio is no longer pre-loaded — Howler is the sole playback system.
+          // Loading nextAudio in parallel caused the legacy HTMLAudioElement crossfade
+          // to fire on iOS, creating two competing audio sessions.
+          console.log('[Cleanup] old audioRef crossfade disabled');
         }
 
         // Wait for the current track to buffer before playing — prevents dead air.
@@ -1021,35 +1018,9 @@ export function RadioPage() {
                 resolve(true);
               }
             }, fadeDurationMs);
-          } else if (nextAudio) {
-            // ── Legacy HTMLAudioElement crossfade (fallback) ─────────────────
-            console.log(`[Crossfade] starting ${CROSSFADE_SECS}s crossfade → "${nextTrack.name}"`);
-            cancelRampRef.current?.();
-            cancelRampRef.current = rampVolume(audio, 0, fadeDurationMs, () => {
-              audio.pause();
-              if (loopGenRef.current === myGen) {
-                cleanup();
-                console.log('[Crossfade] complete — advancing loop');
-                resolve(true);
-              }
-            });
-            nextAudio.volume = 0;
-            cancelNextRampRef.current?.();
-            const startNextPlayback = () => {
-              nextAudio.play().then(() => {
-                cancelNextRampRef.current = rampVolume(nextAudio, targetVol, fadeDurationMs);
-              }).catch(e => {
-                console.warn('[Crossfade] nextAudio.play() failed:', e);
-                crossfadeStarted = false;
-              });
-            };
-            if (nextAudio.readyState >= 3 /* HAVE_FUTURE_DATA */) {
-              startNextPlayback();
-            } else {
-              console.log('[Crossfade] waiting for canplay on nextAudio…');
-              nextAudio.addEventListener('canplay', startNextPlayback, { once: true });
-            }
-          }
+          // Legacy HTMLAudioElement crossfade removed — Howler is the sole
+          // playback system. If Howler crossfade can't fire (nextHowl not ready),
+          // the track plays to natural end and the loop advances normally.
         };
 
         const onTimeUpdate = () => {
@@ -1124,56 +1095,10 @@ export function RadioPage() {
         idxRef.current = nextIdx;
       }
 
-      // ── Legacy: nextAudio faded in, audio faded out — promote into audio ─────
-      const crossfadeHappened = endedNaturally && !howlerCrossfadeDone && nextAudio != null && !nextAudio.paused && nextTrack != null;
-      if (crossfadeHappened) {
-        console.log('[Crossfade] promoting nextAudio → audio');
-
-        // Load audio in the background while nextAudio KEEPS PLAYING — this
-        // eliminates the gap that occurred when we paused nextAudio first.
-        const targetVol = mutedRef.current ? 0 : volumeRef.current;
-        audio.src    = nextTrack!.liveUrl;
-        audio.volume = targetVol;
-        audio.load();
-        await new Promise<void>(res => {
-          const onCanPlay = () => { audio.removeEventListener('canplay', onCanPlay); res(); };
-          audio.addEventListener('canplay', onCanPlay);
-          setTimeout(res, 500); // fallback — don't block forever
-        });
-
-        // Snap to the live position of nextAudio (it has been playing throughout).
-        // Do NOT gate on isFinite(audio.duration) — duration may not be known yet
-        // when the canplay/500ms fallback fires, which would leave audio playing
-        // from the start instead of the handoff position.
-        const handoffPos = isFinite(nextAudio!.currentTime) ? nextAudio!.currentTime : 0;
-        if (handoffPos > 0) {
-          audio.currentTime = handoffPos;
-        }
-
-        // Switch: pause nextAudio only after audio is ready — minimal gap.
-        // Volume is already at targetVol; no ramp needed.
-        nextAudio!.pause();
-        audio.volume = targetVol; // guard: re-assert in case duck effect fired during load
-        console.log(`[Crossfade] immediate fade-up to ${targetVol.toFixed(2)} on handoff`);
-        if (audio.paused) {
-          try { await audio.play(); } catch { /* ignore */ }
-        }
-
-        // Advance silent counter for the track that just ended (t)
-        recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
-        silentCountRef.current++;
-        markMusicPlayedRef.current(t.id);
-
-        // Signal the loop top that audio is already loaded & playing
-        crossfadeActiveRef.current = true;
-        idxRef.current = nextIdx;
-        // Fall through to podcast check with nextMusicIdx = nextIdx + 1 below
-      }
-
       if (endedNaturally) {
-        // If crossfade happened, counters & idxRef were already updated above.
-        // Only update them here for the normal (non-crossfade) case.
-        if (!crossfadeHappened) {
+        // Howler crossfade already updated counters & idxRef in startCrossfade.
+        // Only update them here for the natural-end (non-crossfade) case.
+        if (!howlerCrossfadeDone) {
           recentTracksRef.current = [...recentTracksRef.current, t].slice(-2);
           silentCountRef.current++;
           markMusicPlayedRef.current(t.id);
