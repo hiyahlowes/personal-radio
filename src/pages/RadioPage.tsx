@@ -1581,10 +1581,17 @@ export function RadioPage() {
     // remembers the unlock for subsequent play() calls on the same element.
     const pod = podAudioRef.current;
     if (pod && isIOS) {
-      pod.muted = false;
-      pod.src = pod.src || '';
-      pod.play().catch(() => {});
-      console.log('[iOS] podcast element pre-unlocked');
+      // Use a valid silent audio blob so iOS doesn't fire a media error
+      // (empty src causes MEDIA_ELEMENT_ERROR which can corrupt the audio session).
+      const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+      pod.src   = SILENT;
+      pod.muted = true;
+      pod.play().catch(() => {}).finally(() => {
+        pod.pause();
+        pod.muted = false;
+        pod.src   = '';
+      });
+      console.log('[iOS] podcast pre-unlock with silent blob');
     }
 
     // If the loop is already running (e.g. we navigated away and came back),
