@@ -1409,12 +1409,21 @@ export function RadioPage() {
             let podStarted = false;
             console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
             try {
+              pod.volume = 1.0; // assert full volume before play — iOS may reset to 0
               await pod.play();
               podStarted = true;
               console.log(`[Podcast] volume after play: ${pod.volume}`);
-              pod.volume = 1.0; // assert full volume — iOS may reset to 0
+              // iOS sometimes routes a freshly-started HTMLAudioElement to an
+              // inactive audio session, causing silent playback with no error.
+              // Pause + re-play immediately forces iOS to re-attach the element
+              // to the active foreground session.
+              if (isIOS) {
+                pod.pause();
+                pod.volume = 1.0;
+                await pod.play();
+                console.log('[Podcast] iOS session re-attach attempted');
+              }
               (Howler as any).ctx?.resume(); // keep shared AudioContext active
-              console.log('[Podcast] iOS audio session resumed');
               console.log('[Loop] podcast play() resolved — podcast playing');
             } catch (e) {
               console.error('[Loop] podcast play failed — resetting state:', e);
