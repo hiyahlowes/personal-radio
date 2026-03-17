@@ -122,6 +122,8 @@ const _introHowl  = new Howl({ src: ['/podcast-intro.mp3'],  html5: true, preloa
 const _returnHowl = new Howl({ src: ['/studio-return.mp3'],  html5: true, preload: true, volume: 1.0 });
 console.log('[Preload] jingles loaded via Howler');
 
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+
 /**
  * Play a jingle at full volume and resolve when it ends.
  * Uses Howl instances (iOS-safe). Errors are swallowed so a missing
@@ -621,21 +623,25 @@ export function RadioPage() {
     if (moderator.isSpeaking) {
       const howl = howlRef.current;
       if (howl) {
-        const curVol = musicVolumeRef.current;
-        console.log(`[Duck] musicVolumeRef: ${curVol.toFixed(2)} before duck`);
-        if (curVol > 0.2) {
-          console.log(`[Duck] Howler duckDown: ${curVol.toFixed(2)} → ${DUCK_LEVEL} over 300ms`);
-          howl.fade(curVol, DUCK_LEVEL, 300);
-          musicVolumeRef.current = DUCK_LEVEL;
+        if (isIOS) {
+          howl.pause();
+          console.log('[Duck] iOS — pausing music');
         } else {
-          console.log(`[Duck] skipped — already at duck level (${curVol.toFixed(2)})`);
+          const curVol = musicVolumeRef.current;
+          console.log(`[Duck] musicVolumeRef: ${curVol.toFixed(2)} before duck`);
+          if (curVol > 0.2) {
+            console.log(`[Duck] Howler duckDown: ${curVol.toFixed(2)} → ${DUCK_LEVEL} over 300ms`);
+            howl.fade(curVol, DUCK_LEVEL, 300);
+            musicVolumeRef.current = DUCK_LEVEL;
+          } else {
+            console.log(`[Duck] skipped — already at duck level (${curVol.toFixed(2)})`);
+          }
         }
       } else {
         // audio.volume is read-only on iOS Safari (PWA and browser).
         // Wavlake CDN sends no CORS headers so GainNode is not an option either.
         // On iOS we pause the music instead of ducking; on desktop we duck to
         // DUCK_LEVEL so there is still background music under TTS.
-        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
         if (isIOS) {
           console.log('[Duck] iOS — pausing music during TTS (volume read-only, no CORS)');
           if (!audio.paused) audio.pause();
@@ -658,9 +664,14 @@ export function RadioPage() {
       const target = mutedRef.current ? 0 : volumeRef.current;
       const howl = howlRef.current;
       if (howl) {
-        console.log(`[Duck] Howler fadeBack: ${DUCK_LEVEL} → 0.9 over 2000ms`);
-        howl.fade(DUCK_LEVEL, 0.9, 2000);
-        musicVolumeRef.current = 0.9;
+        if (isIOS) {
+          howl.play();
+          console.log('[Duck] iOS — resuming music');
+        } else {
+          console.log(`[Duck] Howler fadeBack: ${DUCK_LEVEL} → 0.9 over 2000ms`);
+          howl.fade(DUCK_LEVEL, 0.9, 2000);
+          musicVolumeRef.current = 0.9;
+        }
       }
       // Also restore bridge to its playback volume
       const bridge = bridgeHowlRef.current;
@@ -669,7 +680,6 @@ export function RadioPage() {
         console.log(`[Duck] bridge fadeBack → ${BRIDGE_VOLUME}`);
       }
       if (!howl) {
-        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
         if (isIOS) {
           // Resume music after TTS — play() is async but this fires after speech
           // so the gesture token is stale; iOS should still allow it because the
@@ -1628,23 +1638,24 @@ export function RadioPage() {
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
     console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
+
+    // ── Pre-unlock the podcast element on EVERY play press (before any awaits) ──
+    // pod.play() is called 10+ seconds after the gesture (bridge fade + TTS +
+    // jingle). iOS revokes the gesture token after ~1 second of async work.
+    // On iOS: call play() immediately (unmuted, src preserved) so iOS stamps this
+    // element as gesture-unlocked for the session. No immediate pause — iOS
+    // remembers the unlock for subsequent play() calls on the same element.
+    const pod = podAudioRef.current;
+    if (pod && isIOS) {
+      pod.muted = false;
+      pod.src = pod.src || '';
+      pod.play().catch(() => {});
+      console.log('[iOS] podcast element pre-unlocked');
+    }
+
     // If the loop is already running (e.g. we navigated away and came back),
     // there's nothing to do — audio is already playing in the background.
     if (runningRef.current) return;
-
-    // ── Pre-unlock the podcast element within the gesture ─────────────────────
-    // pod.play() is called 10+ seconds after the gesture (bridge fade + TTS +
-    // jingle). iOS revokes the gesture token after ~1 second of async work.
-    // Calling muted play()+pause() here "stamps" the element as gesture-unlocked
-    // so the real pod.play() later is allowed even without a fresh gesture.
-    const pod = podAudioRef.current;
-    if (pod) {
-      pod.muted = true;
-      pod.play().catch(() => {});
-      pod.pause();
-      pod.muted = false;
-      console.log('[iOS] podcast element pre-unlocked');
-    }
     if (!greetedRef.current) {
       startRadio();
     } else {
