@@ -1277,52 +1277,51 @@ export function RadioPage() {
             }
 
             pod.src    = audioSrc;
-            pod.volume = mutedRef.current ? 0 : volumeRef.current;
-            pod.load();
+            pod.volume = 1.0; // assert before play — iOS may reset to 0
 
-            // Wait for canplay — iOS silently fails play() at readyState=0.
-            console.log(`[Podcast] waiting for canplay — readyState: ${pod.readyState}`);
-            await new Promise<void>(resolve => {
-              if (pod.readyState >= 3) {
-                console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
-                return resolve();
-              }
-              const onCanPlay = () => {
-                console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
-                pod.removeEventListener('canplay', onCanPlay);
-                pod.removeEventListener('error',   onError);
-                resolve();
-              };
-              const onError = () => {
-                pod.removeEventListener('canplay', onCanPlay);
-                pod.removeEventListener('error',   onError);
-                resolve(); // resolve not reject — let play() surface the error
-              };
-              pod.addEventListener('canplay', onCanPlay);
-              pod.addEventListener('error',   onError);
-              setTimeout(resolve, 5000); // 5s fallback — don't block forever
-            });
-
-            // Seek to saved position if this episode was partially played before.
-            // The canplay wait above means loadedmetadata has already fired —
-            // pod.duration is known and we can seek directly without a listener.
-            // If for some reason duration is still unknown (error/timeout path),
-            // fall back to a loadedmetadata listener.
+            // Seek to saved position once metadata is available.
+            // Always use a loadedmetadata listener — on iOS we skip canplay so
+            // readyState is 0 when we reach this point.
             const savedPos = loadPodcastPosition(episode.id);
             if (savedPos > 5) {
               console.log(`[Loop] resuming from saved position ${savedPos.toFixed(0)}s`);
-              const doSeek = () => {
+              pod.addEventListener('loadedmetadata', () => {
                 if (isFinite(pod.duration) && savedPos < pod.duration - 10) {
                   pod.currentTime = savedPos;
                   console.log(`[Loop] seeked to ${savedPos.toFixed(0)}s`);
                 }
-              };
-              if (pod.readyState >= 1) { // HAVE_METADATA — duration is known
-                doSeek();
-              } else {
-                pod.addEventListener('loadedmetadata', doSeek, { once: true });
-              }
+              }, { once: true });
             }
+
+            if (!isIOS) {
+              // Desktop: load() then wait for canplay before play() — prevents
+              // dead air on slow connections. Gesture chain is not a constraint.
+              pod.load();
+              console.log(`[Podcast] waiting for canplay — readyState: ${pod.readyState}`);
+              await new Promise<void>(resolve => {
+                if (pod.readyState >= 3) {
+                  console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
+                  return resolve();
+                }
+                const onCanPlay = () => {
+                  console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
+                  pod.removeEventListener('canplay', onCanPlay);
+                  pod.removeEventListener('error',   onError);
+                  resolve();
+                };
+                const onError = () => {
+                  pod.removeEventListener('canplay', onCanPlay);
+                  pod.removeEventListener('error',   onError);
+                  resolve(); // resolve not reject — let play() surface the error
+                };
+                pod.addEventListener('canplay', onCanPlay);
+                pod.addEventListener('error',   onError);
+                setTimeout(resolve, 5000); // 5s fallback — don't block forever
+              });
+            }
+            // iOS: do NOT call load() or wait for canplay — the canplay await
+            // breaks the gesture chain (iOS revokes the token after ~1 s of async
+            // work). Call play() immediately; iOS buffers internally once started.
 
             setCT(savedPos > 5 ? savedPos : 0);
             setDur(episode.duration || 0);
@@ -1334,20 +1333,13 @@ export function RadioPage() {
             let podStarted = false;
             console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
             try {
-              pod.volume = 1.0; // assert full volume before play — iOS may reset to 0
+              if (isIOS) {
+                console.log('[Podcast] iOS: play() called immediately after src');
+              }
               await pod.play();
+              if (isIOS) console.log('[Podcast] iOS: immediate play after src set');
               podStarted = true;
               console.log(`[Podcast] volume after play: ${pod.volume}`);
-              // iOS sometimes routes a freshly-started HTMLAudioElement to an
-              // inactive audio session, causing silent playback with no error.
-              // Pause + re-play immediately forces iOS to re-attach the element
-              // to the active foreground session.
-              if (isIOS) {
-                pod.pause();
-                pod.volume = 1.0;
-                await pod.play();
-                console.log('[Podcast] iOS session re-attach attempted');
-              }
               (Howler as any).ctx?.resume(); // keep shared AudioContext active
               console.log('[Loop] podcast play() resolved — podcast playing');
             } catch (e) {
