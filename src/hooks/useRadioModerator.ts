@@ -15,11 +15,37 @@ function getTimeOfDay(): TimeOfDay {
 }
 
 function getDateString(): string {
-  return new Date().toLocaleDateString('en-US', {
+  const lang   = getLangCode();
+  const locale = lang === 'de' ? 'de-DE' : lang === 'fr' ? 'fr-FR' : 'en-US';
+  return new Date().toLocaleDateString(locale, {
     weekday: 'long',
     month: 'long',
     day: 'numeric',
   });
+}
+
+/** Returns the current time-of-day label in the listener's language. */
+function todLabel(): string {
+  const tod  = getTimeOfDay();
+  const lang = getLangCode();
+  const map: Record<'en' | 'de' | 'fr', Record<TimeOfDay, string>> = {
+    en: { morning: 'morning', afternoon: 'afternoon', evening: 'evening', night: 'late-night' },
+    de: { morning: 'Morgen',  afternoon: 'Nachmittag', evening: 'Abend',  night: 'Nacht'      },
+    fr: { morning: 'matin',   afternoon: 'après-midi', evening: 'soir',   night: 'nuit tardive' },
+  };
+  return map[lang][tod];
+}
+
+/**
+ * Pick a prompt string based on the current language.
+ * All AI prompts must be written in the listener's language so Claude doesn't
+ * revert to English despite the CRITICAL system-prompt header.
+ */
+function lp(en: string, de: string, fr: string): string {
+  const lang = getLangCode();
+  if (lang === 'de') return de;
+  if (lang === 'fr') return fr;
+  return en;
 }
 
 // Title cleaning helpers
@@ -370,14 +396,25 @@ export function useRadioModerator() {
 
   const speakGreeting = useCallback(
     async (listenerName: string): Promise<void> => {
-      const tod = getTimeOfDay();
       const firstName = listenerName.split(' ')[0];
       const date = getDateString();
-      const prompt =
+      const tod  = todLabel();
+      const prompt = lp(
         `Write a ${tod} on-air greeting for a listener named ${firstName}. ` +
         `Today is ${date}. ` +
         `Sound warm, personal and authentic, like a real radio host welcoming them to their favourite station. ` +
-        `Reference the time of day naturally. 2 to 3 sentences.`;
+        `Reference the time of day naturally. 2 to 3 sentences.`,
+
+        `Schreibe eine ${tod}-Begrüßung auf Sendung für einen Hörer namens ${firstName}. ` +
+        `Heute ist ${date}. ` +
+        `Klinge warm, persönlich und authentisch, wie ein echter Radiosprecher der seinen Lieblingshörer begrüßt. ` +
+        `Erwähne die Tageszeit auf natürliche Weise. 2 bis 3 Sätze.`,
+
+        `Écris une salutation de ${tod} à l'antenne pour un auditeur prénommé ${firstName}. ` +
+        `Aujourd'hui, nous sommes le ${date}. ` +
+        `Sois chaleureux, personnel et authentique, comme un vrai animateur de radio accueillant son auditeur. ` +
+        `Mentionne le moment de la journée naturellement. 2 à 3 phrases.`,
+      );
       await buildAndSpeak(prompt, fallbackGreeting(listenerName));
     },
     [buildAndSpeak]
@@ -387,17 +424,34 @@ export function useRadioModerator() {
     async (track: WavlakeTrack, isTopChart = false, isLiked = false): Promise<void> => {
       void isTopChart; // chart status intentionally not passed to Claude — rule (12)
       const cleanTitle = cleanTrackTitle(track.name);
-      const likedContext = isLiked
-        ? `The listener has liked this song before. You may acknowledge that naturally — e.g. a favourite returning — but only if it fits and feels genuine. Do not force it. `
-        : '';
-      const prompt =
+      const likedEn = isLiked ? `The listener has liked this song before. You may acknowledge that naturally — e.g. a favourite returning — but only if it fits and feels genuine. Do not force it. ` : '';
+      const likedDe = isLiked ? `Der Hörer hat diesen Song bereits geliked. Erwähne das natürlich — z.B. ein Favorit der zurückkommt — aber nur wenn es sich organisch anfühlt. Nicht erzwingen. ` : '';
+      const likedFr = isLiked ? `L'auditeur a déjà aimé ce morceau. Tu peux le mentionner naturellement — ex. un favori qui revient — seulement si ça s'intègre bien. Ne force pas. ` : '';
+      const prompt = lp(
         `Introduce the next song on air. ` +
         `Artist: ${track.artist}. Song title: ${cleanTitle}. ` +
         `Album: ${track.albumTitle || 'their latest work'}. ` +
-        likedContext +
+        likedEn +
         `Sound like a natural radio DJ handing off to the track. Keep it to 1 to 2 sentences. ` +
         `Vary your phrasing, do not start with Here's. Do not put the title in quotes. ` +
-        `Do not add version tags or extra info, just the artist and clean title.`;
+        `Do not add version tags or extra info, just the artist and clean title.`,
+
+        `Moderiere den nächsten Song an. ` +
+        `Künstler: ${track.artist}. Songtitel: ${cleanTitle}. ` +
+        `Album: ${track.albumTitle || 'ihr aktuelles Werk'}. ` +
+        likedDe +
+        `Klinge wie ein natürlicher Radio-DJ der zum Track übergeht. 1 bis 2 Sätze. ` +
+        `Variiere die Formulierung, beginne nicht mit Hier ist. Keine Anführungszeichen um den Titel. ` +
+        `Keine Versions-Tags oder Extra-Infos, nur Künstler und Titel.`,
+
+        `Présente le prochain morceau à l'antenne. ` +
+        `Artiste : ${track.artist}. Titre : ${cleanTitle}. ` +
+        `Album : ${track.albumTitle || 'leur dernier travail'}. ` +
+        likedFr +
+        `Sois naturel comme un vrai DJ radio qui passe au morceau. 1 à 2 phrases. ` +
+        `Varie ta formulation, ne commence pas par Voici. Pas de guillemets autour du titre. ` +
+        `Pas d'infos de version, juste l'artiste et le titre.`,
+      );
       await buildAndSpeak(prompt, fallbackTrackIntro(track));
     },
     [buildAndSpeak]
@@ -410,16 +464,31 @@ export function useRadioModerator() {
         .map(t => `${t.artist} with ${cleanTrackTitle(t.name)}`)
         .join(' and then ');
       const cleanNextTitle = cleanTrackTitle(next.name);
-      const likedContext = isNextLiked
-        ? `The listener has liked the next track before. You may acknowledge that naturally if it fits. `
-        : '';
-      const prompt =
+      const likedEn = isNextLiked ? `The listener has liked the next track before. You may acknowledge that naturally if it fits. ` : '';
+      const likedDe = isNextLiked ? `Der Hörer hat den nächsten Track bereits geliked. Erwähne das natürlich wenn es passt. ` : '';
+      const likedFr = isNextLiked ? `L'auditeur a déjà aimé le prochain morceau. Tu peux le mentionner naturellement si ça s'intègre. ` : '';
+      const prompt = lp(
         `You just played ${playedList} on air without commentary. ` +
         `Give a brief warm reaction to that music, one sentence. ` +
         `Then introduce the next track: ${next.artist} with ${cleanNextTitle}. ` +
-        likedContext +
+        likedEn +
         `Keep the whole thing to 2 to 3 sentences. Sound like a natural radio DJ, not a robot. ` +
-        `Do not put titles in quotes or add version tags.`;
+        `Do not put titles in quotes or add version tags.`,
+
+        `Du hast gerade ${playedList} auf Sendung gespielt, ohne Kommentar. ` +
+        `Gib eine kurze, warme Reaktion auf diese Musik, ein Satz. ` +
+        `Dann kündige den nächsten Track an: ${next.artist} mit ${cleanNextTitle}. ` +
+        likedDe +
+        `Insgesamt 2 bis 3 Sätze. Klinge wie ein natürlicher Radio-DJ, nicht wie ein Roboter. ` +
+        `Keine Anführungszeichen um Titel, keine Versions-Tags.`,
+
+        `Tu viens de passer ${playedList} à l'antenne sans commentaire. ` +
+        `Donne une brève réaction chaleureuse à cette musique, une phrase. ` +
+        `Puis présente le prochain morceau : ${next.artist} avec ${cleanNextTitle}. ` +
+        likedFr +
+        `En tout, 2 à 3 phrases. Sois naturel comme un vrai DJ radio, pas un robot. ` +
+        `Pas de guillemets autour des titres, pas de tags de version.`,
+      );
       await buildAndSpeak(prompt, fallbackReviewAndIntro(played, next, cleanNextTitle));
     },
     [buildAndSpeak]
@@ -431,10 +500,19 @@ export function useRadioModerator() {
    * line is always spoken in the listener's chosen language.
    */
   const speakUserControlReaction = useCallback(async (): Promise<void> => {
-    const prompt =
+    const prompt = lp(
       'The listener just manually skipped or selected a track. ' +
       'React in one short, casual sentence — like a real radio host who respects the listener taking control. ' +
-      'Sound natural and unbothered. No stage directions, no emojis.';
+      'Sound natural and unbothered. No stage directions, no emojis.',
+
+      'Der Hörer hat gerade manuell einen Track übersprungen oder ausgewählt. ' +
+      'Reagiere mit einem kurzen, lockeren Satz — wie ein echter Radiosprecher der es respektiert wenn der Hörer die Kontrolle übernimmt. ' +
+      'Klingt natürlich und entspannt. Keine Regieanweisungen, keine Emojis.',
+
+      "L'auditeur vient de passer ou sélectionner manuellement un morceau. " +
+      "Réagis en une courte phrase décontractée — comme un vrai animateur radio qui respecte que l'auditeur prenne le contrôle. " +
+      'Sois naturel et détendu. Pas de didascalies, pas d\'emojis.',
+    );
     // generateScript already applies the CRITICAL language rule (reads localStorage).
     // If the AI call fails, skip silently — better than speaking in the wrong language.
     const aiScript = await generateScript(prompt);
@@ -453,60 +531,120 @@ export function useRadioModerator() {
       const isNews     = isNewsShow(showName, episodeTitle);
       const isDateDump = episodeTitleIsDateDump(episodeTitle);
 
-      const noSongRule =
-        'Do NOT mention what song was just playing or what music comes next. ' +
-        'Focus only on the podcast. No "coming up after this" or "stay tuned for more music".';
+      const noSongRule = lp(
+        'Do NOT mention what song was just playing or what music comes next. Focus only on the podcast. No "coming up after this" or "stay tuned for more music".',
+        'Erwähne NICHT welcher Song gerade gespielt wurde oder welche Musik als nächstes kommt. Fokussiere dich nur auf den Podcast.',
+        "Ne mentionnez PAS quelle chanson venait de jouer ou quelle musique vient ensuite. Concentrez-vous uniquement sur le podcast.",
+      );
 
       let prompt: string;
 
       if (isResuming) {
-        const minutesHeard   = Math.floor(resumeCtx.lastPosition / 60);
-        const recentTopics   = resumeCtx.topics.slice(-2);
-        const lastTopic      = recentTopics[recentTopics.length - 1];
-        const topicsContext  = recentTopics.length > 0
-          ? `Topics covered so far: ${recentTopics.join(', ')}.`
+        const minutesHeard  = Math.floor(resumeCtx.lastPosition / 60);
+        const recentTopics  = resumeCtx.topics.slice(-2);
+        const lastTopic     = recentTopics[recentTopics.length - 1];
+        const topicsContext = recentTopics.length > 0
+          ? lp(`Topics covered so far: ${recentTopics.join(', ')}.`, `Bisher behandelte Themen: ${recentTopics.join(', ')}.`, `Sujets abordés jusqu'ici : ${recentTopics.join(', ')}.`)
           : '';
 
-        prompt =
+        prompt = lp(
           `You're a radio host picking up a podcast the listener was already partway through. ` +
           `Show: ${showName}. ` +
           `The listener has already heard ${minutesHeard} minute${minutesHeard !== 1 ? 's' : ''} of this episode. ` +
           (lastTopic ? `Last known topic: ${lastTopic}. ` : '') +
           (topicsContext ? `${topicsContext} ` : '') +
-          `Write a SHORT resume intro — max 25 words. ` +
-          `Reference the show name and how far in they are. ` +
+          `Write a SHORT resume intro — max 25 words. Reference the show name and how far in they are. ` +
           `If there's a known topic, reference something specific from it. ` +
-          `Do NOT introduce the episode as if it's new. Do NOT repeat the episode description. ` +
-          `Sound like a host who remembers where you left off. ${noSongRule}`;
+          `Do NOT introduce the episode as if it's new. Sound like a host who remembers where you left off. ${noSongRule}`,
+
+          `Du bist ein Radiosprecher der einen Podcast wieder aufnimmt, den der Hörer bereits teilweise gehört hat. ` +
+          `Sendung: ${showName}. ` +
+          `Der Hörer hat bereits ${minutesHeard} Minute${minutesHeard !== 1 ? 'n' : ''} dieser Episode gehört. ` +
+          (lastTopic ? `Letztes bekanntes Thema: ${lastTopic}. ` : '') +
+          (topicsContext ? `${topicsContext} ` : '') +
+          `Schreibe eine kurze Wiederaufnahme-Ansage — max. 25 Wörter. Erwähne den Sendungsnamen und wie weit der Hörer ist. ` +
+          `Falls ein Thema bekannt ist, erwähne etwas Konkretes daraus. ` +
+          `Führe die Episode NICHT als neu ein. Klinge wie ein Moderator der sich erinnert wo aufgehört wurde. ${noSongRule}`,
+
+          `Tu es un animateur radio qui reprend un podcast que l'auditeur écoutait déjà. ` +
+          `Émission : ${showName}. ` +
+          `L'auditeur a déjà entendu ${minutesHeard} minute${minutesHeard !== 1 ? 's' : ''} de cet épisode. ` +
+          (lastTopic ? `Dernier sujet connu : ${lastTopic}. ` : '') +
+          (topicsContext ? `${topicsContext} ` : '') +
+          `Écris une courte intro de reprise — max 25 mots. Mentionne le nom de l'émission et l'avancement. ` +
+          `S'il y a un sujet connu, fais-y référence concrètement. ` +
+          `Ne présente PAS l'épisode comme nouveau. Semble te souvenir de là où on s'était arrêté. ${noSongRule}`,
+        );
       } else {
         // Optional context from the RSS feed to enrich the AI prompt
         const rssContext = [
-          author ? `Host/author: ${author}.` : '',
-          description ? `Episode description: "${description}"` : '',
+          author      ? lp(`Host/author: ${author}.`, `Moderator/Autor: ${author}.`, `Présentateur/auteur : ${author}.`) : '',
+          description ? lp(`Episode description: "${description}"`, `Episodenbeschreibung: "${description}"`, `Description de l'épisode : "${description}"`) : '',
         ].filter(Boolean).join(' ');
 
         if (isNews) {
-          prompt =
+          prompt = lp(
             `You're a radio host transitioning from music to a news segment. ` +
             `The news show is called ${showName}. ` +
             (rssContext ? `${rssContext} ` : '') +
             `Say something like "time to check in with the headlines" or "let's see what's happening in the world". ` +
-            `Mention the show name. Never mention dates, times, or episode numbers. ${noSongRule}`;
+            `Mention the show name. Never mention dates, times, or episode numbers. ${noSongRule}`,
+
+            `Du bist ein Radiosprecher der von Musik zu einem Nachrichtensegment übergeht. ` +
+            `Die Nachrichtensendung heißt ${showName}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Sage etwas wie "Zeit für die aktuellen Nachrichten" oder "Schauen wir, was in der Welt passiert". ` +
+            `Erwähne den Sendungsnamen. Niemals Datum, Uhrzeit oder Episodennummern erwähnen. ${noSongRule}`,
+
+            `Tu es un animateur radio qui passe de la musique à un segment d'actualités. ` +
+            `L'émission de nouvelles s'appelle ${showName}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Dis quelque chose comme "l'heure de faire le point sur l'actualité" ou "voyons ce qui se passe dans le monde". ` +
+            `Mentionne le nom de l'émission. Ne mentionne jamais de dates, d'heures ou de numéros d'épisode. ${noSongRule}`,
+          );
         } else if (isDateDump) {
-          prompt =
+          prompt = lp(
             `You're a radio host transitioning from music to a podcast segment. ` +
             `The show is called ${showName}. ` +
             (rssContext ? `${rssContext} ` : '') +
             `Introduce it naturally using only the show name, do not mention the episode title at all. ` +
-            `Keep it smooth and conversational. ${noSongRule}`;
+            `Keep it smooth and conversational. ${noSongRule}`,
+
+            `Du bist ein Radiosprecher der von Musik zu einem Podcast-Segment übergeht. ` +
+            `Die Sendung heißt ${showName}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Führe die Sendung natürlich ein, nur mit dem Namen — den Episodentitel gar nicht erwähnen. ` +
+            `Bleib flüssig und gesprächig. ${noSongRule}`,
+
+            `Tu es un animateur radio qui passe de la musique à un segment podcast. ` +
+            `L'émission s'appelle ${showName}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Présente-la naturellement en utilisant uniquement le nom de l'émission, sans mentionner le titre de l'épisode. ` +
+            `Reste fluide et conversationnel. ${noSongRule}`,
+          );
         } else {
-          prompt =
+          prompt = lp(
             `You're a radio host transitioning from music to a podcast segment. ` +
             `Show: ${showName}. Episode: ${episodeTitle}. ` +
             (rssContext ? `${rssContext} ` : '') +
             `Give a warm, natural on-air introduction — like "let's check in on ${showName}" or "time for some ${showName}". ` +
             `Use the show name primarily. Only mention the episode title if it is genuinely descriptive and adds real value. ` +
-            `Never mention dates, times, or episode numbers. ${noSongRule}`;
+            `Never mention dates, times, or episode numbers. ${noSongRule}`,
+
+            `Du bist ein Radiosprecher der zu einem Podcast-Segment übergeht. ` +
+            `Sendung: ${showName}. Episode: ${episodeTitle}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Gib eine warme, natürliche On-Air-Einführung — wie "Schauen wir bei ${showName} rein" oder "Zeit für ${showName}". ` +
+            `Nutze vor allem den Sendungsnamen. Erwähne den Episodentitel nur wenn er wirklich beschreibend ist und echten Mehrwert hat. ` +
+            `Niemals Datum, Uhrzeit oder Episodennummern. ${noSongRule}`,
+
+            `Tu es un animateur radio qui passe à un segment podcast. ` +
+            `Émission : ${showName}. Épisode : ${episodeTitle}. ` +
+            (rssContext ? `${rssContext} ` : '') +
+            `Donne une introduction chaleureuse et naturelle — comme "on jette un œil à ${showName}" ou "l'heure de ${showName}". ` +
+            `Utilise principalement le nom de l'émission. Ne mentionne le titre de l'épisode que s'il est vraiment descriptif et apporte une vraie valeur. ` +
+            `Jamais de dates, d'heures ou de numéros d'épisode. ${noSongRule}`,
+          );
         }
       }
 
@@ -527,27 +665,68 @@ export function useRadioModerator() {
 
       let prompt: string;
       if (isNews) {
-        prompt =
+        prompt = lp(
           `You're a radio host introducing a news segment. ` +
           `The show is ${episode.feedTitle}. ` +
           (rssContext ? `${rssContext} ` : '') +
           `Say something like time for the news or let's check in with the latest headlines. ` +
-          `Mention the show name. Never read out dates, times, or timestamps.`;
+          `Mention the show name. Never read out dates, times, or timestamps.`,
+
+          `Du bist ein Radiosprecher der ein Nachrichtensegment einführt. ` +
+          `Die Sendung ist ${episode.feedTitle}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Sage etwas wie "Zeit für die Nachrichten" oder "Schauen wir auf die aktuellen Schlagzeilen". ` +
+          `Erwähne den Sendungsnamen. Niemals Datum, Uhrzeit oder Zeitstempel vorlesen.`,
+
+          `Tu es un animateur radio qui présente un segment d'actualités. ` +
+          `L'émission est ${episode.feedTitle}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Dis quelque chose comme "l'heure des informations" ou "faisons le point sur les dernières nouvelles". ` +
+          `Mentionne le nom de l'émission. Ne lis jamais de dates, d'heures ou d'horodatages.`,
+        );
       } else if (isDateDump) {
-        prompt =
+        prompt = lp(
           `You're a radio host introducing a podcast segment. ` +
           `Show: ${episode.feedTitle}. ` +
           (rssContext ? `${rssContext} ` : '') +
           `The episode title is just a date or time, ignore it completely. ` +
-          `Introduce the show by name only. Sound warm and natural.`;
+          `Introduce the show by name only. Sound warm and natural.`,
+
+          `Du bist ein Radiosprecher der ein Podcast-Segment einführt. ` +
+          `Sendung: ${episode.feedTitle}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Der Episodentitel ist nur ein Datum oder eine Uhrzeit — ignoriere ihn vollständig. ` +
+          `Führe die Sendung nur mit dem Namen ein. Klingt warm und natürlich.`,
+
+          `Tu es un animateur radio qui présente un segment podcast. ` +
+          `Émission : ${episode.feedTitle}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Le titre de l'épisode est juste une date ou une heure — ignore-le complètement. ` +
+          `Présente l'émission uniquement par son nom. Sois chaleureux et naturel.`,
+        );
       } else {
-        prompt =
+        prompt = lp(
           `You're a radio host transitioning from music to a podcast segment. ` +
           `Show: ${episode.feedTitle}. Episode: ${episode.title}. ` +
           (rssContext ? `${rssContext} ` : '') +
           `Sound warm and natural. Do not say here's at the start. ` +
           `Refer to the show by name. Only use the episode title if it is genuinely descriptive. ` +
-          `Never mention dates, times, or episode numbers.`;
+          `Never mention dates, times, or episode numbers.`,
+
+          `Du bist ein Radiosprecher der von Musik zu einem Podcast-Segment übergeht. ` +
+          `Sendung: ${episode.feedTitle}. Episode: ${episode.title}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Klingt warm und natürlich. Beginne nicht mit Hier ist. ` +
+          `Beziehe dich auf die Sendung beim Namen. Nutze den Episodentitel nur wenn er wirklich beschreibend ist. ` +
+          `Niemals Datum, Uhrzeit oder Episodennummern erwähnen.`,
+
+          `Tu es un animateur radio qui passe de la musique à un segment podcast. ` +
+          `Émission : ${episode.feedTitle}. Épisode : ${episode.title}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Sois chaleureux et naturel. Ne commence pas par Voici. ` +
+          `Réfère-toi à l'émission par son nom. N'utilise le titre de l'épisode que s'il est vraiment descriptif. ` +
+          `Ne mentionne jamais de dates, d'heures ou de numéros d'épisode.`,
+        );
       }
 
       await buildAndSpeak(prompt, fallbackPodcastIntro(episode, isNews || isDateDump));
@@ -564,11 +743,22 @@ export function useRadioModerator() {
 
   const speakPodcastReturn = useCallback(
     async (podcastTitle: string, partNumber: number): Promise<void> => {
-      const prompt =
+      const prompt = lp(
         `You're a radio host returning from a music break back to a podcast. ` +
         `Podcast: ${podcastTitle}. This is part ${partNumber} of the episode. ` +
         `Say something warm and brief, 1 sentence, like And we're back, here's part ${partNumber} of ${podcastTitle}. ` +
-        `Vary the phrasing. Sound natural, not scripted.`;
+        `Vary the phrasing. Sound natural, not scripted.`,
+
+        `Du bist ein Radiosprecher der nach einer Musikpause zum Podcast zurückkehrt. ` +
+        `Podcast: ${podcastTitle}. Das ist Teil ${partNumber} der Episode. ` +
+        `Sage etwas Warmes und Kurzes, 1 Satz, wie "Und wir sind zurück — hier ist Teil ${partNumber} von ${podcastTitle}". ` +
+        `Variiere die Formulierung. Klingt natürlich, nicht abgelesen.`,
+
+        `Tu es un animateur radio qui revient d'une pause musicale au podcast. ` +
+        `Podcast : ${podcastTitle}. C'est la partie ${partNumber} de l'épisode. ` +
+        `Dis quelque chose de chaleureux et bref, 1 phrase, comme "Et nous voilà de retour — voici la partie ${partNumber} de ${podcastTitle}". ` +
+        `Varie la formulation. Sois naturel, pas récité.`,
+      );
       await buildAndSpeak(prompt, fallbackPodcastReturn(podcastTitle, partNumber));
     },
     [buildAndSpeak]
@@ -581,11 +771,22 @@ export function useRadioModerator() {
       const cleanNextTitle = cleanTrackTitle(nextTrack.name);
       const podcastRef = isNews || isDateDump ? episode.feedTitle : episode.feedTitle;
 
-      const prompt =
+      const prompt = lp(
         `You're a radio host transitioning back from a podcast segment to music. ` +
         `The podcast was from ${podcastRef}. ` +
         `Now going back to music, next up: ${nextTrack.artist} with ${cleanNextTitle}. ` +
-        `Keep it to 1 to 2 sentences. Sound natural. Do not mention dates or episode titles.`;
+        `Keep it to 1 to 2 sentences. Sound natural. Do not mention dates or episode titles.`,
+
+        `Du bist ein Radiosprecher der vom Podcast-Segment zurück zur Musik übergeht. ` +
+        `Der Podcast war von ${podcastRef}. ` +
+        `Jetzt zurück zur Musik — als nächstes: ${nextTrack.artist} mit ${cleanNextTitle}. ` +
+        `1 bis 2 Sätze. Klingt natürlich. Kein Datum, keine Episodentitel erwähnen.`,
+
+        `Tu es un animateur radio qui passe du segment podcast à la musique. ` +
+        `Le podcast venait de ${podcastRef}. ` +
+        `Retour à la musique — prochain morceau : ${nextTrack.artist} avec ${cleanNextTitle}. ` +
+        `1 à 2 phrases. Sois naturel. Ne mentionne pas de dates ni de titres d'épisode.`,
+      );
 
       await buildAndSpeak(prompt, fallbackPodcastOutro(episode.feedTitle, nextTrack.artist, cleanNextTitle));
     },
@@ -604,12 +805,22 @@ export function useRadioModerator() {
       } else {
         nextLabel = next.feedTitle;
       }
-      const aiScript = await generateScript(
+      const aiScript = await generateScript(lp(
         `You are a radio host. The listener just skipped the current track. ` +
         `Say something very brief (one short sentence) acknowledging the skip ` +
         `and introducing the next item: ${nextLabel}. ` +
         `Sound natural and unbothered, not apologetic. No stage directions.`,
-      );
+
+        `Du bist ein Radiosprecher. Der Hörer hat gerade den aktuellen Track übersprungen. ` +
+        `Sage etwas sehr Kurzes (ein kurzer Satz) der den Skip bestätigt ` +
+        `und das nächste Element ankündigt: ${nextLabel}. ` +
+        `Klingt natürlich und entspannt, nicht entschuldigend. Keine Regieanweisungen.`,
+
+        `Tu es un animateur radio. L'auditeur vient de passer le morceau en cours. ` +
+        `Dis quelque chose de très bref (une courte phrase) qui reconnaît le saut ` +
+        `et présente l'élément suivant : ${nextLabel}. ` +
+        `Sois naturel et détendu, pas apologétique. Pas de didascalies.`,
+      ));
       await sayScript(aiScript ?? fallbackSkipTransition(nextLabel));
     },
     [sayScript],
