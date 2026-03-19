@@ -1021,6 +1021,7 @@ export function RadioPage() {
           // Legacy HTMLAudioElement crossfade removed — Howler is the sole
           // playback system. If Howler crossfade can't fire (nextHowl not ready),
           // the track plays to natural end and the loop advances normally.
+          }
         };
 
         const onTimeUpdate = () => {
