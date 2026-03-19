@@ -310,6 +310,10 @@ async function handleAudioResolver(params) {
     // Discard the body without buffering any audio bytes.
     await res.body?.cancel();
 
+    if (res.url.includes('.mp4')) {
+      console.warn(`[Proxy] mp4 URL detected — may fail on iOS: ${res.url}`);
+    }
+
     return {
       statusCode: 200,
       headers: {
