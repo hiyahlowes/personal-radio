@@ -1332,6 +1332,10 @@ export function RadioPage() {
             setNowPlaying({ kind: 'podcast', episode });
 
             let podStarted = false;
+            let skipEpisode = false;
+            if (audioSrc.includes('.mp4')) {
+              console.warn(`[Podcast] mp4 URL detected — may fail on iOS: ${audioSrc}`);
+            }
             console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
             try {
               if (isIOS) {
@@ -1357,20 +1361,34 @@ export function RadioPage() {
               (Howler as any).ctx?.resume(); // keep shared AudioContext active
               console.log('[Loop] podcast play() resolved — podcast playing');
             } catch (e) {
-              console.error('[Loop] podcast play failed — resetting state:', e);
-              // Reset everything so the user can press Play to retry.
-              // Without this, runningRef stays true but playing is false — the
-              // play button handler short-circuits on "already running" and
-              // the UI appears permanently stuck in PAUSED.
-              runningRef.current = false;
-              resumePodcastEpisodeRef.current = null;
-              nowPlayingRef.current = null;
-              setNowPlaying(null);
-              setPlaying(false);
+              const isNotSupported = e instanceof DOMException && e.name === 'NotSupportedError';
+              if (isIOS && isNotSupported) {
+                // iOS cannot decode this format (e.g. .mp4 container) — skip
+                // the episode and let the loop continue with music instead of
+                // halting the radio entirely.
+                console.warn('[Podcast] iOS: NotSupportedError — skipping episode');
+                markPlayedRef.current(episode.id);
+                setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
+                skipEpisode = true;
+              } else {
+                console.error('[Loop] podcast play failed — resetting state:', e);
+                // Reset everything so the user can press Play to retry.
+                // Without this, runningRef stays true but playing is false — the
+                // play button handler short-circuits on "already running" and
+                // the UI appears permanently stuck in PAUSED.
+                runningRef.current = false;
+                resumePodcastEpisodeRef.current = null;
+                nowPlayingRef.current = null;
+                setNowPlaying(null);
+                setPlaying(false);
+              }
             }
 
-            // Pod failed to start — runningRef was already set false in the catch.
-            if (!podStarted) break;
+            // Pod failed to start — either halt the loop or skip to next episode.
+            if (!podStarted) {
+              if (skipEpisode) continue; // NotSupportedError on iOS — resume music
+              break;
+            }
 
             // ── Run episode through segmenter ─────────────────────────────
             if (podStarted && runningRef.current) {
