@@ -127,6 +127,59 @@ function getItunesText(item: Element, localName: string): string {
   return '';
 }
 
+// ── Enclosure type-preference selection ──────────────────────────────────────
+// Podcast feeds sometimes include multiple <enclosure> tags (e.g. audio/mpeg
+// AND video/mp4). We prefer audio types so iOS never receives a video/mp4
+// container it cannot decode.
+
+function enclosureTypeRank(type: string): number {
+  const t = type.toLowerCase();
+  if (t === 'audio/mpeg' || t === 'audio/mp3')  return 0; // best
+  if (t === 'audio/x-m4a')                       return 1;
+  if (t.startsWith('audio/'))                    return 2;
+  return 3; // video/mp4 or unknown — last resort
+}
+
+interface EnclosureCandidate { url: string; type: string; rank: number }
+
+/**
+ * From all <enclosure> (and <content>) elements on a feed item, pick the
+ * best audio URL by MIME-type preference:
+ *   1. audio/mpeg | audio/mp3
+ *   2. audio/x-m4a
+ *   3. any other audio/* type
+ *   4. anything else (video/mp4, no type, …)
+ *
+ * If the top-ranked URL still contains '.mp4' in the path AND a non-mp4
+ * audio alternative exists, the alternative is used instead.
+ */
+function getEnclosureAudioUrl(item: Element): { url: string; type: string } | null {
+  const candidates: EnclosureCandidate[] = [
+    ...Array.from(item.querySelectorAll('enclosure')),
+    ...Array.from(item.querySelectorAll('content')),
+  ]
+    .map(el => ({
+      url:  el.getAttribute('url')  ?? '',
+      type: el.getAttribute('type') ?? '',
+      rank: enclosureTypeRank(el.getAttribute('type') ?? ''),
+    }))
+    .filter(c => c.url.length > 0);
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((a, b) => a.rank - b.rank);
+  let best = candidates[0];
+
+  // If best URL contains '.mp4' in the path but an audio alternative exists,
+  // prefer the audio one to avoid NotSupportedError on iOS.
+  if (best.url.includes('.mp4')) {
+    const audioAlt = candidates.find(c => !c.url.includes('.mp4') && c.rank < 3);
+    if (audioAlt) best = audioAlt;
+  }
+
+  return { url: best.url, type: best.type };
+}
+
 // ── Podcast 2.0 chapters ─────────────────────────────────────────────────────
 
 const PODCAST_NS = 'https://podcastindex.org/namespace/1.0';
@@ -221,17 +274,19 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
   const episodes: PodcastEpisode[] = [];
 
   for (const item of items.slice(0, 5)) { // take 5 most recent per feed
-    // Audio URL — prefer enclosure url attribute, fall back to media:content
-    const enclosure = item.querySelector('enclosure');
-    const audioUrl  =
-      enclosure?.getAttribute('url') ??
-      item.querySelector('content')?.getAttribute('url') ??
-      '';
+    // Audio URL — pick best enclosure by MIME-type preference.
+    // Prefers audio/mpeg over video/mp4 so iOS never receives an undecodable container.
+    const enc      = getEnclosureAudioUrl(item);
+    const audioUrl = enc?.url  ?? '';
+    const encType  = enc?.type ?? '';
 
-    if (!audioUrl || !audioUrl.match(/\.(mp3|m4a|ogg|aac|wav)/i)) {
+    const isAudioByType = encType.startsWith('audio/') || encType.startsWith('video/');
+    const isAudioByUrl  = /\.(mp3|m4a|ogg|aac|wav|mp4)/i.test(audioUrl);
+    if (!audioUrl || (!isAudioByType && !isAudioByUrl)) {
       console.log(`[Podcast] skipping item — no valid audio URL (got: "${audioUrl.slice(0, 60)}")`);
       continue;
     }
+    console.log(`[Podcast] enclosure selected: ${encType || 'unknown'} — ${audioUrl.slice(0, 80)}`);
 
     const guid  = getText(item, 'guid') || `${feedUrl}-${episodes.length}`;
     const title = stripHtml(getText(item, 'title')) || 'Untitled Episode';
