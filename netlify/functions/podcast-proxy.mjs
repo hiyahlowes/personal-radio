@@ -332,6 +332,89 @@ async function handleAudioResolver(params) {
   }
 }
 
+// ── action=stream ─────────────────────────────────────────────────────────────
+// Proxies podcast audio bytes server-side, forwarding the client's Range header
+// and returning the upstream response with CORS + Accept-Ranges headers.
+//
+// Why: iOS Safari <audio> elements require CORS headers on every response in
+// the redirect chain. CDN URLs served by podcast hosts (Spotify/Anchor,
+// Megaphone, etc.) often lack CORS headers, causing silent playback failure.
+// Routing through this proxy injects the missing headers.
+//
+// ⚠️  Netlify synchronous functions buffer the full response before sending.
+//     This works for Range-based chunk requests (64 KB – 1 MB) but will fail
+//     for full-file (no Range) fetches of large episodes. iOS Safari's
+//     <audio> element typically sends Range: bytes=0-1 first to probe
+//     Accept-Ranges support, then switches to chunked Range requests —
+//     so in practice rangeless fetches are rare and usually small.
+//     If large-file fetches become a problem, migrate to a Netlify Edge
+//     Function (which supports true streaming with ReadableStream).
+
+async function handleStream(event, params) {
+  const url = params.url ?? '';
+  if (!url) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing "url" query parameter' }),
+    };
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid URL scheme — only http/https allowed' }),
+    };
+  }
+
+  // Forward the client's Range header so the upstream CDN can serve partial
+  // content (206). Without this, seeking would require re-fetching from byte 0.
+  const rangeHeader =
+    event.headers['range'] ?? event.headers['Range'] ?? null;
+
+  const upstreamHeaders = { 'User-Agent': 'PersonalRadio/1.0 (audio-stream)' };
+  if (rangeHeader) upstreamHeaders['Range'] = rangeHeader;
+
+  try {
+    const res = await fetch(url, {
+      headers: upstreamHeaders,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    const buffer = await res.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+
+    // Always inject CORS + Accept-Ranges — this is the whole point of the proxy.
+    const responseHeaders = {
+      ...corsHeaders(),
+      'Content-Type':  res.headers.get('content-type')  ?? 'audio/mpeg',
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=3600',
+    };
+
+    // Pass through Content-Range and Content-Length so the browser can track
+    // position and issue correct subsequent Range requests.
+    const contentRange  = res.headers.get('content-range');
+    const contentLength = res.headers.get('content-length');
+    if (contentRange)  responseHeaders['Content-Range']  = contentRange;
+    if (contentLength) responseHeaders['Content-Length'] = contentLength;
+
+    return {
+      statusCode:      res.status, // 200 or 206
+      headers:         responseHeaders,
+      body:            base64,
+      isBase64Encoded: true,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `Stream proxy failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── action=tts ────────────────────────────────────────────────────────────────
 // Converts text to speech via ElevenLabs and returns audio/mpeg as binary.
 // Expected JSON body: { text, voice_id, model_id?, voice_settings? }
@@ -491,6 +574,7 @@ export const handler = async (event) => {
   if (action === 'json')          return handleJson(params);
   if (action === 'text')          return handleText(params);
   if (action === 'audioresolver') return handleAudioResolver(params);
+  if (action === 'stream')        return handleStream(event, params);
   if (action === 'tts')           return handleTts(event);
   if (action === 'stt')           return handleStt(event);
   return handlePodcastIndex(action, params);
