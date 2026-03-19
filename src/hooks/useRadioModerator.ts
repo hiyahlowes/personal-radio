@@ -328,6 +328,11 @@ async function generateScript(
           'Never stack multiple tags back to back. ' +
           'A real radio host uses these moments deliberately, not constantly. ' +
           'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."' +
+          (storedLang === 'Deutsch'
+            ? '\n\nDEUTSCHE MODERATIONSREGEL: Sei lebendig, persönlich und ausdrucksstark. ' +
+              'Nutze [excited], [laughs], [sighs] großzügig. ' +
+              'Sprich wie ein echter Radiomoderator — nicht wie ein Nachrichtensprecher.'
+            : '') +
           (memoryContext ? `\n\nLISTENER CONTEXT: ${memoryContext}` : '');
 
     console.log('[Moderator] system prompt language header:', systemPrompt.slice(0, 120));

@@ -14,7 +14,7 @@
 - Moderator knows the listener, their preferences, and podcast content
 - Built on Podcast 2.0 / Nostr / Lightning principles
 
-**Live:** https://personal-radio.netlify.app  
+**Live:** https://personal-radio.netlify.app
 **GitHub:** https://github.com/hiyahlowes/personal-radio
 
 ---
@@ -89,11 +89,13 @@ git checkout dev
 
 ---
 
-## Netlify Functions
+## Netlify Functions + Edge Functions
 
 ```
 /.netlify/functions/claude-proxy     → Anthropic API
 /.netlify/functions/podcast-proxy    → actions: search, trending, feed, text, tts, stt, audioresolver
+/podcast-stream                      → Netlify Edge Function: streams podcast audio with CORS headers
+                                       Used on iOS only — desktop uses direct CDN URLs
 ```
 
 ---
@@ -104,7 +106,7 @@ git checkout dev
 src/
 ├── hooks/
 │   ├── useRadioModerator.ts      # AI Moderator, prompts, language
-│   ├── usePodcastFeeds.ts        # RSS feed fetching, transcript URL parsing
+│   ├── usePodcastFeeds.ts        # RSS feed fetching, audio/mpeg enclosure preference
 │   ├── usePodcastSegmenter.ts    # Podcast interruption, Scribe, chapters
 │   ├── usePodcastIndex.ts        # PodcastIndex API
 │   ├── useWavlakeTracks.ts       # Wavlake API, weighted shuffle, ambient pool
@@ -113,8 +115,16 @@ src/
 │   └── useZaps.ts                # Bitcoin Lightning / Nostr Zaps
 ├── pages/
 │   ├── RadioPage.tsx             # Main page, Howler refs, loop logic
+│   │                               iOS: pod.src = /podcast-stream?url=...
+│   │                               Desktop: pod.src = direct CDN URL
 │   ├── SettingsPage.tsx          # Settings, Song Graveyard
 │   └── SetupPage.tsx             # Onboarding
+netlify/
+├── functions/
+│   ├── claude-proxy.mjs
+│   └── podcast-proxy.mjs
+└── edge-functions/
+    └── podcast-stream.ts         # Streams podcast audio, forwards Range headers, adds CORS
 public/
 ├── podcast-intro.mp3 / studio-return.mp3  # Jingles (via Howler)
 ├── manifest.webmanifest          # PWA manifest
@@ -136,38 +146,36 @@ public/
 | `crossfadeTimerRef` | setTimeout ID — cleared on podcast slot |
 | `musicVolumeRef` | Tracks actual music volume (iOS workaround) |
 
-**iOS Audio Reality:**
-- Howler `html5: true` is required for streaming on iOS
-- `html5: true` ignores ALL programmatic volume changes on iOS
-  (audio.volume, GainNode, AND Howler.fade() all silently ignored)
-- This is an iOS Safari platform restriction, NOT a code bug
-- Wavlake CDN has no CORS headers → cannot use Web Audio API
-- **Duck effect on iOS: Pause/Resume** (not volume fade)
-- **Duck effect on Desktop: Howler.fade()** (works perfectly)
+**Duck pattern:**
+- iOS: `howl.pause()` / `howl.play()` (volume control impossible on iOS html5)
+- Desktop: `howl.fade(vol, 0.08, 300ms)` / `howl.fade(0.08, 0.9, 2000ms)`
 
 **iOS unlock chain (touchend handler):**
 1. `_audioCtx = new AudioContext()` → warm up
 2. `Howler.ctx?.resume()` → unlock Howler's internal context
 3. `unlockTTSAudio()` → create + unlock ttsAudio singleton lazily
-4. `podAudioRef` pre-unlock via muted play/pause
+4. `podAudioRef` pre-unlock via silent blob play/pause
 
 ---
 
-## Features (Live — Desktop)
+## Features (Live — Desktop ✅, iOS ⚠️)
 
 ### Music
 - Wavlake Top Charts, weighted shuffle, Like/Dislike, Song Graveyard
-- Crossfade via Howler fade(), Duck via Howler.fade(0.9→0.08, 300ms)
+- Crossfade via Howler, Duck via Howler.fade() on desktop
 - Ambient bridge pool
 
 ### Podcasts
-- PodcastIndex RSS, round-robin queue, transcript-ready episodes prioritized
-- Resume position, ±30s skip, drag-to-reorder
-- Audio URL resolver (follows redirects)
-- canplay wait before pod.play()
+- PodcastIndex RSS, round-robin queue, audio/mpeg enclosure preference
+- Transcript-ready episodes prioritized, drag-to-reorder
+- Resume position, ±30s skip
+- iOS: streams via Edge Function proxy (/podcast-stream)
+- Desktop: direct CDN URLs
 
 ### AI Moderator
 - Claude Haiku, language-aware (🇩🇪🇬🇧🇫🇷)
+- All prompt templates written in listener's language (lp() helper)
+- German: expressive personality addendum + lower stability (0.25) in voice settings
 - Expressive tags: `[laughs]` `[excited]` `[sighs]` `[whispers]` `[slow]`
 - ⚠️ NEVER: `[pause]` `[rushed]` `[drawn out]` — spoken aloud on turbo!
 
@@ -180,38 +188,38 @@ public/
 
 ---
 
-## iOS Status
+## iOS Status (Known Issues)
 
 | Feature | Status |
 |---|---|
 | Music playback | ✅ Works |
-| Crossfade | ✅ Works |
-| Moderator TTS | ✅ Works (after 1-2 opens sometimes) |
-| Duck effect | ❌ Pause/Resume needed (volume control impossible on iOS html5) |
-| Podcast audio | ❌ Silent — plays technically but no sound output |
+| Crossfades | ✅ Works |
+| Moderator TTS | ✅ Works |
+| Duck effect | ⚠️ Pause/Resume (volume control impossible on iOS html5) |
+| Podcast audio | ❌ Silent — timeupdate fires correctly but no audio output |
 | Jingles | ✅ Via Howler |
+
+**Root cause of podcast silence on iOS:**
+iOS routes HTMLAudioElement streams to wrong Audio Session category.
+Even via Edge Function proxy with correct CORS headers, no audio output.
+This is a fundamental iOS WebKit limitation — not fixable in PWA.
+**Solution: Native App (React Native or Swift) after funding.**
 
 ---
 
 ## 🗺️ Roadmap
 
-### Phase 1 — iOS fixes (CURRENT — work on `ios-testing` branch)
+### Phase 1 — Launch Desktop (CURRENT)
 
-**Next session priorities:**
-- [ ] **FIX: Podcast audio silent on iOS** — BLOCKER
-      Root cause: pod.play() called too far from user gesture chain
-      Fix: pre-unlock podAudioRef earlier, or call pod.play() synchronously
-      within gesture chain before awaiting TTS/bridge
-- [ ] **FIX: Duck effect on iOS** — use Pause/Resume instead of fade()
-      When isSpeaking=true on iOS: howl.pause()
-      When isSpeaking=false on iOS: howl.play()
-      Desktop keeps Howler.fade() as before
-      Detect iOS: /iPhone|iPad|iPod/.test(navigator.userAgent)
+**Immediate next steps (on `dev` branch):**
+- [ ] Replace placeholder icons with real PR artwork
+- [ ] Fix: slow initial load — lazy-load podcast chapters
+- [ ] Fix: manual podcast start from queue (play button in queue)
+- [ ] Record 60s demo video of podcast interruption feature
 
 ### Phase 2 — User API Keys (URGENT before public launch)
 - [ ] Settings: user enters own ElevenLabs + Anthropic API keys
 - [ ] Keys in localStorage, passed to proxy functions
-- [ ] Prevents depleting shared keys
 
 ### Phase 3 — Nostr Integration
 - [ ] npub input, fetch profile → moderator context
@@ -219,7 +227,7 @@ public/
 - [ ] NWC for Lightning payments
 
 ### Phase 4 — API Cost Model (V4V)
-- [ ] Stream sats via NWC (~10.000 sats/month per user at 2h/day)
+- [ ] ~10.000 sats/month per user, streamed via NWC
 
 ### Phase 5 — First Public Launch on Nostr
 - [ ] Test with friends, write README, publish on Nostr
@@ -227,8 +235,8 @@ public/
 ### Phase 6 — OpenSats Grant
 - [ ] Apply at https://opensats.org
 
-### Phase 7 — Native App (after funding)
-- [ ] React Native or Swift — solves ALL iOS audio issues permanently
+### Phase 7 — Native iOS/Android App (after funding)
+- [ ] Solves ALL iOS audio issues permanently
 - [ ] Background audio, Lock Screen controls, CarPlay
 
 ---
@@ -242,7 +250,7 @@ public/
 ## ElevenLabs
 - Model: `eleven_turbo_v2_5` (0.5 credits/char)
 - STT: `scribe_v2` (per minute)
-- ⚠️ Starter 30K/month depleted. Resets ~April 9 2026.
+- ⚠️ Starter 30K/month depleted March 2026. Resets ~April 9 2026.
 
 ---
 
@@ -252,12 +260,13 @@ public/
 1. Paste this file as context
 2. git checkout dev (always start on dev!)
 3. Check Roadmap — what's next?
-4. Develop on dev branch, push to origin dev (free deploys)
-5. iOS fixes: merge to ios-testing, test on ios-testing--personal-radio.netlify.app
-6. Production: merge dev to main, push, manual publish in Netlify
+4. Develop on dev branch → push to origin dev (free deploys)
+5. iOS fixes: merge to ios-testing
+6. Production: merge dev to main → push → manual publish in Netlify
 ```
 
 ---
 
 *Last updated: March 2026*
-*Current: iOS podcast audio silent + duck effect broken — next session fix these on ios-testing branch*
+*Current: iOS podcast audio unsolvable in PWA — desktop launch ready*
+*Next: Replace icons, lazy-load chapters, record demo video*
