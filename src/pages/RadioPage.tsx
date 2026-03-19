@@ -1335,10 +1335,23 @@ export function RadioPage() {
             console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
             try {
               if (isIOS) {
-                console.log('[Podcast] iOS: play() called immediately after src');
+                // Wait for readyState >= 2 (HAVE_CURRENT_DATA) before play().
+                // Calling play() at readyState=0 triggers AbortError on iOS —
+                // no data is buffered yet and iOS rejects the request.
+                // loadeddata fires sooner than canplay (readyState=4) and is
+                // sufficient for iOS to accept play().
+                if (pod.readyState < 2) {
+                  console.log(`[Podcast] iOS: waiting for loadeddata — readyState: ${pod.readyState}`);
+                  await new Promise<void>(resolve => {
+                    const h = () => { pod.removeEventListener('loadeddata', h); resolve(); };
+                    pod.addEventListener('loadeddata', h);
+                    setTimeout(resolve, 3000); // 3s fallback — don't block forever
+                  });
+                }
+                console.log(`[Podcast] iOS: play() after loadeddata — readyState: ${pod.readyState}`);
               }
               await pod.play();
-              if (isIOS) console.log('[Podcast] iOS: immediate play after src set');
+              if (isIOS) console.log('[Podcast] iOS: play() resolved successfully');
               podStarted = true;
               console.log(`[Podcast] volume after play: ${pod.volume}`);
               (Howler as any).ctx?.resume(); // keep shared AudioContext active
