@@ -7,6 +7,10 @@
   [headers.values]
     Content-Security-Policy = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-src 'self' https:; font-src 'self'; base-uri 'self'; manifest-src 'self'; connect-src 'self' blob: https: wss:; img-src 'self' data: blob: https:; media-src 'self' blob: https: data:"
 
+[[edge_functions]]
+  path     = "/podcast-stream"
+  function = "podcast-stream"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

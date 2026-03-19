@@ -1277,13 +1277,14 @@ export function RadioPage() {
               console.warn('[Podcast] URL resolution failed — falling back to direct URL:', resolveErr);
             }
 
-            // On iOS, route audio through the stream proxy so every response
-            // carries CORS headers + Accept-Ranges. Direct CDN URLs from podcast
-            // hosts (Anchor/Spotify, Megaphone) often lack CORS headers, which
-            // causes iOS Safari <audio> to silently fail or play no sound.
+            // On iOS, route through the Edge Function streaming proxy so every
+            // response carries CORS + Accept-Ranges headers. Direct CDN URLs from
+            // podcast hosts (Anchor/Spotify, Megaphone) often lack CORS headers,
+            // causing iOS Safari <audio> to silently fail. The Edge Function pipes
+            // a ReadableStream with no buffering and no 6 MB cap.
             if (isIOS) {
-              const streamProxyUrl = `/.netlify/functions/podcast-proxy?action=stream&url=${encodeURIComponent(audioSrc)}`;
-              console.log('[Podcast] iOS: streaming via proxy');
+              const streamProxyUrl = `/podcast-stream?url=${encodeURIComponent(audioSrc)}`;
+              console.log('[Podcast] iOS: streaming via Edge Function proxy');
               pod.src = streamProxyUrl;
             } else {
               pod.src = audioSrc;
