@@ -441,13 +441,16 @@ async function handleTts(event) {
     };
   }
 
-  const { text, voice_id } = parsed;
+  const { text, voice_id, voice_settings: clientSettings } = parsed;
   const model_id = 'eleven_turbo_v2_5'; // hardcoded server-side — client value ignored
+  // Client may override specific voice settings (e.g. language-specific expressiveness).
+  // model_id stays locked server-side; voice_settings are not secrets.
   const voice_settings = {
     stability:        0.40,
     similarity_boost: 0.75,
     style:            0.15,
     use_speaker_boost: true,
+    ...(clientSettings && typeof clientSettings === 'object' ? clientSettings : {}),
   };
 
   if (!text || !voice_id) {

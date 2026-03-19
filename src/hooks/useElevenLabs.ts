@@ -95,14 +95,19 @@ export function useElevenLabs() {
     setIsGenerating(true);
 
     try {
+      const isGerman = (() => {
+        try { return localStorage.getItem('pr:language') === 'Deutsch'; } catch { return false; }
+      })();
+
       const body = {
         text,
         voice_id: voiceId,
         model_id: 'eleven_turbo_v2_5',
         voice_settings: {
-          stability: opts.stability ?? 0.45,
+          // German: lower stability + higher style for a more expressive, lively delivery.
+          stability:        opts.stability        ?? (isGerman ? 0.25 : 0.45),
           similarity_boost: opts.similarity_boost ?? 0.82,
-          style: opts.style ?? 0.35,
+          style:            opts.style            ?? (isGerman ? 0.35 : 0.35),
           use_speaker_boost: opts.use_speaker_boost ?? true,
         },
       };
