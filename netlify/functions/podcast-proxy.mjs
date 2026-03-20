@@ -563,6 +563,90 @@ async function handleStt(event) {
   }
 }
 
+// ── action=tts-fish ───────────────────────────────────────────────────────────
+// Converts text to speech via Fish Audio API and returns audio/mpeg as binary.
+// Expected JSON body: { text, reference_id }
+// Uses FISH_AUDIO_API_KEY from Netlify env (server-side, no VITE_ prefix).
+//
+// Fish Audio emotion tags (same bracket syntax, slightly different names):
+//   [excited]  [laughing]  [sigh]  [whisper]
+// ElevenLabs tags like [laughs] / [sighs] / [whispers] are NOT identical —
+// Fish Audio will speak them literally. Use Fish-specific tags when this
+// provider is active. Tag translation is handled client-side in useElevenLabs.ts.
+
+async function handleTtsFish(event) {
+  const apiKey = process.env.FISH_AUDIO_API_KEY;
+  if (!apiKey) {
+    return {
+      statusCode: 500,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'FISH_AUDIO_API_KEY not configured' }),
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(event.body ?? '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid JSON body' }),
+    };
+  }
+
+  const { text, reference_id } = parsed;
+  if (!text || !reference_id) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing required fields: text, reference_id' }),
+    };
+  }
+
+  try {
+    const res = await fetch('https://api.fish.audio/v1/tts', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'model': 's2-pro',
+      },
+      body: JSON.stringify({ text, reference_id, format: 'mp3', latency: 'balanced' }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => res.statusText);
+      return {
+        statusCode: res.status,
+        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: `Fish Audio TTS ${res.status}: ${errText}` }),
+      };
+    }
+
+    const buffer = await res.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+
+    return {
+      statusCode: 200,
+      headers: {
+        ...corsHeaders(),
+        'Content-Type': 'audio/mpeg',
+        'Cache-Control': 'no-store',
+      },
+      body: base64,
+      isBase64Encoded: true,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `Fish Audio TTS proxy failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export const handler = async (event) => {
@@ -579,6 +663,7 @@ export const handler = async (event) => {
   if (action === 'audioresolver') return handleAudioResolver(params);
   if (action === 'stream')        return handleStream(event, params);
   if (action === 'tts')           return handleTts(event);
+  if (action === 'tts-fish')      return handleTtsFish(event);
   if (action === 'stt')           return handleStt(event);
   return handlePodcastIndex(action, params);
 };

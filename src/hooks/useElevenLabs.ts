@@ -6,7 +6,8 @@ import { useRef, useState, useCallback } from 'react';
 // accessed only through the podcast-proxy Netlify Function.
 const VOICE_ID_EN = import.meta.env.VITE_ELEVENLABS_VOICE_ID    as string | undefined;
 const VOICE_ID_DE = import.meta.env.VITE_ELEVENLABS_VOICE_ID_DE as string | undefined;
-const TTS_PROXY   = '/.netlify/functions/podcast-proxy?action=tts';
+const TTS_PROXY      = '/.netlify/functions/podcast-proxy?action=tts';
+const FISH_TTS_PROXY = '/.netlify/functions/podcast-proxy?action=tts-fish';
 
 if (!VOICE_ID_EN) {
   console.warn(
@@ -15,15 +16,47 @@ if (!VOICE_ID_EN) {
   );
 }
 
-/** Reads the current language from localStorage and returns the matching voice ID. */
+function getStoredLang(): string {
+  try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; }
+}
+
+/** Reads the current language from localStorage and returns the matching ElevenLabs voice ID. */
 function getVoiceId(): string | undefined {
-  const lang = (() => {
-    try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; }
-  })();
+  const lang = getStoredLang();
   console.log(`[ElevenLabs] Language from localStorage (pr:language): "${lang}"`);
   const id = lang === 'Deutsch' ? (VOICE_ID_DE ?? VOICE_ID_EN) : VOICE_ID_EN;
   console.log(`[ElevenLabs] Selected voice_id: ${id ?? '(none)'} (lang=${lang})`);
   return id;
+}
+
+/** Returns the active TTS provider ('elevenlabs' | 'fish'). */
+function getTtsProvider(): 'elevenlabs' | 'fish' {
+  try {
+    const v = localStorage.getItem('pr:tts-provider');
+    return v === 'fish' ? 'fish' : 'elevenlabs';
+  } catch { return 'elevenlabs'; }
+}
+
+/**
+ * Returns the Fish Audio reference_id (voice ID) for the current language.
+ * Stored in localStorage as pr:fish-voice-id-en / pr:fish-voice-id-de.
+ */
+function getFishVoiceId(): string | undefined {
+  const lang = getStoredLang();
+  const key  = lang === 'Deutsch' ? 'pr:fish-voice-id-de' : 'pr:fish-voice-id-en';
+  try { return localStorage.getItem(key) ?? undefined; } catch { return undefined; }
+}
+
+/**
+ * ElevenLabs uses [laughs] / [sighs] / [whispers].
+ * Fish Audio uses [laughing] / [sigh] / [whisper].
+ * Translate tags so emotion cues survive a provider switch.
+ */
+function translateTagsForFish(text: string): string {
+  return text
+    .replace(/\[laughs\]/gi,   '[laughing]')
+    .replace(/\[sighs\]/gi,    '[sigh]')
+    .replace(/\[whispers\]/gi, '[whisper]');
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -69,15 +102,8 @@ export function useElevenLabs() {
   };
 
   const speak = useCallback(async (text: string, opts: ElevenLabsOptions = {}): Promise<void> => {
-    const voiceId = getVoiceId();
-
-    // Graceful no-op when voice ID is missing
-    if (!voiceId) {
-      console.warn('[ElevenLabs] Skipping TTS — no voice ID configured for current language.');
-      return;
-    }
-
-    console.log('[ElevenLabs] speak() called with text:', text.slice(0, 80) + (text.length > 80 ? '…' : ''));
+    const provider = getTtsProvider();
+    console.log('[TTS] speak() — provider:', provider, '— text:', text.slice(0, 80) + (text.length > 80 ? '…' : ''));
 
     // Cancel any in-progress speech
     abortRef.current?.abort();
@@ -95,49 +121,69 @@ export function useElevenLabs() {
     setIsGenerating(true);
 
     try {
-      const isGerman = (() => {
-        try { return localStorage.getItem('pr:language') === 'Deutsch'; } catch { return false; }
-      })();
+      let proxyUrl: string;
+      let body: Record<string, unknown>;
 
-      const body = {
-        text,
-        voice_id: voiceId,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          // German: lower stability + higher style for a more expressive, lively delivery.
-          stability:        opts.stability        ?? (isGerman ? 0.25 : 0.45),
-          similarity_boost: opts.similarity_boost ?? 0.82,
-          style:            opts.style            ?? (isGerman ? 0.35 : 0.35),
-          use_speaker_boost: opts.use_speaker_boost ?? true,
-        },
-      };
+      if (provider === 'fish') {
+        const fishVoiceId = getFishVoiceId();
+        if (!fishVoiceId) {
+          console.warn('[Fish] Skipping TTS — no Fish voice ID set. Configure one in Settings.');
+          setIsGenerating(false);
+          return;
+        }
+        proxyUrl = FISH_TTS_PROXY;
+        body = { text: translateTagsForFish(text), reference_id: fishVoiceId };
+        console.log('[Fish] POSTing to:', proxyUrl, '— reference_id:', fishVoiceId);
+      } else {
+        const voiceId = getVoiceId();
+        if (!voiceId) {
+          console.warn('[ElevenLabs] Skipping TTS — no voice ID configured for current language.');
+          setIsGenerating(false);
+          return;
+        }
+        const isGerman = (() => {
+          try { return localStorage.getItem('pr:language') === 'Deutsch'; } catch { return false; }
+        })();
+        proxyUrl = TTS_PROXY;
+        body = {
+          text,
+          voice_id: voiceId,
+          model_id: 'eleven_turbo_v2_5',
+          voice_settings: {
+            // German: lower stability + higher style for a more expressive, lively delivery.
+            stability:         opts.stability        ?? (isGerman ? 0.25 : 0.45),
+            similarity_boost:  opts.similarity_boost ?? 0.82,
+            style:             opts.style            ?? (isGerman ? 0.35 : 0.35),
+            use_speaker_boost: opts.use_speaker_boost ?? true,
+          },
+        };
+        console.log('[ElevenLabs] POSTing to:', proxyUrl);
+      }
 
-      console.log('[ElevenLabs] POSTing to:', TTS_PROXY);
-
-      const response = await fetch(TTS_PROXY, {
+      const response = await fetch(proxyUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: abort.signal,
       });
 
-      console.log('[ElevenLabs] Response status:', response.status, response.statusText);
+      console.log('[TTS] Response status:', response.status, response.statusText);
 
       if (!response.ok) {
         const errText = await response.text().catch(() => response.statusText);
-        console.error('[ElevenLabs] API error response body:', errText);
-        throw new Error(`ElevenLabs ${response.status}: ${errText}`);
+        console.error('[TTS] API error response body:', errText);
+        throw new Error(`TTS ${response.status}: ${errText}`);
       }
 
       const blob = await response.blob();
-      console.log('[ElevenLabs] Audio blob received — size:', blob.size, 'bytes, type:', blob.type);
+      console.log('[TTS] Audio blob received — size:', blob.size, 'bytes, type:', blob.type);
 
       if (blob.size === 0) {
-        throw new Error('ElevenLabs returned an empty audio blob');
+        throw new Error('TTS returned an empty audio blob');
       }
 
       if (abort.signal.aborted) {
-        console.log('[ElevenLabs] Aborted after blob received, skipping playback');
+        console.log('[TTS] Aborted after blob received, skipping playback');
         return;
       }
 

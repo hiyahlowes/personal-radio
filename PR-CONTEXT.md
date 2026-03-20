@@ -26,12 +26,13 @@
 | Frontend | React + Vite + TypeScript |
 | Hosting | Netlify (Personal Plan, $9/mo) |
 | AI Moderator | Anthropic Claude Haiku (`claude-haiku-4-5-20251001`) |
-| Text-to-Speech | ElevenLabs (`eleven_turbo_v2_5`) |
+| Text-to-Speech | ElevenLabs (`eleven_turbo_v2_5`) → **Fish Audio geplant (22x günstiger)** |
 | Speech-to-Text | ElevenLabs Scribe v2 (natural cut points) |
 | Music | Wavlake API (Bitcoin Lightning Top Charts) |
 | Podcasts | PodcastIndex API + RSS Feeds via Fountain.fm |
 | Music Playback | **Howler.js v2.2.4** |
-| Payments | Bitcoin Lightning / Value4Value (Nostr/Zaps) |
+| Payments | Bitcoin Lightning / Value4Value — **NWC Integration geplant** |
+| NWC Agent | **Shakespeare AI** (von Alex Gleason, Nostr-trained) |
 
 ---
 
@@ -59,12 +60,6 @@ git checkout main && git merge dev && git push origin main
 ```
 Then manually publish in Netlify dashboard.
 
-**For iOS fixes:**
-```
-git checkout ios-testing && git merge dev && git push origin ios-testing
-git checkout dev
-```
-
 **NEVER push directly to main during development.**
 
 ---
@@ -82,8 +77,9 @@ git checkout dev
 |---|---|---|
 | `ELEVENLABS_API_KEY` | Server-side | TTS + STT via Netlify Function |
 | `VITE_ELEVENLABS_VOICE_ID` | Client-side | Default voice ID (English) |
-| `VITE_ELEVENLABS_VOICE_ID_DE` | Client-side | German voice: `87AwpS6yC86wa2WglbsK` |
+| `VITE_ELEVENLABS_VOICE_ID_DE` | Client-side | German voice (neue Stimme, lebendiger) |
 | `ANTHROPIC_API_KEY` | Server-side | Claude Moderator |
+| `FISH_AUDIO_API_KEY` | Server-side | Fish Audio TTS via Netlify Function |
 | `PODCASTINDEX_API_KEY/SECRET` | Server-side | PodcastIndex API |
 | `SECRETS_SCAN_ENABLED` | Build | `false` |
 
@@ -94,8 +90,8 @@ git checkout dev
 ```
 /.netlify/functions/claude-proxy     → Anthropic API
 /.netlify/functions/podcast-proxy    → actions: search, trending, feed, text, tts, stt, audioresolver
-/podcast-stream                      → Netlify Edge Function: streams podcast audio with CORS headers
-                                       Used on iOS only — desktop uses direct CDN URLs
+/podcast-stream                      → Netlify Edge Function: streams podcast audio mit CORS headers
+                                       Nur auf iOS — Desktop nutzt direkte CDN URLs
 ```
 
 ---
@@ -105,8 +101,8 @@ git checkout dev
 ```
 src/
 ├── hooks/
-│   ├── useRadioModerator.ts      # AI Moderator, prompts, language
-│   ├── usePodcastFeeds.ts        # RSS feed fetching, audio/mpeg enclosure preference
+│   ├── useRadioModerator.ts      # AI Moderator, Prompts auf Deutsch/Englisch/Französisch
+│   ├── usePodcastFeeds.ts        # RSS feed, audio/mpeg enclosure preference
 │   ├── usePodcastSegmenter.ts    # Podcast interruption, Scribe, chapters
 │   ├── usePodcastIndex.ts        # PodcastIndex API
 │   ├── useWavlakeTracks.ts       # Wavlake API, weighted shuffle, ambient pool
@@ -115,8 +111,6 @@ src/
 │   └── useZaps.ts                # Bitcoin Lightning / Nostr Zaps
 ├── pages/
 │   ├── RadioPage.tsx             # Main page, Howler refs, loop logic
-│   │                               iOS: pod.src = /podcast-stream?url=...
-│   │                               Desktop: pod.src = direct CDN URL
 │   ├── SettingsPage.tsx          # Settings, Song Graveyard
 │   └── SetupPage.tsx             # Onboarding
 netlify/
@@ -124,12 +118,12 @@ netlify/
 │   ├── claude-proxy.mjs
 │   └── podcast-proxy.mjs
 └── edge-functions/
-    └── podcast-stream.ts         # Streams podcast audio, forwards Range headers, adds CORS
+    └── podcast-stream.ts
 public/
-├── podcast-intro.mp3 / studio-return.mp3  # Jingles (via Howler)
-├── manifest.webmanifest          # PWA manifest
+├── podcast-intro.mp3 / studio-return.mp3
+├── manifest.webmanifest
 ├── sw.js                         # Service worker (network-first, pr-shell-v2)
-└── icon-192/512.png              # Purple placeholders
+└── icon-192/512.png              # Purple placeholders — ersetzen vor Launch!
 ```
 
 ---
@@ -147,44 +141,8 @@ public/
 | `musicVolumeRef` | Tracks actual music volume (iOS workaround) |
 
 **Duck pattern:**
-- iOS: `howl.pause()` / `howl.play()` (volume control impossible on iOS html5)
+- iOS: `howl.pause()` / `howl.play()`
 - Desktop: `howl.fade(vol, 0.08, 300ms)` / `howl.fade(0.08, 0.9, 2000ms)`
-
-**iOS unlock chain (touchend handler):**
-1. `_audioCtx = new AudioContext()` → warm up
-2. `Howler.ctx?.resume()` → unlock Howler's internal context
-3. `unlockTTSAudio()` → create + unlock ttsAudio singleton lazily
-4. `podAudioRef` pre-unlock via silent blob play/pause
-
----
-
-## Features (Live — Desktop ✅, iOS ⚠️)
-
-### Music
-- Wavlake Top Charts, weighted shuffle, Like/Dislike, Song Graveyard
-- Crossfade via Howler, Duck via Howler.fade() on desktop
-- Ambient bridge pool
-
-### Podcasts
-- PodcastIndex RSS, round-robin queue, audio/mpeg enclosure preference
-- Transcript-ready episodes prioritized, drag-to-reorder
-- Resume position, ±30s skip
-- iOS: streams via Edge Function proxy (/podcast-stream)
-- Desktop: direct CDN URLs
-
-### AI Moderator
-- Claude Haiku, language-aware (🇩🇪🇬🇧🇫🇷)
-- Expressive tags: `[laughs]` `[excited]` `[sighs]` `[whispers]` `[slow]`
-- ⚠️ NEVER: `[pause]` `[rushed]` `[drawn out]` — spoken aloud on turbo!
-- ⚠️ BUG: German language prompts sent in English → moderator mixes languages
-  → FIX NEEDED: translate prompt templates in useRadioModerator.ts to German
-
-### Podcast Interruption
-- Strategy A: chapters + transcript → natural cut point
-- Strategy B: Scribe lookahead → largest pause in 20-40s window
-
-### PWA
-- Installable on iOS/Android, network-first SW, auto-reload on deploy
 
 ---
 
@@ -192,55 +150,102 @@ public/
 
 | Feature | Status |
 |---|---|
-| Music playback | ✅ Works |
-| Crossfades | ✅ Works |
-| Moderator TTS | ✅ Works |
-| Duck effect | ⚠️ Pause/Resume (volume control impossible on iOS html5) |
-| Podcast audio | ❌ Silent — timeupdate fires correctly but no audio output |
-| Jingles | ✅ Via Howler |
+| Music playback | ✅ |
+| Crossfades | ✅ |
+| Moderator TTS | ✅ |
+| Duck effect | ⚠️ Pause/Resume |
+| Podcast audio | ❌ Silent — iOS WebKit Limitation, nicht lösbar in PWA |
 
-**Root cause of podcast silence on iOS:**
-iOS routes HTMLAudioElement streams to wrong Audio Session category.
-Even via Edge Function proxy with correct CORS headers, no audio output.
-This is a fundamental iOS WebKit limitation — not fixable in PWA.
-**Solution: Native App (React Native or Swift) after funding.**
+**Lösung: Native App nach Förderung.**
 
 ---
 
-## 🗺️ Roadmap
+## TTS — ElevenLabs Alternativen
 
-### Phase 1 — Launch Desktop (CURRENT)
+**Problem:** ElevenLabs ist die Achillesferse von PR — zu teuer für Scale.
 
-**Immediate next steps (on `dev` branch):**
-- [ ] **FIX: German moderator prompts** — prompts sent in English even when Deutsch selected
-      In useRadioModerator.ts: translate prompt templates to German when lang="Deutsch"
-      The CRITICAL system header exists but user prompt is English → Claude gets confused
-- [ ] Replace placeholder icons with real PR artwork
-- [ ] Fix: slow initial load — lazy-load podcast chapters
-- [ ] Fix: manual podcast start from queue (play button in queue)
-- [ ] Record 60s demo video of podcast interruption feature
+| Option | Kosten | Status |
+|---|---|---|
+| ElevenLabs `turbo_v2_5` | ~$330/1M chars | Aktuell im Einsatz |
+| **Fish Audio** | ~$15/1M chars (22x günstiger!) | **Nächster Schritt** |
+| Coqui TTS / ähnliches Open Source | Serverkosten | Langfristig, selbst gehostet |
 
-### Phase 2 — User API Keys (URGENT before public launch)
-- [ ] Settings: user enters own ElevenLabs + Anthropic API keys
-- [ ] Keys in localStorage, passed to proxy functions
+**Fish Audio** hat vergleichbare Qualität + emotionale Tags.
+→ Einbinden sobald Demo fertig ist, vor Public Launch.
 
-### Phase 3 — Nostr Integration
-- [ ] npub input, fetch profile → moderator context
-- [ ] Migrate listener memory → Nostr NIP-78
-- [ ] NWC for Lightning payments
+---
 
-### Phase 4 — API Cost Model (V4V)
-- [ ] ~10.000 sats/month per user, streamed via NWC
+## NWC Integration — Plan
 
-### Phase 5 — First Public Launch on Nostr
-- [ ] Test with friends, write README, publish on Nostr
+**Tool: Shakespeare AI** (von Alex Gleason)
+- Auf Nostr-Apps trainiert
+- Bereits in PR angefangen (steht im useZaps.ts)
 
-### Phase 6 — OpenSats Grant
-- [ ] Apply at https://opensats.org
+**Zahlungsströme:**
+1. **V4V Musik** → Sats an Wavlake-Künstler (via Wavlake API Lightning Adresse)
+2. **V4V Podcast** → Sats an Podcast-Hosts (via `<podcast:value>` Tag im RSS Feed)
+3. **Infrastruktur** → Sats an Thomas für API-Kosten (noch zu entscheiden)
 
-### Phase 7 — Native iOS/Android App (after funding)
-- [ ] Solves ALL iOS audio issues permanently
-- [ ] Background audio, Lock Screen controls, CarPlay
+**User Flow:**
+- User gibt NWC-String in Settings ein (von Alby, Mutiny, Phoenix etc.)
+- Während Musik/Podcast läuft → automatisch Sats streamen
+- Betrag: ~2 sats/Minute (kaum spürbar, aber fair)
+
+---
+
+## 🗺️ Roadmap — Priorisierte Reihenfolge
+
+### Schritt 1 — Fish Audio einbauen (DONE ✅)
+- [x] Fish Audio API in `podcast-proxy.mjs` als TTS Alternative einbinden
+- [x] Settings: User kann zwischen ElevenLabs und Fish Audio wählen
+- [ ] Eigenen Fish Audio API Key in Netlify hinterlegen (`FISH_AUDIO_API_KEY`)
+- [ ] Qualitätsvergleich: emotionale Tags, deutsche Stimme
+
+### Schritt 2 — NWC Integration (mit Shakespeare AI)
+- [ ] NWC-String Eingabe in Settings/Setup
+- [ ] V4V Musik: Sats an Wavlake-Künstler streamen
+- [ ] V4V Podcast: `<podcast:value>` Tag aus RSS parsen → Sats an Host
+- [ ] UI: Zeige wie viele Sats gestreamt wurden
+
+### Schritt 3 — OpenSats Grant Antrag
+- [ ] Antrag schreiben mit konkreten Milestones
+- [ ] Realistischer Betrag: **$20.000–$40.000 für 6 Monate**
+      → Stundensatz für Entwicklung + Infrastrukturkosten + App Store
+- [ ] Auszahlung 100% in Bitcoin
+- [ ] Milestones: Fish Audio ✅, NWC ✅, iOS Native App, 100 aktive User
+- [ ] **NICHT bewerben in: März, Juni, September, Dezember** (geschlossen)
+- [ ] Bewerbung: https://opensats.org
+- [ ] PR qualifiziert: Open Source ✅ Bitcoin/Lightning ✅ Podcast 2.0 ✅ V4V ✅ Nostr ✅
+
+### Danach — Launch + Native App
+- [ ] Demo-Video aufnehmen (60s, zeigt Podcast-Interruption Feature)
+- [ ] README schreiben
+- [ ] Auf Nostr launchen, Podcast-Hosts taggen
+- [ ] Native iOS/Android App (nach Förderung)
+
+---
+
+### Offene Bugs / Kleinigkeiten
+- [ ] Icons ersetzen (purple placeholder → echtes PR Artwork)
+- [ ] Langsamer initialer Load — Podcast Chapters lazy laden
+- [ ] Manueller Podcast-Start aus Queue (Play-Button in Queue)
+
+---
+
+## OpenSats Details
+
+**Grant-Typen:**
+- **General Grant**: einmalig/zeitlich begrenzt, für konkrete Features → **realistisch für PR**
+- **LTS Grant**: monatliches Gehalt (~$80-120K/Jahr), für kritische Infrastruktur → eher nicht
+
+**Rechnung für PR General Grant:**
+- Entwicklung (6 Monate): ~$3.000/Monat = $18.000
+- Infrastruktur (APIs, Server): ~$200/Monat = $1.200
+- App Store Gebühren: ~$800
+- **Gesamt: ~$20.000** (konservativ) bis **$40.000** (inkl. native App)
+
+**Wichtig:** OpenSats gibt keine festen Beträge vor — du schlägst Höhe + Milestones vor.
+Die Auszahlung erfolgt in Bitcoin (on-chain oder Lightning).
 
 ---
 
@@ -253,22 +258,21 @@ This is a fundamental iOS WebKit limitation — not fixable in PWA.
 ## ElevenLabs
 - Model: `eleven_turbo_v2_5` (0.5 credits/char)
 - ⚠️ Starter 30K/month depleted March 2026. Resets ~April 9 2026.
+- Langfristig durch Fish Audio ersetzen!
 
 ---
 
-## Workflow for New Chat Sessions
+## Workflow für neue Chat Sessions
 
 ```
-1. Paste this file as context
-2. git checkout dev (always start on dev!)
-3. Check Roadmap — what's next?
-4. Develop on dev branch → push to origin dev (free deploys)
-5. iOS fixes: merge to ios-testing
-6. Production: merge dev to main → push → manual publish in Netlify
+1. Diese Datei als Kontext einfügen
+2. git checkout dev
+3. Roadmap checken — was ist als nächstes dran?
+4. Auf dev entwickeln → push origin dev (kostenlose Deploys)
+5. Production: dev → main → manuell in Netlify publishen
 ```
 
 ---
 
-*Last updated: March 2026*
-*Current: iOS podcast audio unsolvable in PWA — desktop launch ready*
-*Next: Fix German moderator prompts, then merge to main for production*
+*Last updated: März 2026*
+*Nächster Schritt: Fish Audio einbauen → NWC Integration → OpenSats Antrag → Launch*
