@@ -368,6 +368,10 @@ export function RadioPage() {
   // Pre-generated TTS blob URL for the next track intro.
   // Generated in the background while the current track plays; consumed (and revoked) at loop top.
   const nextIntroUrlRef = useRef<string | null>(null);
+  // Set to true by Howler's onend when the track ends naturally.
+  // Checked in the crossfade wait so it can resolve even if the 'ended' event
+  // fired on audioRef while no listener was registered (e.g. during TTS playback).
+  const howlerEndedRef = useRef(false);
 
   // Sync refs to latest state/props
   useEffect(() => { moderatorRef.current      = moderator;      }, [moderator]);
@@ -760,8 +764,10 @@ export function RadioPage() {
       onend: () => {
         console.log('[Howler] onend — track finished naturally');
         if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
-        // The loop awaits 'ended' on audioRef; Howler bypasses that element,
-        // so dispatch the event manually to unblock the advancement promise.
+        // Signal that Howler ended — needed when TTS is playing and the crossfade
+        // wait's 'ended' listener isn't registered yet (the event would be lost).
+        howlerEndedRef.current = true;
+        // Also dispatch synthetic event for the case where the listener IS registered.
         audioRef.current?.dispatchEvent(new Event('ended'));
       },
     });
@@ -875,6 +881,7 @@ export function RadioPage() {
         audio.volume = DUCK_LEVEL; // always start ducked; speech/crossfade controls volume
         audio.load();
         _initHowl(t.liveUrl); // shadow Howl — verifies loading, never plays
+        howlerEndedRef.current = false; // reset for this track
         setCT(0);
         setDur(t.duration || 0);
         setIdx(currentIdx);
@@ -987,6 +994,7 @@ export function RadioPage() {
         if (preGenUrl) {
           console.log('[TTS] using pre-generated track intro');
           await moderatorRef.current.playAudio(preGenUrl);
+          console.log('[TTS] pre-generated intro finished — continuing loop');
         } else {
           // No speech this track — fade up immediately
           console.log('[Loop] no speech — fading up now');
@@ -1101,11 +1109,14 @@ export function RadioPage() {
           audio.removeEventListener('pause',      onPause);
         }
 
-        // If the track already ended during the speech phase (e.g. seeked to
-        // near-end by jumpToEpisode while TTS was still playing), `ended` fired
-        // before these listeners were registered and will never fire again.
-        // Resolve immediately so the loop doesn't hang.
-        if (audio.ended) {
+        // If the track already ended during the speech phase (e.g. during TTS or
+        // pre-generated intro playback), the 'ended' event fired before this listener
+        // was registered and will never fire again — resolve immediately.
+        // audio.ended covers the legacy HTMLAudioElement path.
+        // howlerEndedRef covers Howler's onend, which dispatches a synthetic event
+        // that does NOT set audio.ended on the legacy element.
+        if (audio.ended || howlerEndedRef.current) {
+          howlerEndedRef.current = false;
           console.log(`[Loop] track already ended during speech — advancing (gen ${myGen})`);
           resolve(true);
           return;
