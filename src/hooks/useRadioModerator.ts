@@ -396,7 +396,7 @@ export interface ModeratorState {
 }
 
 export function useRadioModerator() {
-  const { speak, stop, isSpeaking, isGenerating, error } = useElevenLabs();
+  const { speak, stop, generate, playUrl, isSpeaking, isGenerating, error } = useElevenLabs();
   const currentScriptRef = useRef('');
   const memoryContextRef = useRef('');
 
@@ -420,6 +420,94 @@ export function useRadioModerator() {
       await sayScript(aiScript ?? fallback);
     },
     [sayScript]
+  );
+
+  /**
+   * Generate Claude script + TTS audio without playing.
+   * Returns a blob URL (caller owns it — call URL.revokeObjectURL when done),
+   * or null on failure. Used for parallel pre-generation.
+   */
+  const buildAndGenerate = useCallback(
+    async (prompt: string, fallback: string): Promise<string | null> => {
+      const longForm = Math.random() < 0.2;
+      const aiScript = await generateScript(prompt, longForm, memoryContextRef.current);
+      return generate(aiScript ?? fallback);
+    },
+    [generate]
+  );
+
+  /** Pre-generate greeting audio without playing it. */
+  const generateGreetingAudio = useCallback(
+    async (listenerName: string): Promise<string | null> => {
+      const firstName = listenerName.split(' ')[0];
+      const date = getDateString();
+      const tod  = todLabel();
+      const prompt = lp(
+        `Write a ${tod} on-air greeting for a listener named ${firstName}. ` +
+        `Today is ${date}. ` +
+        `Sound warm, personal and authentic, like a real radio host welcoming them to their favourite station. ` +
+        `Reference the time of day naturally. 2 to 3 sentences.`,
+
+        `Schreibe eine ${tod}-Begrüßung auf Sendung für einen Hörer namens ${firstName}. ` +
+        `Heute ist ${date}. ` +
+        `Klinge warm, persönlich und authentisch, wie ein echter Radiosprecher der seinen Lieblingshörer begrüßt. ` +
+        `Erwähne die Tageszeit auf natürliche Weise. 2 bis 3 Sätze.`,
+
+        `Écris une salutation de ${tod} à l'antenne pour un auditeur prénommé ${firstName}. ` +
+        `Aujourd'hui, nous sommes le ${date}. ` +
+        `Sois chaleureux, personnel et authentique, comme un vrai animateur de radio accueillant son auditeur. ` +
+        `Mentionne le moment de la journée naturellement. 2 à 3 phrases.`,
+      );
+      return buildAndGenerate(prompt, fallbackGreeting(listenerName));
+    },
+    [buildAndGenerate]
+  );
+
+  /** Pre-generate track intro audio without playing it. */
+  const generateTrackIntroAudio = useCallback(
+    async (track: WavlakeTrack, isTopChart = false, isLiked = false): Promise<string | null> => {
+      void isTopChart;
+      const cleanTitle = cleanTrackTitle(track.name);
+      const likedEn = isLiked ? `The listener has liked this song before. You may acknowledge that naturally — e.g. a favourite returning — but only if it fits and feels genuine. Do not force it. ` : '';
+      const likedDe = isLiked ? `Der Hörer hat diesen Song bereits geliked. Erwähne das natürlich — z.B. ein Favorit der zurückkommt — aber nur wenn es sich organisch anfühlt. Nicht erzwingen. ` : '';
+      const likedFr = isLiked ? `L'auditeur a déjà aimé ce morceau. Tu peux le mentionner naturellement — ex. un favori qui revient — seulement si ça s'intègre bien. Ne force pas. ` : '';
+      const prompt = lp(
+        `Introduce the next song on air. ` +
+        `Artist: ${track.artist}. Song title: ${cleanTitle}. ` +
+        `Album: ${track.albumTitle || 'their latest work'}. ` +
+        likedEn +
+        `Sound like a natural radio DJ handing off to the track. Keep it to 1 to 2 sentences. ` +
+        `Vary your phrasing, do not start with Here's. Do not put the title in quotes. ` +
+        `Do not add version tags or extra info, just the artist and clean title.`,
+
+        `Moderiere den nächsten Song an. ` +
+        `Künstler: ${track.artist}. Songtitel: ${cleanTitle}. ` +
+        `Album: ${track.albumTitle || 'ihr aktuelles Werk'}. ` +
+        likedDe +
+        `Klinge wie ein natürlicher Radio-DJ der zum Track übergeht. 1 bis 2 Sätze. ` +
+        `Variiere die Formulierung, beginne nicht mit Hier ist. Keine Anführungszeichen um den Titel. ` +
+        `Keine Versions-Tags oder Extra-Infos, nur Künstler und Titel.`,
+
+        `Présente le prochain morceau à l'antenne. ` +
+        `Artiste : ${track.artist}. Titre : ${cleanTitle}. ` +
+        `Album : ${track.albumTitle || 'leur dernier travail'}. ` +
+        likedFr +
+        `Sois naturel comme un vrai DJ radio qui passe au morceau. 1 à 2 phrases. ` +
+        `Varie ta formulation, ne commence pas par Voici. Pas de guillemets autour du titre. ` +
+        `Pas d'infos de version, juste l'artiste et le titre.`,
+      );
+      return buildAndGenerate(prompt, fallbackTrackIntro(track));
+    },
+    [buildAndGenerate]
+  );
+
+  /** Play a pre-generated blob URL (from generateGreetingAudio / generateTrackIntroAudio). */
+  const playAudio = useCallback(
+    async (blobUrl: string): Promise<void> => {
+      currentScriptRef.current = '(pre-generated)';
+      await playUrl(blobUrl);
+    },
+    [playUrl]
   );
 
   const speakGreeting = useCallback(
@@ -871,5 +959,9 @@ export function useRadioModerator() {
     isGenerating,
     currentScript: currentScriptRef.current,
     error,
+    // Parallel pre-generation API
+    generateGreetingAudio,
+    generateTrackIntroAudio,
+    playAudio,
   };
 }

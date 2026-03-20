@@ -266,5 +266,135 @@ export function useElevenLabs() {
     setIsGenerating(false);
   }, []);
 
-  return { speak, stop, isSpeaking, isGenerating, error };
+  /**
+   * Generate TTS audio without playing it.
+   * Returns a blob URL (owned by caller — caller must revoke it when done),
+   * or null if generation failed / no voice is configured.
+   * Independent of the speak() abort controller — safe to call in parallel.
+   */
+  const generate = useCallback(async (
+    text: string,
+    opts: ElevenLabsOptions = {},
+  ): Promise<string | null> => {
+    const provider = getTtsProvider();
+    let proxyUrl: string;
+    let body: Record<string, unknown>;
+
+    if (provider === 'fish') {
+      const fishVoiceId = getFishVoiceId();
+      if (!fishVoiceId) {
+        console.warn('[TTS] generate() skipped — no Fish voice ID configured.');
+        return null;
+      }
+      proxyUrl = FISH_TTS_PROXY;
+      body = { text: translateTagsForFish(text), reference_id: fishVoiceId };
+    } else {
+      const voiceId = getVoiceId();
+      if (!voiceId) {
+        console.warn('[TTS] generate() skipped — no voice ID configured.');
+        return null;
+      }
+      const isGerman = (() => {
+        try { return localStorage.getItem('pr:language') === 'Deutsch'; } catch { return false; }
+      })();
+      proxyUrl = TTS_PROXY;
+      body = {
+        text,
+        voice_id: voiceId,
+        model_id: 'eleven_turbo_v2_5',
+        voice_settings: {
+          stability:         opts.stability        ?? (isGerman ? 0.25 : 0.45),
+          similarity_boost:  opts.similarity_boost ?? 0.82,
+          style:             opts.style            ?? (isGerman ? 0.35 : 0.35),
+          use_speaker_boost: opts.use_speaker_boost ?? true,
+        },
+      };
+    }
+
+    try {
+      const response = await fetch(proxyUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const errText = await response.text().catch(() => response.statusText);
+        console.error('[TTS] generate() API error:', errText);
+        return null;
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) { console.warn('[TTS] generate() returned empty blob'); return null; }
+      const url = URL.createObjectURL(blob);
+      console.log('[TTS] generate() blob ready — size:', blob.size);
+      return url;
+    } catch (err) {
+      console.error('[TTS] generate() failed:', err);
+      return null;
+    }
+  }, []);
+
+  /**
+   * Play a pre-generated blob URL (from generate()).
+   * Sets isSpeaking state. Revokes the blob URL when done.
+   * Never rejects — failures are logged and swallowed.
+   */
+  const playUrl = useCallback(async (blobUrl: string): Promise<void> => {
+    // Cancel any in-progress speech
+    abortRef.current?.abort();
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    const audio = getOrCreateAudio();
+    audio.pause();
+    if (currentBlobUrl.current) {
+      URL.revokeObjectURL(currentBlobUrl.current);
+      currentBlobUrl.current = null;
+    }
+
+    currentBlobUrl.current = blobUrl;
+    console.log('[TTS] playUrl() isSpeaking → TRUE');
+    setIsSpeaking(true);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        audio.src = blobUrl;
+        audio.volume = 1;
+
+        const cleanup = () => {
+          audio.removeEventListener('ended', onEnded);
+          audio.removeEventListener('error', onError);
+          abort.signal.removeEventListener('abort', onAbort);
+        };
+        const onEnded = () => { cleanup(); resolve(); };
+        const onError = (e: Event) => {
+          const mediaErr = (e.target as HTMLAudioElement).error;
+          cleanup();
+          reject(new Error(`Playback error: ${mediaErr?.message ?? 'unknown'}`));
+        };
+        const onAbort = () => { audio.pause(); cleanup(); resolve(); };
+
+        audio.addEventListener('ended', onEnded);
+        audio.addEventListener('error', onError);
+        abort.signal.addEventListener('abort', onAbort, { once: true });
+
+        audio.play().catch((playErr: unknown) => {
+          cleanup();
+          reject(playErr instanceof Error ? playErr : new Error(String(playErr)));
+        });
+      });
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'AbortError') {
+        console.error('[TTS] playUrl() error:', err);
+      }
+    } finally {
+      console.log('[TTS] playUrl() isSpeaking → FALSE');
+      setIsSpeaking(false);
+      if (currentBlobUrl.current === blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        currentBlobUrl.current = null;
+      }
+    }
+  }, []);
+
+  return { speak, stop, generate, playUrl, isSpeaking, isGenerating, error };
 }

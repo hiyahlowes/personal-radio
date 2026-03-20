@@ -365,6 +365,9 @@ export function RadioPage() {
   // episodes as played without adding podcastHistory to its dependency array.
   const markPlayedRef      = useRef<(id: string) => void>(() => {});
   const markMusicPlayedRef = useRef<(id: string) => void>(() => {});
+  // Pre-generated TTS blob URL for the next track intro.
+  // Generated in the background while the current track plays; consumed (and revoked) at loop top.
+  const nextIntroUrlRef = useRef<string | null>(null);
 
   // Sync refs to latest state/props
   useEffect(() => { moderatorRef.current      = moderator;      }, [moderator]);
@@ -898,6 +901,18 @@ export function RadioPage() {
           // Loading nextAudio in parallel caused the legacy HTMLAudioElement crossfade
           // to fire on iOS, creating two competing audio sessions.
           console.log('[Cleanup] old audioRef crossfade disabled');
+
+          // Pre-generate TTS intro for the next track while the current one plays.
+          // Discard any previously cached intro that was never used.
+          if (nextIntroUrlRef.current) {
+            URL.revokeObjectURL(nextIntroUrlRef.current);
+            nextIntroUrlRef.current = null;
+          }
+          const nextIsLiked = listenerMemoryRef.current.memory.likedSongs.includes(nextTrack.id);
+          console.log(`[TTS] pre-generating next intro for: "${nextTrack.name}"`);
+          moderatorRef.current.generateTrackIntroAudio(nextTrack, nextTrack.isTopChart, nextIsLiked)
+            .then(url => { nextIntroUrlRef.current = url; })
+            .catch(() => { /* silent — loop will fall back to speakTrackIntro */ });
         }
 
         // Wait for the current track to buffer before playing — prevents dead air.
@@ -941,12 +956,22 @@ export function RadioPage() {
         await moderatorRef.current.speakUserControlReaction();
       } else if (!greetedRef.current) {
         greetedRef.current = true;
-        console.log('[Loop] greeting + track intro over music');
-        await moderatorRef.current.speakGreeting(nameRef.current);
+        console.log('[TTS] parallel generation: greeting + intro');
+        const isLiked = listenerMemoryRef.current.memory.likedSongs.includes(t.id);
+        const [greetingUrl, introUrl] = await Promise.all([
+          moderatorRef.current.generateGreetingAudio(nameRef.current),
+          moderatorRef.current.generateTrackIntroAudio(t, t.isTopChart, isLiked),
+        ]);
+        if (greetingUrl) await moderatorRef.current.playAudio(greetingUrl);
         await sleep(400);
-        await moderatorRef.current.speakTrackIntro(t, t.isTopChart, listenerMemoryRef.current.memory.likedSongs.includes(t.id));
+        if (introUrl) await moderatorRef.current.playAudio(introUrl);
       } else if (silentCountRef.current >= silentBudgetRef.current && recentTracksRef.current.length > 0) {
-        // Time for a DJ break — review recent tracks and intro this one
+        // Time for a DJ break — review recent tracks and intro this one.
+        // Discard any pre-generated standalone intro: speakReviewAndIntro generates its own.
+        if (nextIntroUrlRef.current) {
+          URL.revokeObjectURL(nextIntroUrlRef.current);
+          nextIntroUrlRef.current = null;
+        }
         const played = recentTracksRef.current;
         recentTracksRef.current = [];
         console.log('[Loop] moderation — speakReviewAndIntro over music');
@@ -956,17 +981,25 @@ export function RadioPage() {
         silentCountRef.current  = 0;
         silentBudgetRef.current = randInt(1, 2);
       } else {
-        // No speech this track — fade up immediately
-        console.log('[Loop] no speech — fading up now');
-        cancelRampRef.current?.();
-        const target = mutedRef.current ? 0 : volumeRef.current;
-        const howlNoSpeech = howlRef.current;
-        if (howlNoSpeech) {
-          console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
-          howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
-          musicVolumeRef.current = target;
+        // Check if we have a pre-generated intro for this track.
+        const preGenUrl = nextIntroUrlRef.current;
+        nextIntroUrlRef.current = null; // consume (or clear if not matching)
+        if (preGenUrl) {
+          console.log('[TTS] using pre-generated track intro');
+          await moderatorRef.current.playAudio(preGenUrl);
         } else {
-          cancelRampRef.current = rampVolume(audio, target, 1000);
+          // No speech this track — fade up immediately
+          console.log('[Loop] no speech — fading up now');
+          cancelRampRef.current?.();
+          const target = mutedRef.current ? 0 : volumeRef.current;
+          const howlNoSpeech = howlRef.current;
+          if (howlNoSpeech) {
+            console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
+            howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
+            musicVolumeRef.current = target;
+          } else {
+            cancelRampRef.current = rampVolume(audio, target, 1000);
+          }
         }
       }
 
