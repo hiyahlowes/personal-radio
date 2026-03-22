@@ -372,8 +372,7 @@ export function RadioPage() {
   // at the top of its while body and runs the podcast slot immediately.
   const jumpToPodcastRef    = useRef<PodcastEpisode | null>(null);
   // Pre-generated greeting blob — generated on page load, consumed on first play.
-  const greetingBlobRef     = useRef<string | null>(null);
-  const greetingBlobTimeRef = useRef<number>(0);
+  const greetingCacheRef = useRef<{ blob: string; timestamp: number } | null>(null);
   // Pre-generated podcast transition blob — generated when podcast slot is predicted.
   const podTransitionBlobRef     = useRef<string | null>(null);
   const podTransitionBlobTimeRef = useRef<number>(0);
@@ -484,9 +483,8 @@ export function RadioPage() {
 
     moderator.generateGreetingAudio(firstName).then(url => {
       if (!url) { console.warn('[TTS-Pre] greeting pre-gen returned null — will generate on play'); return; }
-      if (greetingBlobRef.current) URL.revokeObjectURL(greetingBlobRef.current);
-      greetingBlobRef.current     = url;
-      greetingBlobTimeRef.current = Date.now();
+      if (greetingCacheRef.current) URL.revokeObjectURL(greetingCacheRef.current.blob);
+      greetingCacheRef.current = { blob: url, timestamp: Date.now() };
       console.log(`[TTS-Pre] greeting ready — name="${firstName}" lang="${storedLang}"`);
     }).catch(() => {});
   }, [firstName]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1383,11 +1381,11 @@ export function RadioPage() {
         const TTL = 300_000; // 5 minutes
 
         // Use pre-generated greeting if fresh; otherwise generate now.
-        const cachedGreeting = greetingBlobRef.current;
-        const ageMs          = Date.now() - greetingBlobTimeRef.current;
+        const cachedGreeting = greetingCacheRef.current;
+        const ageMs          = cachedGreeting ? Date.now() - cachedGreeting.timestamp : -1;
         const greetingFresh  = !!cachedGreeting && ageMs < TTL;
         const playLang       = (() => { try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; } })();
-        console.log(`[TTS-Pre] greeting cache check — cached=${!!cachedGreeting} ageMs=${ageMs} fresh=${greetingFresh} name="${nameRef.current}" lang="${playLang}"`);
+        console.log(`[TTS-Pre] greeting cache check — cached=${!!cachedGreeting} ageMs=${ageMs === -1 ? 'n/a' : ageMs} fresh=${greetingFresh} name="${nameRef.current}" lang="${playLang}"`);
 
         // Start intro generation immediately in background (runs while greeting plays).
         const introPromise = moderatorRef.current.generateTrackIntroAudio(t, t.isTopChart, isLiked);
@@ -1395,12 +1393,12 @@ export function RadioPage() {
         let greetingUrl: string | null;
         if (greetingFresh && cachedGreeting) {
           console.log('[TTS-Pre] using cached greeting');
-          greetingBlobRef.current = null; // consume
-          greetingUrl = cachedGreeting;
+          greetingCacheRef.current = null; // consume
+          greetingUrl = cachedGreeting.blob;
         } else {
-          console.log(`[TTS] greeting cache miss — reason: cached=${!!cachedGreeting} ageMs=${ageMs} — generating now`);
-          if (cachedGreeting) URL.revokeObjectURL(cachedGreeting);
-          greetingBlobRef.current = null;
+          console.log(`[TTS] greeting cache miss — reason: cached=${!!cachedGreeting} ageMs=${ageMs === -1 ? 'n/a' : ageMs} — generating now`);
+          if (cachedGreeting) URL.revokeObjectURL(cachedGreeting.blob);
+          greetingCacheRef.current = null;
           greetingUrl = await moderatorRef.current.generateGreetingAudio(nameRef.current);
         }
 

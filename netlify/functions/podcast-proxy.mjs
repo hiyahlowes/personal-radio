@@ -598,6 +598,7 @@ async function handleTtsFish(event) {
   const { text, reference_id, lang } = parsed;
 
   // ── Debug logs — visible in Netlify Dashboard → Functions → podcast-proxy ──
+  console.log('[Fish] all env keys with FISH:', Object.keys(process.env).filter(k => k.includes('FISH')));
   console.log('[Fish] env voices — EN:', process.env.FISH_AUDIO_VOICE_ID?.slice(0, 8), 'DE:', process.env.FISH_AUDIO_VOICE_ID_DE?.slice(0, 8));
   console.log('[Fish] lang received:', lang);
   console.log('[Fish] reference_id from client:', reference_id?.slice(0, 8) || 'none');
