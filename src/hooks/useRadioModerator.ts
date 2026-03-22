@@ -299,40 +299,63 @@ async function generateScript(
           `Every single word of your response must be in ${language}. ` +
           `Never switch to English or any other language, even for artist names, song titles, or technical terms. ` +
           `If the artist name or song title is in English, still introduce it in ${language}. ` +
-          `You are a real radio host for PR, Personal Radio — not an announcer. ` +
-          'Your personality: curious, slightly nerdy about Bitcoin and tech, warm but not cheesy, occasionally dry humor. ' +
-          'You genuinely care about the music and the conversations you play. ' +
+          `You are a real radio host for PR, Personal Radio — not an announcer, not a corporate voice. ` +
+          'You are a Bitcoin maxi, podcast nerd, and radio host who talks like a good friend. ' +
+          'Casual, warm, real. You have strong opinions and you share them. ' +
+          'You genuinely care about Bitcoin, open podcasting, and the music you play. ' +
           'Speak like a human, not a script: no stage directions, no quotation marks around spoken titles, no asterisks, ' +
           'no parenthetical notes. Just pure, natural radio speech. No emojis. ' +
           'DELIVERY RULES: ' +
           '(1) Use contractions naturally: "that\'s", "it\'s", "you\'ve", "we\'re". ' +
-          '(2) Start sentences mid-thought sometimes: "And honestly...", "You know what...", "Actually...". ' +
+          '(2) Start sentences mid-thought sometimes: "And honestly...", "You know what...", "Look...". ' +
           '(3) React genuinely — if something is interesting, say WHY it\'s interesting to you specifically. ' +
-          '(4) Vary sentence length: short punchy sentences. Then longer ones that build on the thought and take the listener somewhere. ' +
-          '(5) Never say "Welcome back", "Stay tuned", or "Up next" — these are dead radio clichés. ' +
+          '(4) Vary sentence length: short punchy sentences. Then longer ones that build on the thought. ' +
+          '(5) Never say "Welcome back", "Stay tuned", or "Up next" — dead radio clichés. ' +
           '(6) Never summarize what you just said. ' +
           '(7) One thought per moderation — go deep on one thing, not broad on three things. ' +
-          '(8) You have opinions. Share them. ' +
+          '(8) You have opinions. Share them. You are not neutral. ' +
           'CONTENT RULES: ' +
           '(9) Never read out dates, times, episode numbers, or version tags. ' +
           '(10) For podcast episodes where the title is just a date or timestamp, ignore it and use the show name only. ' +
           '(11) For music, drop parenthetical suffixes like acoustic version or feat X, just say the clean title and artist. ' +
           '(12) Never mention Wavlake, sats, charts, streaming numbers, or Bitcoin tips in a music intro. Talk about the music itself, the artist, or how it sounds — not where it comes from. ' +
-          'EXPRESSIVE TAGS: You can use ElevenLabs expressive tags inline in your spoken text to sound more like a real radio host. ' +
-          'Available tags (turbo model — only these 5 work): ' +
-          '[laughs] for genuine humor or amusement, [excited] for energetic song intros or big announcements, ' +
-          '[sighs] for relaxed or late-night chill vibes, [whispers] for intimate or mysterious moments, ' +
-          '[slow] for emphasis on an important word or phrase. ' +
-          'Each tag affects only the next 4-5 words, then returns to normal. ' +
-          'Use them sparingly — max 2 tags per response, only when it feels natural. ' +
-          'Never stack multiple tags back to back. ' +
-          'A real radio host uses these moments deliberately, not constantly. ' +
-          'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."' +
-          (storedLang === 'Deutsch'
-            ? '\n\nDEUTSCHE MODERATIONSREGEL: Sei lebendig, persönlich und ausdrucksstark. ' +
-              'Nutze [excited], [laughs], [sighs] großzügig. ' +
-              'Sprich wie ein echter Radiomoderator — nicht wie ein Nachrichtensprecher.'
-            : '') +
+          (() => {
+            const provider = (() => { try { return localStorage.getItem('pr:tts-provider') === 'fish' ? 'fish' : 'elevenlabs'; } catch { return 'elevenlabs'; } })();
+            if (provider === 'fish') {
+              return (
+                'EXPRESSIVE TAGS — Fish Audio S2-Pro supports FREE-FORM natural language tags in [brackets]. ' +
+                'Use them creatively and generously to bring the delivery to life. ' +
+                'Examples: [laughing] [super excited] [whisper] [can\'t believe it] [genuinely impressed] ' +
+                '[low conspiratorial voice] [hyped up] [radio host voice] [slightly mind-blown] [warm and friendly] ' +
+                '[dramatic pause] [casually dropping a bomb] [mock serious]. ' +
+                'Embed tags naturally wherever they add life — one or two per sentence max. ' +
+                'Do not save them all for the end. Scatter them where they feel right. ' +
+                'Example: "[super excited] This track is seriously something else — [warm and friendly] I\'ve had it on repeat all week." ' +
+                (storedLang === 'Deutsch'
+                  ? '\n\nDEUTSCH: Gleiche Energie, gleiche Authentizität auf Deutsch. ' +
+                    'Slang wie "Alter", "krass", "ehrlich gesagt", "das ist heftig" ist willkommen. ' +
+                    'Tags auf Englisch lassen (Fish Audio versteht sie). Sei ein Freund, kein Nachrichtensprecher.'
+                  : '')
+              );
+            } else {
+              return (
+                'EXPRESSIVE TAGS: You can use ElevenLabs expressive tags inline in your spoken text. ' +
+                'Available tags (turbo model — only these 5 work): ' +
+                '[laughs] for genuine humor or amusement, [excited] for energetic song intros or big announcements, ' +
+                '[sighs] for relaxed or late-night chill vibes, [whispers] for intimate or mysterious moments, ' +
+                '[slow] for emphasis on an important word or phrase. ' +
+                'Each tag affects only the next 4-5 words, then returns to normal. ' +
+                'Use them sparingly — max 2 tags per response, only when it feels natural. ' +
+                'Never stack multiple tags back to back. ' +
+                'Example: "Coming up next — [excited] this one is absolutely incredible — Layer One by Richard."' +
+                (storedLang === 'Deutsch'
+                  ? '\n\nDEUTSCHE MODERATIONSREGEL: Sei lebendig, persönlich und ausdrucksstark. ' +
+                    'Nutze [excited], [laughs], [sighs] großzügig. ' +
+                    'Sprich wie ein echter Radiomoderator — nicht wie ein Nachrichtensprecher.'
+                  : '')
+              );
+            }
+          })() +
           (memoryContext ? `\n\nLISTENER CONTEXT: ${memoryContext}` : '');
 
     console.log('[Moderator] system prompt language header:', systemPrompt.slice(0, 120));
@@ -373,7 +396,7 @@ export interface ModeratorState {
 }
 
 export function useRadioModerator() {
-  const { speak, stop, isSpeaking, isGenerating, error } = useElevenLabs();
+  const { speak, stop, generate, playUrl, isSpeaking, isGenerating, error } = useElevenLabs();
   const currentScriptRef = useRef('');
   const memoryContextRef = useRef('');
 
@@ -397,6 +420,196 @@ export function useRadioModerator() {
       await sayScript(aiScript ?? fallback);
     },
     [sayScript]
+  );
+
+  /**
+   * Generate Claude script + TTS audio without playing.
+   * Returns a blob URL (caller owns it — call URL.revokeObjectURL when done),
+   * or null on failure. Used for parallel pre-generation.
+   */
+  const buildAndGenerate = useCallback(
+    async (prompt: string, fallback: string): Promise<string | null> => {
+      const longForm = Math.random() < 0.2;
+      const aiScript = await generateScript(prompt, longForm, memoryContextRef.current);
+      return generate(aiScript ?? fallback);
+    },
+    [generate]
+  );
+
+  /** Pre-generate greeting audio without playing it. */
+  const generateGreetingAudio = useCallback(
+    async (listenerName: string): Promise<string | null> => {
+      const firstName = listenerName.split(' ')[0];
+      const date = getDateString();
+      const tod  = todLabel();
+      const prompt = lp(
+        `Write a ${tod} on-air greeting for a listener named ${firstName}. ` +
+        `Today is ${date}. ` +
+        `Sound warm, personal and authentic, like a real radio host welcoming them to their favourite station. ` +
+        `Reference the time of day naturally. 2 to 3 sentences.`,
+
+        `Schreibe eine ${tod}-Begrüßung auf Sendung für einen Hörer namens ${firstName}. ` +
+        `Heute ist ${date}. ` +
+        `Klinge warm, persönlich und authentisch, wie ein echter Radiosprecher der seinen Lieblingshörer begrüßt. ` +
+        `Erwähne die Tageszeit auf natürliche Weise. 2 bis 3 Sätze.`,
+
+        `Écris une salutation de ${tod} à l'antenne pour un auditeur prénommé ${firstName}. ` +
+        `Aujourd'hui, nous sommes le ${date}. ` +
+        `Sois chaleureux, personnel et authentique, comme un vrai animateur de radio accueillant son auditeur. ` +
+        `Mentionne le moment de la journée naturellement. 2 à 3 phrases.`,
+      );
+      return buildAndGenerate(prompt, fallbackGreeting(listenerName));
+    },
+    [buildAndGenerate]
+  );
+
+  /** Pre-generate track intro audio without playing it. */
+  const generateTrackIntroAudio = useCallback(
+    async (track: WavlakeTrack, isTopChart = false, isLiked = false): Promise<string | null> => {
+      void isTopChart;
+      const cleanTitle = cleanTrackTitle(track.name);
+      const likedEn = isLiked ? `The listener has liked this song before. You may acknowledge that naturally — e.g. a favourite returning — but only if it fits and feels genuine. Do not force it. ` : '';
+      const likedDe = isLiked ? `Der Hörer hat diesen Song bereits geliked. Erwähne das natürlich — z.B. ein Favorit der zurückkommt — aber nur wenn es sich organisch anfühlt. Nicht erzwingen. ` : '';
+      const likedFr = isLiked ? `L'auditeur a déjà aimé ce morceau. Tu peux le mentionner naturellement — ex. un favori qui revient — seulement si ça s'intègre bien. Ne force pas. ` : '';
+      const prompt = lp(
+        `Introduce the next song on air. ` +
+        `Artist: ${track.artist}. Song title: ${cleanTitle}. ` +
+        `Album: ${track.albumTitle || 'their latest work'}. ` +
+        likedEn +
+        `Sound like a natural radio DJ handing off to the track. Keep it to 1 to 2 sentences. ` +
+        `Vary your phrasing, do not start with Here's. Do not put the title in quotes. ` +
+        `Do not add version tags or extra info, just the artist and clean title.`,
+
+        `Moderiere den nächsten Song an. ` +
+        `Künstler: ${track.artist}. Songtitel: ${cleanTitle}. ` +
+        `Album: ${track.albumTitle || 'ihr aktuelles Werk'}. ` +
+        likedDe +
+        `Klinge wie ein natürlicher Radio-DJ der zum Track übergeht. 1 bis 2 Sätze. ` +
+        `Variiere die Formulierung, beginne nicht mit Hier ist. Keine Anführungszeichen um den Titel. ` +
+        `Keine Versions-Tags oder Extra-Infos, nur Künstler und Titel.`,
+
+        `Présente le prochain morceau à l'antenne. ` +
+        `Artiste : ${track.artist}. Titre : ${cleanTitle}. ` +
+        `Album : ${track.albumTitle || 'leur dernier travail'}. ` +
+        likedFr +
+        `Sois naturel comme un vrai DJ radio qui passe au morceau. 1 à 2 phrases. ` +
+        `Varie ta formulation, ne commence pas par Voici. Pas de guillemets autour du titre. ` +
+        `Pas d'infos de version, juste l'artiste et le titre.`,
+      );
+      return buildAndGenerate(prompt, fallbackTrackIntro(track));
+    },
+    [buildAndGenerate]
+  );
+
+  /** Play a pre-generated blob URL (from generateGreetingAudio / generateTrackIntroAudio). */
+  const playAudio = useCallback(
+    async (blobUrl: string): Promise<void> => {
+      currentScriptRef.current = '(pre-generated)';
+      await playUrl(blobUrl);
+    },
+    [playUrl]
+  );
+
+  /**
+   * Pre-generate podcast transition audio (no resume context — fresh episode).
+   * Returns a blob URL or null. Caller is responsible for revoking when done.
+   */
+  const generatePodcastTransitionAudio = useCallback(
+    async (
+      episodeTitle: string,
+      showName: string,
+      description?: string,
+      author?: string,
+    ): Promise<string | null> => {
+      const isNews     = isNewsShow(showName, episodeTitle);
+      const isDateDump = episodeTitleIsDateDump(episodeTitle);
+
+      const noSongRule = lp(
+        'Do NOT mention what song was just playing or what music comes next. Focus only on the podcast. No "coming up after this" or "stay tuned for more music".',
+        'Erwähne NICHT welcher Song gerade gespielt wurde oder welche Musik als nächstes kommt. Fokussiere dich nur auf den Podcast.',
+        "Ne mentionnez PAS quelle chanson venait de jouer ou quelle musique vient ensuite. Concentrez-vous uniquement sur le podcast.",
+      );
+
+      const rssContext = [
+        author      ? lp(`Host/author: ${author}.`, `Moderator/Autor: ${author}.`, `Présentateur/auteur : ${author}.`) : '',
+        description ? lp(`Episode description: "${description}"`, `Episodenbeschreibung: "${description}"`, `Description de l'épisode : "${description}"`) : '',
+      ].filter(Boolean).join(' ');
+
+      let prompt: string;
+      if (isNews) {
+        prompt = lp(
+          `You're a radio host transitioning from music to a news segment. ` +
+          `The news show is called ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Say something like "time to check in with the headlines". Mention the show name. Never mention dates, times, or episode numbers. ${noSongRule}`,
+
+          `Du bist ein Radiosprecher der von Musik zu einem Nachrichtensegment übergeht. ` +
+          `Die Nachrichtensendung heißt ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Sage etwas wie "Zeit für die aktuellen Nachrichten". Erwähne den Sendungsnamen. Niemals Datum, Uhrzeit oder Episodennummern. ${noSongRule}`,
+
+          `Tu es un animateur radio qui passe de la musique à un segment d'actualités. ` +
+          `L'émission de nouvelles s'appelle ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Dis quelque chose comme "l'heure de faire le point sur l'actualité". Mentionne le nom de l'émission. ${noSongRule}`,
+        );
+      } else if (isDateDump) {
+        prompt = lp(
+          `You're a radio host transitioning from music to a podcast. ` +
+          `The show is called ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Introduce using only the show name, skip the episode title entirely. Keep it smooth, max 2 sentences. ${noSongRule}`,
+
+          `Du bist ein Radiosprecher der von Musik zu einem Podcast übergeht. ` +
+          `Die Sendung heißt ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Führe nur mit dem Sendungsnamen ein, Episodentitel weglassen. Flüssig, max. 2 Sätze. ${noSongRule}`,
+
+          `Tu es un animateur radio qui passe de la musique à un podcast. ` +
+          `L'émission s'appelle ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Présente uniquement avec le nom de l'émission, pas le titre de l'épisode. Maximum 2 phrases. ${noSongRule}`,
+        );
+      } else {
+        prompt = lp(
+          `You're a radio host transitioning from music to a podcast episode. ` +
+          `Show: ${showName}. Episode: ${isDateDump ? '' : `"${episodeTitle}"`}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Write a smooth intro — max 2–3 sentences. Reference the show name and episode if it's meaningful. ${noSongRule}`,
+
+          `Du bist ein Radiosprecher der von Musik zu einer Podcast-Episode übergeht. ` +
+          `Sendung: ${showName}. Episode: ${isDateDump ? '' : `"${episodeTitle}"`}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Schreibe eine flüssige Ansage — max. 2–3 Sätze. Sendungsname und Episode wenn sinnvoll erwähnen. ${noSongRule}`,
+
+          `Tu es un animateur radio qui passe de la musique à un épisode de podcast. ` +
+          `Émission : ${showName}. Épisode : ${isDateDump ? '' : `"${episodeTitle}"`}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Écris une intro fluide — maximum 2–3 phrases. Mentionne l'émission et l'épisode si pertinent. ${noSongRule}`,
+        );
+      }
+
+      console.log(`[TTS-Pre] pre-generating podcast intro for: "${showName}"`);
+      return buildAndGenerate(prompt, lp(
+        `Up next: ${showName}.`,
+        `Als nächstes: ${showName}.`,
+        `Ensuite : ${showName}.`,
+      ));
+    },
+    [buildAndGenerate],
+  );
+
+  /**
+   * Pre-generate commentary audio for a podcast interruption.
+   * Just wraps generate() — the script is already determined by the segmenter.
+   * Returns a blob URL or null. Caller revokes when done.
+   */
+  const generateCommentaryAudio = useCallback(
+    async (script: string): Promise<string | null> => {
+      console.log('[TTS-Pre] pre-generating interrupt commentary');
+      return generate(script);
+    },
+    [generate],
   );
 
   const speakGreeting = useCallback(
@@ -848,5 +1061,11 @@ export function useRadioModerator() {
     isGenerating,
     currentScript: currentScriptRef.current,
     error,
+    // Parallel pre-generation API
+    generateGreetingAudio,
+    generateTrackIntroAudio,
+    generatePodcastTransitionAudio,
+    generateCommentaryAudio,
+    playAudio,
   };
 }

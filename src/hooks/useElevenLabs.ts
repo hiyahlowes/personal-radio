@@ -6,7 +6,8 @@ import { useRef, useState, useCallback } from 'react';
 // accessed only through the podcast-proxy Netlify Function.
 const VOICE_ID_EN = import.meta.env.VITE_ELEVENLABS_VOICE_ID    as string | undefined;
 const VOICE_ID_DE = import.meta.env.VITE_ELEVENLABS_VOICE_ID_DE as string | undefined;
-const TTS_PROXY   = '/.netlify/functions/podcast-proxy?action=tts';
+const TTS_PROXY      = '/.netlify/functions/podcast-proxy?action=tts';
+const FISH_TTS_PROXY = '/.netlify/functions/podcast-proxy?action=tts-fish';
 
 if (!VOICE_ID_EN) {
   console.warn(
@@ -15,15 +16,47 @@ if (!VOICE_ID_EN) {
   );
 }
 
-/** Reads the current language from localStorage and returns the matching voice ID. */
+function getStoredLang(): string {
+  try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; }
+}
+
+/** Reads the current language from localStorage and returns the matching ElevenLabs voice ID. */
 function getVoiceId(): string | undefined {
-  const lang = (() => {
-    try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; }
-  })();
+  const lang = getStoredLang();
   console.log(`[ElevenLabs] Language from localStorage (pr:language): "${lang}"`);
   const id = lang === 'Deutsch' ? (VOICE_ID_DE ?? VOICE_ID_EN) : VOICE_ID_EN;
   console.log(`[ElevenLabs] Selected voice_id: ${id ?? '(none)'} (lang=${lang})`);
   return id;
+}
+
+/** Returns the active TTS provider ('elevenlabs' | 'fish'). */
+function getTtsProvider(): 'elevenlabs' | 'fish' {
+  try {
+    const v = localStorage.getItem('pr:tts-provider');
+    return v === 'fish' ? 'fish' : 'elevenlabs';
+  } catch { return 'elevenlabs'; }
+}
+
+/**
+ * Returns the Fish Audio reference_id (voice ID) for the current language.
+ * Stored in localStorage as pr:fish-voice-id-en / pr:fish-voice-id-de.
+ */
+function getFishVoiceId(): string | undefined {
+  const lang = getStoredLang();
+  const key  = lang === 'Deutsch' ? 'pr:fish-voice-id-de' : 'pr:fish-voice-id-en';
+  try { return localStorage.getItem(key) ?? undefined; } catch { return undefined; }
+}
+
+/**
+ * ElevenLabs uses [laughs] / [sighs] / [whispers].
+ * Fish Audio uses [laughing] / [sigh] / [whisper].
+ * Translate tags so emotion cues survive a provider switch.
+ */
+function translateTagsForFish(text: string): string {
+  return text
+    .replace(/\[laughs\]/gi,   '[laughing]')
+    .replace(/\[sighs\]/gi,    '[sigh]')
+    .replace(/\[whispers\]/gi, '[whisper]');
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -69,15 +102,8 @@ export function useElevenLabs() {
   };
 
   const speak = useCallback(async (text: string, opts: ElevenLabsOptions = {}): Promise<void> => {
-    const voiceId = getVoiceId();
-
-    // Graceful no-op when voice ID is missing
-    if (!voiceId) {
-      console.warn('[ElevenLabs] Skipping TTS — no voice ID configured for current language.');
-      return;
-    }
-
-    console.log('[ElevenLabs] speak() called with text:', text.slice(0, 80) + (text.length > 80 ? '…' : ''));
+    const provider = getTtsProvider();
+    console.log('[TTS] speak() — provider:', provider, '— text:', text.slice(0, 80) + (text.length > 80 ? '…' : ''));
 
     // Cancel any in-progress speech
     abortRef.current?.abort();
@@ -95,49 +121,69 @@ export function useElevenLabs() {
     setIsGenerating(true);
 
     try {
-      const isGerman = (() => {
-        try { return localStorage.getItem('pr:language') === 'Deutsch'; } catch { return false; }
-      })();
+      let proxyUrl: string;
+      let body: Record<string, unknown>;
 
-      const body = {
-        text,
-        voice_id: voiceId,
-        model_id: 'eleven_turbo_v2_5',
-        voice_settings: {
-          // German: lower stability + higher style for a more expressive, lively delivery.
-          stability:        opts.stability        ?? (isGerman ? 0.25 : 0.45),
-          similarity_boost: opts.similarity_boost ?? 0.82,
-          style:            opts.style            ?? (isGerman ? 0.35 : 0.35),
-          use_speaker_boost: opts.use_speaker_boost ?? true,
-        },
-      };
+      if (provider === 'fish') {
+        const lang        = getStoredLang() === 'Deutsch' ? 'de' : 'en';
+        const fishVoiceId = getFishVoiceId(); // optional custom override from Settings
+        proxyUrl = FISH_TTS_PROXY;
+        // Always send lang so the server can pick the right default voice.
+        // Only include reference_id when the user has set a custom voice.
+        body = fishVoiceId
+          ? { text: translateTagsForFish(text), lang, reference_id: fishVoiceId }
+          : { text: translateTagsForFish(text), lang };
+        console.log('[Fish] POSTing to:', proxyUrl, '— lang:', lang, fishVoiceId ? `reference_id: ${fishVoiceId}` : '(using server default)');
+      } else {
+        const voiceId = getVoiceId();
+        if (!voiceId) {
+          console.warn('[ElevenLabs] Skipping TTS — no voice ID configured for current language.');
+          setIsGenerating(false);
+          return;
+        }
+        const isGerman = (() => {
+          try { return localStorage.getItem('pr:language') === 'Deutsch'; } catch { return false; }
+        })();
+        proxyUrl = TTS_PROXY;
+        body = {
+          text,
+          voice_id: voiceId,
+          model_id: 'eleven_turbo_v2_5',
+          voice_settings: {
+            // German: lower stability + higher style for a more expressive, lively delivery.
+            stability:         opts.stability        ?? (isGerman ? 0.25 : 0.45),
+            similarity_boost:  opts.similarity_boost ?? 0.82,
+            style:             opts.style            ?? (isGerman ? 0.35 : 0.35),
+            use_speaker_boost: opts.use_speaker_boost ?? true,
+          },
+        };
+        console.log('[ElevenLabs] POSTing to:', proxyUrl);
+      }
 
-      console.log('[ElevenLabs] POSTing to:', TTS_PROXY);
-
-      const response = await fetch(TTS_PROXY, {
+      const response = await fetch(proxyUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: abort.signal,
       });
 
-      console.log('[ElevenLabs] Response status:', response.status, response.statusText);
+      console.log('[TTS] Response status:', response.status, response.statusText);
 
       if (!response.ok) {
         const errText = await response.text().catch(() => response.statusText);
-        console.error('[ElevenLabs] API error response body:', errText);
-        throw new Error(`ElevenLabs ${response.status}: ${errText}`);
+        console.error('[TTS] API error response body:', errText);
+        throw new Error(`TTS ${response.status}: ${errText}`);
       }
 
       const blob = await response.blob();
-      console.log('[ElevenLabs] Audio blob received — size:', blob.size, 'bytes, type:', blob.type);
+      console.log('[TTS] Audio blob received — size:', blob.size, 'bytes, type:', blob.type);
 
       if (blob.size === 0) {
-        throw new Error('ElevenLabs returned an empty audio blob');
+        throw new Error('TTS returned an empty audio blob');
       }
 
       if (abort.signal.aborted) {
-        console.log('[ElevenLabs] Aborted after blob received, skipping playback');
+        console.log('[TTS] Aborted after blob received, skipping playback');
         return;
       }
 
@@ -220,5 +266,134 @@ export function useElevenLabs() {
     setIsGenerating(false);
   }, []);
 
-  return { speak, stop, isSpeaking, isGenerating, error };
+  /**
+   * Generate TTS audio without playing it.
+   * Returns a blob URL (owned by caller — caller must revoke it when done),
+   * or null if generation failed / no voice is configured.
+   * Independent of the speak() abort controller — safe to call in parallel.
+   */
+  const generate = useCallback(async (
+    text: string,
+    opts: ElevenLabsOptions = {},
+  ): Promise<string | null> => {
+    const provider = getTtsProvider();
+    let proxyUrl: string;
+    let body: Record<string, unknown>;
+
+    if (provider === 'fish') {
+      const lang        = getStoredLang() === 'Deutsch' ? 'de' : 'en';
+      const fishVoiceId = getFishVoiceId(); // optional custom override
+      proxyUrl = FISH_TTS_PROXY;
+      body = fishVoiceId
+        ? { text: translateTagsForFish(text), lang, reference_id: fishVoiceId }
+        : { text: translateTagsForFish(text), lang };
+    } else {
+      const voiceId = getVoiceId();
+      if (!voiceId) {
+        console.warn('[TTS] generate() skipped — no voice ID configured.');
+        return null;
+      }
+      const isGerman = (() => {
+        try { return localStorage.getItem('pr:language') === 'Deutsch'; } catch { return false; }
+      })();
+      proxyUrl = TTS_PROXY;
+      body = {
+        text,
+        voice_id: voiceId,
+        model_id: 'eleven_turbo_v2_5',
+        voice_settings: {
+          stability:         opts.stability        ?? (isGerman ? 0.25 : 0.45),
+          similarity_boost:  opts.similarity_boost ?? 0.82,
+          style:             opts.style            ?? (isGerman ? 0.35 : 0.35),
+          use_speaker_boost: opts.use_speaker_boost ?? true,
+        },
+      };
+    }
+
+    try {
+      const response = await fetch(proxyUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const errText = await response.text().catch(() => response.statusText);
+        console.error('[TTS] generate() API error:', errText);
+        return null;
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) { console.warn('[TTS] generate() returned empty blob'); return null; }
+      const url = URL.createObjectURL(blob);
+      console.log('[TTS] generate() blob ready — size:', blob.size);
+      return url;
+    } catch (err) {
+      console.error('[TTS] generate() failed:', err);
+      return null;
+    }
+  }, []);
+
+  /**
+   * Play a pre-generated blob URL (from generate()).
+   * Sets isSpeaking state. Revokes the blob URL when done.
+   * Never rejects — failures are logged and swallowed.
+   */
+  const playUrl = useCallback(async (blobUrl: string): Promise<void> => {
+    // Cancel any in-progress speech
+    abortRef.current?.abort();
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    const audio = getOrCreateAudio();
+    audio.pause();
+    if (currentBlobUrl.current) {
+      URL.revokeObjectURL(currentBlobUrl.current);
+      currentBlobUrl.current = null;
+    }
+
+    currentBlobUrl.current = blobUrl;
+    console.log('[TTS] playUrl() isSpeaking → TRUE');
+    setIsSpeaking(true);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        audio.src = blobUrl;
+        audio.volume = 1;
+
+        const cleanup = () => {
+          audio.removeEventListener('ended', onEnded);
+          audio.removeEventListener('error', onError);
+          abort.signal.removeEventListener('abort', onAbort);
+        };
+        const onEnded = () => { cleanup(); resolve(); };
+        const onError = (e: Event) => {
+          const mediaErr = (e.target as HTMLAudioElement).error;
+          cleanup();
+          reject(new Error(`Playback error: ${mediaErr?.message ?? 'unknown'}`));
+        };
+        const onAbort = () => { audio.pause(); cleanup(); resolve(); };
+
+        audio.addEventListener('ended', onEnded);
+        audio.addEventListener('error', onError);
+        abort.signal.addEventListener('abort', onAbort, { once: true });
+
+        audio.play().catch((playErr: unknown) => {
+          cleanup();
+          reject(playErr instanceof Error ? playErr : new Error(String(playErr)));
+        });
+      });
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'AbortError') {
+        console.error('[TTS] playUrl() error:', err);
+      }
+    } finally {
+      console.log('[TTS] playUrl() isSpeaking → FALSE');
+      setIsSpeaking(false);
+      if (currentBlobUrl.current === blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        currentBlobUrl.current = null;
+      }
+    }
+  }, []);
+
+  return { speak, stop, generate, playUrl, isSpeaking, isGenerating, error };
 }

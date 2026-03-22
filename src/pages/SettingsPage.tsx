@@ -73,6 +73,25 @@ export function SettingsPage() {
     localStorage.setItem(LANGUAGE_KEY, lang);
   };
 
+  // ── TTS Provider ──────────────────────────────────────────────────────────
+  const [ttsProvider, setTtsProvider] = useState<'elevenlabs' | 'fish'>(
+    () => (localStorage.getItem('pr:tts-provider') === 'fish' ? 'fish' : 'elevenlabs')
+  );
+  const [fishVoiceIdEn, setFishVoiceIdEn] = useState(
+    () => localStorage.getItem('pr:fish-voice-id-en') ?? ''
+  );
+  const [fishVoiceIdDe, setFishVoiceIdDe] = useState(
+    () => localStorage.getItem('pr:fish-voice-id-de') ?? ''
+  );
+  const selectTtsProvider = (p: 'elevenlabs' | 'fish') => {
+    setTtsProvider(p);
+    localStorage.setItem('pr:tts-provider', p);
+  };
+  const saveFishVoiceIds = () => {
+    localStorage.setItem('pr:fish-voice-id-en', fishVoiceIdEn.trim());
+    localStorage.setItem('pr:fish-voice-id-de', fishVoiceIdDe.trim());
+  };
+
   // ── Genre selection ───────────────────────────────────────────────────────
   const [selectedGenres, setSelectedGenres] = useState<string[]>(loadStoredGenres);
   const [genresSaved, setGenresSaved]       = useState(false);
@@ -287,6 +306,59 @@ export function SettingsPage() {
                 {lang.label}
               </button>
             ))}
+          </div>
+        </section>
+
+        {/* ── TTS Provider ───────────────────────────────────────────────── */}
+        <section className="fade-in-up space-y-3">
+          <div>
+            <h2 className="text-lg font-bold">Voice provider</h2>
+            <p className="text-sm text-white/40 mt-0.5">Fish Audio is ~22x cheaper with similar quality</p>
+          </div>
+          <div className="glass-card rounded-2xl p-4 space-y-4">
+            <div className="flex gap-2">
+              {(['elevenlabs', 'fish'] as const).map(p => (
+                <button
+                  key={p}
+                  onClick={() => selectTtsProvider(p)}
+                  aria-pressed={ttsProvider === p}
+                  className={`flex-1 py-2.5 rounded-xl border text-sm font-semibold transition-all duration-150 select-none
+                    ${ttsProvider === p
+                      ? 'bg-purple-600/25 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
+                      : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
+                    }`}
+                >
+                  {p === 'elevenlabs' ? 'ElevenLabs' : 'Fish Audio'}
+                </button>
+              ))}
+            </div>
+            {ttsProvider === 'fish' && (
+              <div className="space-y-3">
+                <p className="text-xs text-white/40">
+                  Enter your Fish Audio <span className="text-white/60">reference_id</span> (voice ID) from{' '}
+                  <span className="text-purple-300">fish.audio</span>.
+                  The API key is set server-side (<code className="text-xs bg-white/10 px-1 rounded">FISH_AUDIO_API_KEY</code>).
+                </p>
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={fishVoiceIdEn}
+                    onChange={e => setFishVoiceIdEn(e.target.value)}
+                    onBlur={saveFishVoiceIds}
+                    placeholder="Voice ID — English"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+                  />
+                  <input
+                    type="text"
+                    value={fishVoiceIdDe}
+                    onChange={e => setFishVoiceIdDe(e.target.value)}
+                    onBlur={saveFishVoiceIds}
+                    placeholder="Voice ID — Deutsch (optional)"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </section>
 

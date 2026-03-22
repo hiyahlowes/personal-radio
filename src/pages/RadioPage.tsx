@@ -365,6 +365,24 @@ export function RadioPage() {
   // episodes as played without adding podcastHistory to its dependency array.
   const markPlayedRef      = useRef<(id: string) => void>(() => {});
   const markMusicPlayedRef = useRef<(id: string) => void>(() => {});
+  // Pre-generated TTS blob URL for the next track intro.
+  // Generated in the background while the current track plays; consumed (and revoked) at loop top.
+  const nextIntroUrlRef     = useRef<string | null>(null);
+  // Non-null when startPodcastFromQueue() was called — advanceLoop picks it up
+  // at the top of its while body and runs the podcast slot immediately.
+  const jumpToPodcastRef    = useRef<PodcastEpisode | null>(null);
+  // Pre-generated greeting blob — generated on page load, consumed on first play.
+  const greetingCacheRef = useRef<{ blob: string; timestamp: number } | null>(null);
+  // Pre-generated podcast transition blob — generated when podcast slot is predicted.
+  const podTransitionBlobRef     = useRef<string | null>(null);
+  const podTransitionBlobTimeRef = useRef<number>(0);
+  // Pre-generated podcast interruption commentary blob.
+  const podInterruptBlobRef     = useRef<string | null>(null);
+  const podInterruptBlobTimeRef = useRef<number>(0);
+  // Set to true by Howler's onend when the track ends naturally.
+  // Checked in the crossfade wait so it can resolve even if the 'ended' event
+  // fired on audioRef while no listener was registered (e.g. during TTS playback).
+  const howlerEndedRef = useRef(false);
 
   // Sync refs to latest state/props
   useEffect(() => { moderatorRef.current      = moderator;      }, [moderator]);
@@ -451,6 +469,25 @@ export function RadioPage() {
   useEffect(() => {
     fetchAmbientBridgePool(5).then(pool => { ambientBridgeRef.current = pool; });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Pre-generate greeting ─────────────────────────────────────────────────
+  // Fires whenever `name` state is confirmed (including after a Settings return).
+  // Using `name` as dep avoids a timing race where `getStoredName()` on bare
+  // mount returns 'Listener' before the stored value has been read into state.
+  // Skips if the radio has already played a greeting this session.
+  useEffect(() => {
+    if (greetedRef.current) return; // don't regenerate once the session is live
+
+    const storedLang = (() => { try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; } })();
+    console.log(`[TTS-Pre] scheduling greeting pre-gen — name="${firstName}" lang="${storedLang}"`);
+
+    moderator.generateGreetingAudio(firstName).then(url => {
+      if (!url) { console.warn('[TTS-Pre] greeting pre-gen returned null — will generate on play'); return; }
+      if (greetingCacheRef.current) URL.revokeObjectURL(greetingCacheRef.current.blob);
+      greetingCacheRef.current = { blob: url, timestamp: Date.now() };
+      console.log(`[TTS-Pre] greeting ready — name="${firstName}" lang="${storedLang}"`);
+    }).catch(() => {});
+  }, [firstName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Push listener memory context to the AI moderator whenever memory changes.
   useEffect(() => {
@@ -757,8 +794,10 @@ export function RadioPage() {
       onend: () => {
         console.log('[Howler] onend — track finished naturally');
         if (howlPollRef.current) { clearInterval(howlPollRef.current); howlPollRef.current = null; }
-        // The loop awaits 'ended' on audioRef; Howler bypasses that element,
-        // so dispatch the event manually to unblock the advancement promise.
+        // Signal that Howler ended — needed when TTS is playing and the crossfade
+        // wait's 'ended' listener isn't registered yet (the event would be lost).
+        howlerEndedRef.current = true;
+        // Also dispatch synthetic event for the case where the listener IS registered.
         audioRef.current?.dispatchEvent(new Event('ended'));
       },
     });
@@ -772,7 +811,364 @@ export function RadioPage() {
 
     console.log('[Loop] advanceLoop() started, idxRef:', idxRef.current);
 
+    // ── Local helper: run the full podcast transition + playback flow ──────────
+    // Called from the automatic podcast slot (every 2-3 tracks) AND from the
+    // manual queue jump (jumpToPodcastRef). All refs are captured by closure.
+    // `break` in the original code becomes `return` here; the outer while loop
+    // exits naturally when runningRef.current is false after the function returns.
+    // `continue` (iOS skipEpisode) also becomes `return` — outer while continues
+    // because runningRef.current stays true in that case.
+    const runPodcastSlot = async (episode: PodcastEpisode, nextMusicIdx: number): Promise<void> => {
+      const nextMusicTrack = tracksRef.current[nextMusicIdx];
+
+      console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
+
+      // ── Transition: ambient bridge → moderator → fade → jingle → podcast ────
+      podcastTransitionRef.current = true;
+
+      if (crossfadeTimerRef.current !== null) {
+        clearTimeout(crossfadeTimerRef.current);
+        crossfadeTimerRef.current = null;
+        console.log('[Howler] crossfade cancelled — podcast slot');
+      }
+
+      // 1. Stop current music and find ambient bridge.
+      if (howlRef.current) { howlRef.current.stop(); console.log('[Howler] stopped for podcast transition'); }
+      if (nextHowlRef.current) { nextHowlRef.current.stop(); nextHowlRef.current = null; }
+      audio.pause();
+
+      const bridgePool  = ambientBridgeRef.current.length > 0
+        ? ambientBridgeRef.current
+        : tracksRef.current.filter(t => t.genreId === 'ambient');
+      const bridgeTrack = bridgePool.length > 0
+        ? bridgePool[Math.floor(Math.random() * bridgePool.length)]
+        : null;
+
+      bridgeHowlRef.current?.stop();
+      bridgeHowlRef.current = null;
+
+      if (bridgeTrack) {
+        await new Promise<void>(resolve => {
+          const bh = new Howl({ src: [bridgeTrack.liveUrl], html5: true, volume: 0,
+            onload: () => resolve(), onerror: () => resolve() });
+          bridgeHowlRef.current = bh;
+          setTimeout(resolve, 3000);
+        });
+        bridgeHowlRef.current?.volume(BRIDGE_VOLUME);
+        bridgeHowlRef.current?.play();
+        console.log(`[Bridge] using ambient track: ${bridgeTrack.name} by ${bridgeTrack.artist}`);
+      } else {
+        console.log('[Loop] podcast bridge — no ambient tracks available, skipping');
+      }
+
+      if (!runningRef.current) {
+        bridgeHowlRef.current?.stop(); bridgeHowlRef.current = null;
+        podcastTransitionRef.current = false; return;
+      }
+
+      // 2. Moderator speaks over ambient bridge.
+      const epRecord = listenerMemoryRef.current.memory.episodeHistory
+        .find(e => e.episodeId === episode.id);
+      const resumeCtx: ResumeContext | undefined =
+        epRecord && epRecord.lastPosition > 60
+          ? { lastPosition: epRecord.lastPosition, topics: epRecord.topics }
+          : undefined;
+      console.log(
+        `[Loop] podcast transition — isResuming=${!!resumeCtx}`,
+        resumeCtx ? `lastPosition=${Math.round(resumeCtx.lastPosition)}s topics=[${resumeCtx.topics.join(', ')}]` : '',
+      );
+
+      const TTL_POD         = 300_000;
+      const cachedTransition = podTransitionBlobRef.current;
+      const transitionFresh  = cachedTransition && !resumeCtx &&
+        (Date.now() - podTransitionBlobTimeRef.current) < TTL_POD;
+
+      if (transitionFresh && cachedTransition) {
+        console.log('[TTS-Pre] using cached podcast intro');
+        podTransitionBlobRef.current = null;
+        await moderatorRef.current.playAudio(cachedTransition);
+        console.log('[TTS-Pre] podcast intro finished — continuing to podcast start');
+      } else {
+        if (cachedTransition) { URL.revokeObjectURL(cachedTransition); podTransitionBlobRef.current = null; }
+        await moderatorRef.current.speakPodcastTransition(
+          episode.title, episode.feedTitle, episode.description, episode.author, resumeCtx,
+        );
+      }
+      console.log('[Loop] podcast intro done');
+
+      if (!runningRef.current) {
+        bridgeHowlRef.current?.stop(); bridgeHowlRef.current = null;
+        podcastTransitionRef.current = false; return;
+      }
+
+      // 3. Fade bridge to 0 — jingle must play into silence.
+      if (bridgeHowlRef.current) {
+        const bh = bridgeHowlRef.current;
+        await new Promise<void>(res => {
+          bh.once('fade', res); bh.fade(bh.volume() as number, 0, 3000); setTimeout(res, 3500);
+        });
+        bh.stop(); bridgeHowlRef.current = null;
+        console.log('[Bridge] ambient Howl stopped');
+      }
+
+      // 4. Jingle then podcast.
+      await playJingle('/podcast-intro.mp3');
+
+      if (!runningRef.current) { podcastTransitionRef.current = false; return; }
+      podcastTransitionRef.current = false;
+      if (!runningRef.current) return;
+
+      // ── Load podcast onto the dedicated CORS-enabled audio element ──────────
+      const pod = podAudioRef.current;
+      if (!pod) {
+        console.warn('[Loop] podAudioRef not ready — skipping podcast');
+      } else {
+        loopGenRef.current++;
+        audio.pause();
+
+        console.log(`[Podcast] resolving audio URL via proxy: ${episode.audioUrl}`);
+        let audioSrc = episode.audioUrl;
+        try {
+          const resolverUrl = `/.netlify/functions/podcast-proxy?action=audioresolver&url=${encodeURIComponent(episode.audioUrl)}`;
+          const resolveRes = await fetch(resolverUrl, { signal: AbortSignal.timeout(10_000) });
+          if (resolveRes.ok) {
+            const finalUrl = (await resolveRes.text()).trim();
+            if (finalUrl) { console.log(`[Podcast] resolved URL: ${finalUrl}`); audioSrc = finalUrl; }
+          }
+        } catch (resolveErr) {
+          console.warn('[Podcast] URL resolution failed — falling back to direct URL:', resolveErr);
+        }
+
+        if (isIOS) {
+          pod.src = `/podcast-stream?url=${encodeURIComponent(audioSrc)}`;
+          console.log('[Podcast] iOS: streaming via Edge Function proxy');
+        } else {
+          pod.src = audioSrc;
+        }
+        pod.volume = 1.0;
+
+        const savedPos = loadPodcastPosition(episode.id);
+        if (savedPos > 5) {
+          console.log(`[Loop] resuming from saved position ${savedPos.toFixed(0)}s`);
+          pod.addEventListener('loadedmetadata', () => {
+            if (isFinite(pod.duration) && savedPos < pod.duration - 10) {
+              pod.currentTime = savedPos;
+              console.log(`[Loop] seeked to ${savedPos.toFixed(0)}s`);
+            }
+          }, { once: true });
+        }
+
+        if (!isIOS) {
+          pod.load();
+          console.log(`[Podcast] waiting for canplay — readyState: ${pod.readyState}`);
+          await new Promise<void>(resolve => {
+            if (pod.readyState >= 3) { console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`); return resolve(); }
+            const onCanPlay = () => { pod.removeEventListener('canplay', onCanPlay); pod.removeEventListener('error', onError); resolve(); };
+            const onError   = () => { pod.removeEventListener('canplay', onCanPlay); pod.removeEventListener('error', onError); resolve(); };
+            pod.addEventListener('canplay', onCanPlay);
+            pod.addEventListener('error',   onError);
+            setTimeout(resolve, 5000);
+          });
+        }
+
+        setCT(savedPos > 5 ? savedPos : 0);
+        setDur(episode.duration || 0);
+        nowPlayingRef.current = { kind: 'podcast', episode };
+        setNowPlaying({ kind: 'podcast', episode });
+
+        let podStarted  = false;
+        let skipEpisode = false;
+        if (audioSrc.includes('.mp4')) console.warn(`[Podcast] mp4 URL detected — may fail on iOS: ${audioSrc}`);
+        console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
+        try {
+          if (isIOS) {
+            if (pod.readyState < 2) {
+              console.log(`[Podcast] iOS: waiting for loadeddata — readyState: ${pod.readyState}`);
+              await new Promise<void>(resolve => {
+                const h = () => { pod.removeEventListener('loadeddata', h); resolve(); };
+                pod.addEventListener('loadeddata', h);
+                setTimeout(resolve, 3000);
+              });
+            }
+            console.log(`[Podcast] iOS: play() after loadeddata — readyState: ${pod.readyState}`);
+          }
+          await pod.play();
+          if (isIOS) console.log('[Podcast] iOS: play() resolved successfully');
+          podStarted = true;
+          console.log(`[Podcast] volume after play: ${pod.volume}`);
+          (Howler as any).ctx?.resume();
+          console.log('[Loop] podcast play() resolved — podcast playing');
+        } catch (e) {
+          const isNotSupported = e instanceof DOMException && e.name === 'NotSupportedError';
+          if (isIOS && isNotSupported) {
+            console.warn('[Podcast] iOS: NotSupportedError — skipping episode');
+            markPlayedRef.current(episode.id);
+            setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
+            skipEpisode = true;
+          } else {
+            console.error('[Loop] podcast play failed — resetting state:', e);
+            runningRef.current = false;
+            resumePodcastEpisodeRef.current = null;
+            nowPlayingRef.current = null; setNowPlaying(null); setPlaying(false);
+          }
+        }
+
+        // Pod failed — skipEpisode: return so outer while continues (runningRef still true).
+        // Non-iOS failure: runningRef set false above → outer while exits.
+        if (!podStarted) return;
+
+        // ── Run episode through segmenter ─────────────────────────────────────
+        if (podStarted && runningRef.current) {
+          const localMod    = moderatorRef;
+          const localTracks = tracksRef;
+          const localIdx    = idxRef;
+          const localVolume = volumeRef;
+          const localMuted  = mutedRef;
+
+          await segmenter.runEpisode(
+            pod,
+            episode.title,
+            episode.feedTitle,
+            episode.chapters,
+            {
+              isRunning: () => runningRef.current,
+
+              onCommentaryReady: (script) => {
+                if (podInterruptBlobRef.current) {
+                  URL.revokeObjectURL(podInterruptBlobRef.current);
+                  podInterruptBlobRef.current = null;
+                }
+                moderatorRef.current.generateCommentaryAudio(script).then(url => {
+                  podInterruptBlobRef.current     = url;
+                  podInterruptBlobTimeRef.current = Date.now();
+                }).catch(() => {});
+              },
+
+              speakCommentary: async (script) => {
+                await playJingle('/studio-return.mp3');
+                const TTL_INTERRUPT = 300_000;
+                const cached        = podInterruptBlobRef.current;
+                const fresh         = cached && (Date.now() - podInterruptBlobTimeRef.current) < TTL_INTERRUPT;
+                if (fresh && cached) {
+                  console.log('[TTS-Pre] using cached interrupt commentary');
+                  podInterruptBlobRef.current = null;
+                  await localMod.current.playAudio(cached);
+                } else {
+                  if (cached) { URL.revokeObjectURL(cached); podInterruptBlobRef.current = null; }
+                  await localMod.current.speakPodcastSegmentCommentary(script);
+                }
+              },
+
+              playMusicBreak: async () => {
+                const breakCount = randInt(1, 3);
+                const allTracks  = localTracks.current;
+                if (!allTracks.length) return;
+                for (let b = 0; b < breakCount; b++) {
+                  if (!runningRef.current) break;
+                  const breakTrack = allTracks[Math.floor(Math.random() * allTracks.length)];
+                  console.log(`[Loop] music break ${b + 1}/${breakCount}: "${breakTrack.name}"`);
+                  nowPlayingRef.current = { kind: 'music', track: breakTrack };
+                  setNowPlaying({ kind: 'music', track: breakTrack });
+                  if (b === 0) await localMod.current.speakTrackIntro(breakTrack);
+                  if (!runningRef.current) break;
+                  audio.src    = breakTrack.liveUrl;
+                  audio.volume = DUCK_LEVEL;
+                  audio.load();
+                  loopGenRef.current++;
+                  const breakGen = loopGenRef.current;
+                  try { await audio.play(); } catch (e) { console.error('[Loop] break music play failed:', e); break; }
+                  cancelRampRef.current?.();
+                  cancelRampRef.current = rampVolume(audio, localMuted.current ? 0 : localVolume.current, 1000);
+                  await new Promise<void>(res => {
+                    const onEnded = () => { if (loopGenRef.current !== breakGen) return; cleanup(); res(); };
+                    const onPause = () => { if (loopGenRef.current !== breakGen) return; if (!runningRef.current) { cleanup(); res(); } };
+                    function cleanup() { audio.removeEventListener('ended', onEnded); audio.removeEventListener('pause', onPause); }
+                    audio.addEventListener('ended', onEnded);
+                    audio.addEventListener('pause', onPause);
+                  });
+                  audio.pause();
+                }
+                nowPlayingRef.current = { kind: 'podcast', episode };
+                setNowPlaying({ kind: 'podcast', episode });
+                idxRef.current = localIdx.current;
+              },
+
+              speakReturn: async (podcastTitle, partNumber) => {
+                await localMod.current.speakPodcastReturn(podcastTitle, partNumber);
+              },
+            },
+            episode.description,
+            episode.transcriptUrl,
+          );
+        }
+
+        // ── Episode finished or user paused ──────────────────────────────────
+        pod.pause();
+        if (runningRef.current) {
+          pod.removeAttribute('src');
+          markPlayedRef.current(episode.id);
+          setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
+
+          if (nextMusicTrack) {
+            podcastTransitionRef.current = true;
+            await playJingle('/studio-return.mp3');
+            if (!runningRef.current) { podcastTransitionRef.current = false; return; }
+
+            console.log('[Loop] post-podcast — starting music before commentary');
+            audio.src    = nextMusicTrack.liveUrl;
+            audio.volume = 0.3;
+            audio.load();
+            if (audio.readyState < 3) {
+              await new Promise<void>(resolve => {
+                audio.addEventListener('canplay', () => resolve(), { once: true });
+                audio.addEventListener('error',   () => resolve(), { once: true });
+                setTimeout(resolve, 5000);
+              });
+            }
+            let postPodMusicStarted = false;
+            try { await audio.play(); postPodMusicStarted = true; } catch (e) {
+              console.warn('[Loop] post-podcast music play failed:', e);
+              runningRef.current = false; podcastTransitionRef.current = false; setPlaying(false);
+            }
+            if (!postPodMusicStarted) return;
+
+            nowPlayingRef.current = { kind: 'music', track: nextMusicTrack };
+            setNowPlaying({ kind: 'music', track: nextMusicTrack });
+            setCT(0); setDur(nextMusicTrack.duration || 0); setIdx(idxRef.current);
+            listenerMemoryRef.current.recordSongStart(nextMusicTrack);
+
+            if (!runningRef.current) { podcastTransitionRef.current = false; crossfadeActiveRef.current = true; return; }
+
+            await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
+
+            if (!runningRef.current) { podcastTransitionRef.current = false; crossfadeActiveRef.current = true; return; }
+
+            cancelRampRef.current?.();
+            cancelRampRef.current = rampVolume(audio, mutedRef.current ? 0 : volumeRef.current, 1000);
+            podcastTransitionRef.current = false;
+            crossfadeActiveRef.current   = true;
+          }
+        } else {
+          resumePodcastEpisodeRef.current = episode;
+        }
+      }
+
+      recentTracksRef.current = [];
+    };
+
     while (runningRef.current) {
+      // ── Manual podcast start from queue ─────────────────────────────────────
+      // jumpToPodcastRef is set by startPodcastFromQueue() when the user taps
+      // the play button on a specific episode in the queue. We bypass the music
+      // track step entirely and jump straight into the podcast transition flow.
+      const jumpPodEp = jumpToPodcastRef.current;
+      if (jumpPodEp) {
+        jumpToPodcastRef.current = null;
+        await runPodcastSlot(jumpPodEp, idxRef.current);
+        if (!runningRef.current) break;
+        continue;
+      }
+
       // ── Resume a podcast episode that was paused mid-playback ──────────────
       const resumeEp = resumePodcastEpisodeRef.current;
       if (resumeEp) {
@@ -872,6 +1268,7 @@ export function RadioPage() {
         audio.volume = DUCK_LEVEL; // always start ducked; speech/crossfade controls volume
         audio.load();
         _initHowl(t.liveUrl); // shadow Howl — verifies loading, never plays
+        howlerEndedRef.current = false; // reset for this track
         setCT(0);
         setDur(t.duration || 0);
         setIdx(currentIdx);
@@ -898,6 +1295,45 @@ export function RadioPage() {
           // Loading nextAudio in parallel caused the legacy HTMLAudioElement crossfade
           // to fire on iOS, creating two competing audio sessions.
           console.log('[Cleanup] old audioRef crossfade disabled');
+
+          // Pre-generate TTS for what comes AFTER the current track.
+          // If the NEXT slot is a podcast (silentCount + 1 reaches budget AND episodes exist),
+          // pre-generate the podcast transition; otherwise pre-generate the track intro.
+          if (nextIntroUrlRef.current) {
+            URL.revokeObjectURL(nextIntroUrlRef.current);
+            nextIntroUrlRef.current = null;
+          }
+
+          const nextIsPodcast =
+            (silentCountRef.current + 1) >= silentBudgetRef.current &&
+            episodesRef.current.length > 0;
+
+          if (nextIsPodcast) {
+            // Pick the upcoming episode (same logic as the podcast slot below).
+            const eps    = episodesRef.current;
+            const epIdx  = podcastIdxRef.current % eps.length;
+            const upcomingEp = eps[epIdx];
+            if (upcomingEp) {
+              // Discard stale podcast transition blob.
+              if (podTransitionBlobRef.current) {
+                URL.revokeObjectURL(podTransitionBlobRef.current);
+                podTransitionBlobRef.current = null;
+              }
+              console.log(`[TTS-Pre] pre-generating podcast intro for: "${upcomingEp.feedTitle}"`);
+              moderatorRef.current.generatePodcastTransitionAudio(
+                upcomingEp.title, upcomingEp.feedTitle, upcomingEp.description, upcomingEp.author,
+              ).then(url => {
+                podTransitionBlobRef.current     = url;
+                podTransitionBlobTimeRef.current = Date.now();
+              }).catch(() => {});
+            }
+          } else {
+            const nextIsLiked = listenerMemoryRef.current.memory.likedSongs.includes(nextTrack.id);
+            console.log(`[TTS-Pre] pre-generating intro for: "${nextTrack.name}"`);
+            moderatorRef.current.generateTrackIntroAudio(nextTrack, nextTrack.isTopChart, nextIsLiked)
+              .then(url => { nextIntroUrlRef.current = url; })
+              .catch(() => {});
+          }
         }
 
         // Wait for the current track to buffer before playing — prevents dead air.
@@ -941,12 +1377,42 @@ export function RadioPage() {
         await moderatorRef.current.speakUserControlReaction();
       } else if (!greetedRef.current) {
         greetedRef.current = true;
-        console.log('[Loop] greeting + track intro over music');
-        await moderatorRef.current.speakGreeting(nameRef.current);
+        const isLiked = listenerMemoryRef.current.memory.likedSongs.includes(t.id);
+        const TTL = 300_000; // 5 minutes
+
+        // Use pre-generated greeting if fresh; otherwise generate now.
+        const cachedGreeting = greetingCacheRef.current;
+        const ageMs          = cachedGreeting ? Date.now() - cachedGreeting.timestamp : -1;
+        const greetingFresh  = !!cachedGreeting && ageMs < TTL;
+        const playLang       = (() => { try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; } })();
+        console.log(`[TTS-Pre] greeting cache check — cached=${!!cachedGreeting} ageMs=${ageMs === -1 ? 'n/a' : ageMs} fresh=${greetingFresh} name="${nameRef.current}" lang="${playLang}"`);
+
+        // Start intro generation immediately in background (runs while greeting plays).
+        const introPromise = moderatorRef.current.generateTrackIntroAudio(t, t.isTopChart, isLiked);
+
+        let greetingUrl: string | null;
+        if (greetingFresh && cachedGreeting) {
+          console.log('[TTS-Pre] using cached greeting');
+          greetingCacheRef.current = null; // consume
+          greetingUrl = cachedGreeting.blob;
+        } else {
+          console.log(`[TTS] greeting cache miss — reason: cached=${!!cachedGreeting} ageMs=${ageMs === -1 ? 'n/a' : ageMs} — generating now`);
+          if (cachedGreeting) URL.revokeObjectURL(cachedGreeting.blob);
+          greetingCacheRef.current = null;
+          greetingUrl = await moderatorRef.current.generateGreetingAudio(nameRef.current);
+        }
+
+        if (greetingUrl) await moderatorRef.current.playAudio(greetingUrl);
         await sleep(400);
-        await moderatorRef.current.speakTrackIntro(t, t.isTopChart, listenerMemoryRef.current.memory.likedSongs.includes(t.id));
+        const introUrl = await introPromise;
+        if (introUrl) await moderatorRef.current.playAudio(introUrl);
       } else if (silentCountRef.current >= silentBudgetRef.current && recentTracksRef.current.length > 0) {
-        // Time for a DJ break — review recent tracks and intro this one
+        // Time for a DJ break — review recent tracks and intro this one.
+        // Discard any pre-generated standalone intro: speakReviewAndIntro generates its own.
+        if (nextIntroUrlRef.current) {
+          URL.revokeObjectURL(nextIntroUrlRef.current);
+          nextIntroUrlRef.current = null;
+        }
         const played = recentTracksRef.current;
         recentTracksRef.current = [];
         console.log('[Loop] moderation — speakReviewAndIntro over music');
@@ -956,17 +1422,26 @@ export function RadioPage() {
         silentCountRef.current  = 0;
         silentBudgetRef.current = randInt(1, 2);
       } else {
-        // No speech this track — fade up immediately
-        console.log('[Loop] no speech — fading up now');
-        cancelRampRef.current?.();
-        const target = mutedRef.current ? 0 : volumeRef.current;
-        const howlNoSpeech = howlRef.current;
-        if (howlNoSpeech) {
-          console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
-          howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
-          musicVolumeRef.current = target;
+        // Check if we have a pre-generated intro for this track.
+        const preGenUrl = nextIntroUrlRef.current;
+        nextIntroUrlRef.current = null; // consume (or clear if not matching)
+        if (preGenUrl) {
+          console.log('[TTS] using pre-generated track intro');
+          await moderatorRef.current.playAudio(preGenUrl);
+          console.log('[TTS] pre-generated intro finished — continuing loop');
         } else {
-          cancelRampRef.current = rampVolume(audio, target, 1000);
+          // No speech this track — fade up immediately
+          console.log('[Loop] no speech — fading up now');
+          cancelRampRef.current?.();
+          const target = mutedRef.current ? 0 : volumeRef.current;
+          const howlNoSpeech = howlRef.current;
+          if (howlNoSpeech) {
+            console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
+            howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
+            musicVolumeRef.current = target;
+          } else {
+            cancelRampRef.current = rampVolume(audio, target, 1000);
+          }
         }
       }
 
@@ -1068,11 +1543,14 @@ export function RadioPage() {
           audio.removeEventListener('pause',      onPause);
         }
 
-        // If the track already ended during the speech phase (e.g. seeked to
-        // near-end by jumpToEpisode while TTS was still playing), `ended` fired
-        // before these listeners were registered and will never fire again.
-        // Resolve immediately so the loop doesn't hang.
-        if (audio.ended) {
+        // If the track already ended during the speech phase (e.g. during TTS or
+        // pre-generated intro playback), the 'ended' event fired before this listener
+        // was registered and will never fire again — resolve immediately.
+        // audio.ended covers the legacy HTMLAudioElement path.
+        // howlerEndedRef covers Howler's onend, which dispatches a synthetic event
+        // that does NOT set audio.ended on the legacy element.
+        if (audio.ended || howlerEndedRef.current) {
+          howlerEndedRef.current = false;
           console.log(`[Loop] track already ended during speech — advancing (gen ${myGen})`);
           resolve(true);
           return;
@@ -1132,457 +1610,7 @@ export function RadioPage() {
             setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
             // Don't break — fall through so music continues immediately.
           } else {
-
-          const nextMusicTrack = tracksRef.current[nextMusicIdx];
-
-          console.log(`[Loop] podcast slot — "${episode.title}" from ${episode.feedTitle}`);
-
-          // ── Transition: ambient bridge → moderator → fade → jingle → podcast
-          podcastTransitionRef.current = true;
-
-          // Cancel any in-flight Howler crossfade — the podcast slot takes over.
-          if (crossfadeTimerRef.current !== null) {
-            clearTimeout(crossfadeTimerRef.current);
-            crossfadeTimerRef.current = null;
-            console.log('[Howler] crossfade cancelled — podcast slot');
-          }
-
-          // 1. Stop current music (and preloaded next track); find ambient bridge.
-          if (howlRef.current) {
-            howlRef.current.stop();
-            console.log('[Howler] stopped for podcast transition');
-          }
-          if (nextHowlRef.current) {
-            nextHowlRef.current.stop();
-            nextHowlRef.current = null;
-          }
-          audio.pause();
-          // Prefer the dedicated bridge pool (always ambient, never in playlist).
-          // Fall back to ambient tracks in the main queue if the pool is empty.
-          const bridgePool = ambientBridgeRef.current.length > 0
-            ? ambientBridgeRef.current
-            : tracksRef.current.filter(t => t.genreId === 'ambient');
-          const bridgeTrack = bridgePool.length > 0
-            ? bridgePool[Math.floor(Math.random() * bridgePool.length)]
-            : null;
-
-          bridgeHowlRef.current?.stop();
-          bridgeHowlRef.current = null;
-
-          if (bridgeTrack) {
-            // Use Howler for the bridge — .stop() releases the iOS audio session
-            // cleanly; .pause() keeps it loaded and can block podcast playback.
-            await new Promise<void>(resolve => {
-              const bh = new Howl({
-                src:   [bridgeTrack.liveUrl],
-                html5: true,
-                volume: 0,
-                onload:  () => resolve(),
-                onerror: () => resolve(),
-              });
-              bridgeHowlRef.current = bh;
-              setTimeout(resolve, 3000); // don't block forever
-            });
-            bridgeHowlRef.current?.volume(BRIDGE_VOLUME);
-            bridgeHowlRef.current?.play();
-            console.log(`[Bridge] using ambient track: ${bridgeTrack.name} by ${bridgeTrack.artist}`);
-          } else {
-            console.log('[Loop] podcast bridge — no ambient tracks available, skipping');
-          }
-
-          if (!runningRef.current) {
-            bridgeHowlRef.current?.stop();
-            bridgeHowlRef.current = null;
-            podcastTransitionRef.current = false;
-            break;
-          }
-
-          // 2. Moderator speaks over ambient bridge (or silence if none available).
-          // Check if the listener has been here before (> 60 s heard).
-          const epRecord = listenerMemoryRef.current.memory.episodeHistory
-            .find(e => e.episodeId === episode.id);
-          const resumeCtx: ResumeContext | undefined =
-            epRecord && epRecord.lastPosition > 60
-              ? { lastPosition: epRecord.lastPosition, topics: epRecord.topics }
-              : undefined;
-          console.log(
-            `[Loop] podcast transition — isResuming=${!!resumeCtx}`,
-            resumeCtx ? `lastPosition=${Math.round(resumeCtx.lastPosition)}s topics=[${resumeCtx.topics.join(', ')}]` : '',
-          );
-          await moderatorRef.current.speakPodcastTransition(
-            episode.title, episode.feedTitle, episode.description, episode.author, resumeCtx,
-          );
-          console.log('[Loop] podcast intro done');
-
-          if (!runningRef.current) {
-            bridgeHowlRef.current?.stop();
-            bridgeHowlRef.current = null;
-            podcastTransitionRef.current = false;
-            break;
-          }
-
-          // 3. Fade bridge to 0 (await) — jingle must play into silence.
-          if (bridgeHowlRef.current) {
-            const bh = bridgeHowlRef.current;
-            await new Promise<void>(res => {
-              bh.once('fade', res);
-              bh.fade(bh.volume() as number, 0, 3000);
-              setTimeout(res, 3500); // fallback
-            });
-            bh.stop(); // .stop() releases iOS audio session; .pause() does not
-            bridgeHowlRef.current = null;
-            console.log('[Bridge] ambient Howl stopped');
-          }
-
-          // 4. Jingle plays after full silence — THEN podcast starts.
-          await playJingle('/podcast-intro.mp3');
-
-          if (!runningRef.current) {
-            podcastTransitionRef.current = false;
-            break;
-          }
-
-          podcastTransitionRef.current = false;
-
-          if (!runningRef.current) break;
-
-          // ── Load podcast onto the dedicated CORS-enabled audio element ────
-          const pod = podAudioRef.current;
-          if (!pod) {
-            console.warn('[Loop] podAudioRef not ready — skipping podcast');
-          } else {
-            loopGenRef.current++;
-
-            // Pause music (now at vol 0) before handing audio to podcast
-            audio.pause();
-
-            // Always resolve the final CDN URL via the server-side proxy before
-            // loading. Podcast hosts (fountain.fm, anchor.fm) issue 302 redirects
-            // to CloudFront URLs that lack CORS headers — iOS Safari blocks these
-            // on <audio> elements. The resolver follows the chain server-side and
-            // returns only the direct CDN URL; zero audio bytes are transferred.
-            console.log(`[Podcast] resolving audio URL via proxy: ${episode.audioUrl}`);
-            let audioSrc = episode.audioUrl;
-            try {
-              const resolverUrl = `/.netlify/functions/podcast-proxy?action=audioresolver&url=${encodeURIComponent(episode.audioUrl)}`;
-              const resolveRes = await fetch(resolverUrl, { signal: AbortSignal.timeout(10_000) });
-              if (resolveRes.ok) {
-                const finalUrl = (await resolveRes.text()).trim();
-                if (finalUrl) {
-                  console.log(`[Podcast] resolved URL: ${finalUrl}`);
-                  audioSrc = finalUrl;
-                }
-              }
-            } catch (resolveErr) {
-              console.warn('[Podcast] URL resolution failed — falling back to direct URL:', resolveErr);
-            }
-
-            // On iOS, route through the Edge Function streaming proxy so every
-            // response carries CORS + Accept-Ranges headers. Direct CDN URLs from
-            // podcast hosts (Anchor/Spotify, Megaphone) often lack CORS headers,
-            // causing iOS Safari <audio> to silently fail. The Edge Function pipes
-            // a ReadableStream with no buffering and no 6 MB cap.
-            if (isIOS) {
-              const streamProxyUrl = `/podcast-stream?url=${encodeURIComponent(audioSrc)}`;
-              console.log('[Podcast] iOS: streaming via Edge Function proxy');
-              pod.src = streamProxyUrl;
-            } else {
-              pod.src = audioSrc;
-            }
-            pod.volume = 1.0; // assert before play — iOS may reset to 0
-
-            // Seek to saved position once metadata is available.
-            // Always use a loadedmetadata listener — on iOS we skip canplay so
-            // readyState is 0 when we reach this point.
-            const savedPos = loadPodcastPosition(episode.id);
-            if (savedPos > 5) {
-              console.log(`[Loop] resuming from saved position ${savedPos.toFixed(0)}s`);
-              pod.addEventListener('loadedmetadata', () => {
-                if (isFinite(pod.duration) && savedPos < pod.duration - 10) {
-                  pod.currentTime = savedPos;
-                  console.log(`[Loop] seeked to ${savedPos.toFixed(0)}s`);
-                }
-              }, { once: true });
-            }
-
-            if (!isIOS) {
-              // Desktop: load() then wait for canplay before play() — prevents
-              // dead air on slow connections. Gesture chain is not a constraint.
-              pod.load();
-              console.log(`[Podcast] waiting for canplay — readyState: ${pod.readyState}`);
-              await new Promise<void>(resolve => {
-                if (pod.readyState >= 3) {
-                  console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
-                  return resolve();
-                }
-                const onCanPlay = () => {
-                  console.log(`[Podcast] canplay fired — readyState: ${pod.readyState}`);
-                  pod.removeEventListener('canplay', onCanPlay);
-                  pod.removeEventListener('error',   onError);
-                  resolve();
-                };
-                const onError = () => {
-                  pod.removeEventListener('canplay', onCanPlay);
-                  pod.removeEventListener('error',   onError);
-                  resolve(); // resolve not reject — let play() surface the error
-                };
-                pod.addEventListener('canplay', onCanPlay);
-                pod.addEventListener('error',   onError);
-                setTimeout(resolve, 5000); // 5s fallback — don't block forever
-              });
-            }
-            // iOS: do NOT call load() or wait for canplay — the canplay await
-            // breaks the gesture chain (iOS revokes the token after ~1 s of async
-            // work). Call play() immediately; iOS buffers internally once started.
-
-            setCT(savedPos > 5 ? savedPos : 0);
-            setDur(episode.duration || 0);
-
-            // Update Now Playing to show podcast info
-            nowPlayingRef.current = { kind: 'podcast', episode };
-            setNowPlaying({ kind: 'podcast', episode });
-
-            let podStarted = false;
-            let skipEpisode = false;
-            if (audioSrc.includes('.mp4')) {
-              console.warn(`[Podcast] mp4 URL detected — may fail on iOS: ${audioSrc}`);
-            }
-            console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
-            try {
-              if (isIOS) {
-                // Wait for readyState >= 2 (HAVE_CURRENT_DATA) before play().
-                // Calling play() at readyState=0 triggers AbortError on iOS —
-                // no data is buffered yet and iOS rejects the request.
-                // loadeddata fires sooner than canplay (readyState=4) and is
-                // sufficient for iOS to accept play().
-                if (pod.readyState < 2) {
-                  console.log(`[Podcast] iOS: waiting for loadeddata — readyState: ${pod.readyState}`);
-                  await new Promise<void>(resolve => {
-                    const h = () => { pod.removeEventListener('loadeddata', h); resolve(); };
-                    pod.addEventListener('loadeddata', h);
-                    setTimeout(resolve, 3000); // 3s fallback — don't block forever
-                  });
-                }
-                console.log(`[Podcast] iOS: play() after loadeddata — readyState: ${pod.readyState}`);
-              }
-              await pod.play();
-              if (isIOS) console.log('[Podcast] iOS: play() resolved successfully');
-              podStarted = true;
-              console.log(`[Podcast] volume after play: ${pod.volume}`);
-              (Howler as any).ctx?.resume(); // keep shared AudioContext active
-              console.log('[Loop] podcast play() resolved — podcast playing');
-            } catch (e) {
-              const isNotSupported = e instanceof DOMException && e.name === 'NotSupportedError';
-              if (isIOS && isNotSupported) {
-                // iOS cannot decode this format (e.g. .mp4 container) — skip
-                // the episode and let the loop continue with music instead of
-                // halting the radio entirely.
-                console.warn('[Podcast] iOS: NotSupportedError — skipping episode');
-                markPlayedRef.current(episode.id);
-                setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
-                skipEpisode = true;
-              } else {
-                console.error('[Loop] podcast play failed — resetting state:', e);
-                // Reset everything so the user can press Play to retry.
-                // Without this, runningRef stays true but playing is false — the
-                // play button handler short-circuits on "already running" and
-                // the UI appears permanently stuck in PAUSED.
-                runningRef.current = false;
-                resumePodcastEpisodeRef.current = null;
-                nowPlayingRef.current = null;
-                setNowPlaying(null);
-                setPlaying(false);
-              }
-            }
-
-            // Pod failed to start — either halt the loop or skip to next episode.
-            if (!podStarted) {
-              if (skipEpisode) continue; // NotSupportedError on iOS — resume music
-              break;
-            }
-
-            // ── Run episode through segmenter ─────────────────────────────
-            if (podStarted && runningRef.current) {
-              // Snapshot local refs for use inside segmenter callbacks
-              const localMod      = moderatorRef;
-              const localTracks   = tracksRef;
-              const localIdx      = idxRef;
-              const localVolume   = volumeRef;
-              const localMuted    = mutedRef;
-
-              await segmenter.runEpisode(
-                pod,
-                episode.title,
-                episode.feedTitle,
-                episode.chapters,
-                /* callbacks ↓ */ {
-                  isRunning: () => runningRef.current,
-
-                  speakCommentary: async (script) => {
-                    await playJingle('/studio-return.mp3');
-                    await localMod.current.speakPodcastSegmentCommentary(script);
-                  },
-
-                  playMusicBreak: async () => {
-                    // Play 1–3 random Wavlake tracks as a music break
-                    const breakCount = randInt(1, 3);
-                    const allTracks  = localTracks.current;
-                    if (!allTracks.length) return;
-
-                    for (let b = 0; b < breakCount; b++) {
-                      if (!runningRef.current) break;
-
-                      // Pick a random track (different from current podcast position)
-                      const breakIdx   = Math.floor(Math.random() * allTracks.length);
-                      const breakTrack = allTracks[breakIdx];
-
-                      console.log(`[Loop] music break ${b + 1}/${breakCount}: "${breakTrack.name}"`);
-
-                      // Update Now Playing to music
-                      nowPlayingRef.current = { kind: 'music', track: breakTrack };
-                      setNowPlaying({ kind: 'music', track: breakTrack });
-
-                      // Intro the first track of the break
-                      if (b === 0) {
-                        await localMod.current.speakTrackIntro(breakTrack);
-                      }
-
-                      if (!runningRef.current) break;
-
-                      // Load & play on the music element (no CORS, as always)
-                      audio.src    = breakTrack.liveUrl;
-                      audio.volume = DUCK_LEVEL;
-                      audio.load();
-
-                      loopGenRef.current++;
-                      const breakGen = loopGenRef.current;
-
-                      try {
-                        await audio.play();
-                      } catch (e) {
-                        console.error('[Loop] break music play failed:', e);
-                        break;
-                      }
-
-                      // Fade up after intro
-                      cancelRampRef.current?.();
-                      const target = localMuted.current ? 0 : localVolume.current;
-                      cancelRampRef.current = rampVolume(audio, target, 1000);
-
-                      // Wait for break track to end or loop to be stopped
-                      await new Promise<void>(res => {
-                        const onEnded = () => { if (loopGenRef.current !== breakGen) return; cleanup(); res(); };
-                        const onPause = () => { if (loopGenRef.current !== breakGen) return; if (!runningRef.current) { cleanup(); res(); } };
-                        function cleanup() {
-                          audio.removeEventListener('ended', onEnded);
-                          audio.removeEventListener('pause', onPause);
-                        }
-                        audio.addEventListener('ended', onEnded);
-                        audio.addEventListener('pause', onPause);
-                      });
-
-                      audio.pause();
-                    }
-
-                    // Restore Now Playing to podcast
-                    nowPlayingRef.current = { kind: 'podcast', episode };
-                    setNowPlaying({ kind: 'podcast', episode });
-
-                    // Update the playlist cursor to reflect where we are
-                    idxRef.current = localIdx.current;
-                  },
-
-                  speakReturn: async (podcastTitle, partNumber) => {
-                    await localMod.current.speakPodcastReturn(podcastTitle, partNumber);
-                  },
-                },
-                episode.description,
-                episode.transcriptUrl,
-              );
-            }
-
-            // ── Episode finished or user paused ───────────────────────────
-            pod.pause();
-            if (runningRef.current) {
-              // Finished naturally — clean up and mark played
-              pod.removeAttribute('src');
-              markPlayedRef.current(episode.id);
-              setOrderedEpisodes(prev => prev.filter(e => e.id !== episode.id));
-
-              if (nextMusicTrack) {
-                // ── Post-podcast transition: radio-style, no dead air ──────
-                // Same pattern as the intro bridge: music plays at 0.3 while
-                // the moderator speaks, then fades up to full afterwards.
-
-                // 1. Studio-return jingle (podcast → music handoff cue)
-                podcastTransitionRef.current = true;
-                await playJingle('/studio-return.mp3');
-
-                if (!runningRef.current) { podcastTransitionRef.current = false; break; }
-
-                // 2. Start next song at low volume BEFORE moderator speaks
-                console.log('[Loop] post-podcast — starting music before commentary');
-                audio.src    = nextMusicTrack.liveUrl;
-                audio.volume = 0.3;
-                audio.load();
-                if (audio.readyState < 3) {
-                  await new Promise<void>(resolve => {
-                    audio.addEventListener('canplay', () => resolve(), { once: true });
-                    audio.addEventListener('error',   () => resolve(), { once: true });
-                    setTimeout(resolve, 5000);
-                  });
-                }
-                let postPodMusicStarted = false;
-                try { await audio.play(); postPodMusicStarted = true; } catch (e) {
-                  console.warn('[Loop] post-podcast music play failed:', e);
-                  runningRef.current = false;
-                  podcastTransitionRef.current = false;
-                  setPlaying(false);
-                }
-                if (!postPodMusicStarted) break;
-
-                nowPlayingRef.current = { kind: 'music', track: nextMusicTrack };
-                setNowPlaying({ kind: 'music', track: nextMusicTrack });
-                setCT(0);
-                setDur(nextMusicTrack.duration || 0);
-                setIdx(idxRef.current);
-                listenerMemoryRef.current.recordSongStart(nextMusicTrack);
-
-                if (!runningRef.current) {
-                  podcastTransitionRef.current = false;
-                  crossfadeActiveRef.current   = true;
-                  break;
-                }
-
-                // 3. Moderator speaks OVER the music at 0.3
-                //    podcastTransitionRef prevents the duck effect from interfering
-                await moderatorRef.current.speakPodcastOutro(episode, nextMusicTrack);
-
-                if (!runningRef.current) {
-                  podcastTransitionRef.current = false;
-                  crossfadeActiveRef.current   = true;
-                  break;
-                }
-
-                // 4. Fade music up to full after commentary
-                cancelRampRef.current?.();
-                const outroTarget = mutedRef.current ? 0 : volumeRef.current;
-                cancelRampRef.current = rampVolume(audio, outroTarget, 1000);
-                podcastTransitionRef.current = false;
-
-                // Signal the loop top to skip reloading — audio is playing and ramping up
-                crossfadeActiveRef.current = true;
-              }
-            } else {
-              // User paused mid-episode — preserve src and queue entry for resume
-              resumePodcastEpisodeRef.current = episode;
-            }
-          }
-
-          // Clear the recent-tracks buffer so the review after a podcast
-          // doesn't reference stale pre-podcast tracks.
-          recentTracksRef.current = [];
-
+          await runPodcastSlot(episode, nextMusicIdx);
           } // end: else (episode has a valid audioUrl)
         }
         // loop continues — next iteration picks up idxRef.current
@@ -1777,6 +1805,57 @@ export function RadioPage() {
       }
     }, 500);
   }, [jumpTo]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Immediately start a specific podcast episode from the queue.
+   * Stops current music, signals the loop to skip the music-track step,
+   * and runs the full podcast transition flow right away.
+   */
+  const startPodcastFromQueue = useCallback((episode: PodcastEpisode) => {
+    console.log(`[Queue] manual podcast start: "${episode.title}"`);
+
+    // iOS pre-unlock: call pod.play() within this gesture so iOS stamps the
+    // element as unlocked — pod.play() in runPodcastSlot fires ~10s later.
+    const pod = podAudioRef.current;
+    if (pod && isIOS) {
+      const SILENT = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+      pod.src   = SILENT;
+      pod.muted = true;
+      pod.play().catch(() => {}).finally(() => { pod.pause(); pod.muted = false; pod.src = ''; });
+      console.log('[iOS] podcast pre-unlock (startPodcastFromQueue)');
+    }
+
+    // Stop everything in flight
+    if (crossfadeTimerRef.current !== null) {
+      clearTimeout(crossfadeTimerRef.current);
+      crossfadeTimerRef.current = null;
+    }
+    howlRef.current?.stop();
+    nextHowlRef.current?.unload();
+    nextHowlRef.current = null;
+    audioRef.current?.pause();
+    moderatorRef.current.stop();
+
+    // Discard any stale pre-generated blobs for the previous context
+    if (nextIntroUrlRef.current)      { URL.revokeObjectURL(nextIntroUrlRef.current);      nextIntroUrlRef.current      = null; }
+    if (podTransitionBlobRef.current) { URL.revokeObjectURL(podTransitionBlobRef.current); podTransitionBlobRef.current = null; }
+    if (podInterruptBlobRef.current)  { URL.revokeObjectURL(podInterruptBlobRef.current);  podInterruptBlobRef.current  = null; }
+
+    // Signal the loop — jumpToPodcastRef is read at the top of the while body
+    jumpToPodcastRef.current = episode;
+
+    // Bounce runningRef to interrupt the current loop iteration, then start fresh
+    const wasRunning = runningRef.current;
+    runningRef.current = false;
+    runningRef.current = true;
+    if (wasRunning) {
+      advanceLoop();
+    } else {
+      // Loop wasn't running (e.g. user was paused) — start it
+      greetedRef.current = true; // don't play greeting again
+      advanceLoop();
+    }
+  }, [advanceLoop]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Drag-and-drop handlers ─────────────────────────────────────────────────
   const handleDragEnd = useCallback((result: DropResult) => {
@@ -2284,7 +2363,7 @@ export function RadioPage() {
                               </div>
                               {/* Play episode now */}
                               <button
-                                onClick={e => { e.stopPropagation(); jumpToEpisode(ep); }}
+                                onClick={e => { e.stopPropagation(); startPodcastFromQueue(ep); }}
                                 aria-label="Play episode now"
                                 title="Play now"
                                 className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-amber-400/60 hover:text-amber-300 hover:bg-amber-900/30 transition-colors"

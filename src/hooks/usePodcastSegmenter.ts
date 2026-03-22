@@ -59,6 +59,13 @@ export interface SegmenterCallbacks {
   /** Called with the script the moderator should speak before break music.
    *  (Claude commentary). Caller uses their ElevenLabs TTS to speak it. */
   speakCommentary: (script: string) => Promise<void>;
+  /**
+   * Called immediately after the commentary script is generated (Claude call),
+   * BEFORE speakCommentary is called. Caller can use this to start TTS
+   * pre-generation in the background so audio is ready when speakCommentary fires.
+   * Optional — safe to omit.
+   */
+  onCommentaryReady?: (script: string) => void;
   /** Called with the "we're back" return announcement. */
   speakReturn: (podcastTitle: string, partNumber: number) => Promise<void>;
   /** Called whenever runningRef should be checked — if this returns false the
@@ -909,6 +916,9 @@ export function usePodcastSegmenter() {
       }
 
       if (!callbacks.isRunning()) break;
+
+      // Notify caller so it can start TTS pre-generation in background.
+      callbacks.onCommentaryReady?.(commentary);
 
       // ── Speak commentary ─────────────────────────────────────────────────
       await callbacks.speakCommentary(commentary);
