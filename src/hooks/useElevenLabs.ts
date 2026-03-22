@@ -125,15 +125,15 @@ export function useElevenLabs() {
       let body: Record<string, unknown>;
 
       if (provider === 'fish') {
-        const fishVoiceId = getFishVoiceId();
-        if (!fishVoiceId) {
-          console.warn('[Fish] Skipping TTS — no Fish voice ID set. Configure one in Settings.');
-          setIsGenerating(false);
-          return;
-        }
+        const lang        = getStoredLang() === 'Deutsch' ? 'de' : 'en';
+        const fishVoiceId = getFishVoiceId(); // optional custom override from Settings
         proxyUrl = FISH_TTS_PROXY;
-        body = { text: translateTagsForFish(text), reference_id: fishVoiceId };
-        console.log('[Fish] POSTing to:', proxyUrl, '— reference_id:', fishVoiceId);
+        // Always send lang so the server can pick the right default voice.
+        // Only include reference_id when the user has set a custom voice.
+        body = fishVoiceId
+          ? { text: translateTagsForFish(text), lang, reference_id: fishVoiceId }
+          : { text: translateTagsForFish(text), lang };
+        console.log('[Fish] POSTing to:', proxyUrl, '— lang:', lang, fishVoiceId ? `reference_id: ${fishVoiceId}` : '(using server default)');
       } else {
         const voiceId = getVoiceId();
         if (!voiceId) {
@@ -281,13 +281,12 @@ export function useElevenLabs() {
     let body: Record<string, unknown>;
 
     if (provider === 'fish') {
-      const fishVoiceId = getFishVoiceId();
-      if (!fishVoiceId) {
-        console.warn('[TTS] generate() skipped — no Fish voice ID configured.');
-        return null;
-      }
+      const lang        = getStoredLang() === 'Deutsch' ? 'de' : 'en';
+      const fishVoiceId = getFishVoiceId(); // optional custom override
       proxyUrl = FISH_TTS_PROXY;
-      body = { text: translateTagsForFish(text), reference_id: fishVoiceId };
+      body = fishVoiceId
+        ? { text: translateTagsForFish(text), lang, reference_id: fishVoiceId }
+        : { text: translateTagsForFish(text), lang };
     } else {
       const voiceId = getVoiceId();
       if (!voiceId) {

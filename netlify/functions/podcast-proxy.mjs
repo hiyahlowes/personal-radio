@@ -595,12 +595,26 @@ async function handleTtsFish(event) {
     };
   }
 
-  const { text, reference_id } = parsed;
-  if (!text || !reference_id) {
+  const { text, reference_id, lang } = parsed;
+  if (!text) {
     return {
       statusCode: 400,
       headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: 'Missing required fields: text, reference_id' }),
+      body: JSON.stringify({ error: 'Missing required field: text' }),
+    };
+  }
+
+  // Resolve voice: client-supplied custom voice > env-var default for language.
+  const defaultVoiceId = lang === 'de'
+    ? (process.env.FISH_AUDIO_VOICE_ID_DE ?? process.env.FISH_AUDIO_VOICE_ID)
+    : process.env.FISH_AUDIO_VOICE_ID;
+  const resolvedVoiceId = reference_id || defaultVoiceId;
+
+  if (!resolvedVoiceId) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'No Fish Audio voice ID available. Set FISH_AUDIO_VOICE_ID in Netlify env or configure a custom voice in Settings.' }),
     };
   }
 
@@ -612,7 +626,7 @@ async function handleTtsFish(event) {
         'Content-Type': 'application/json',
         'model': 's2-pro',
       },
-      body: JSON.stringify({ text, reference_id, format: 'mp3', latency: 'balanced' }),
+      body: JSON.stringify({ text, reference_id: resolvedVoiceId, format: 'mp3', latency: 'balanced' }),
       signal: AbortSignal.timeout(30_000),
     });
 
