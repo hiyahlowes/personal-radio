@@ -372,7 +372,8 @@ export function RadioPage() {
   // at the top of its while body and runs the podcast slot immediately.
   const jumpToPodcastRef    = useRef<PodcastEpisode | null>(null);
   // Pre-generated greeting blob — generated on page load, consumed on first play.
-  const greetingCacheRef = useRef<{ blob: string; timestamp: number } | null>(null);
+  const greetingCacheRef    = useRef<{ blob: string; timestamp: number } | null>(null);
+  const preGenStartedRef    = useRef(false);
   // Pre-generated podcast transition blob — generated when podcast slot is predicted.
   const podTransitionBlobRef     = useRef<string | null>(null);
   const podTransitionBlobTimeRef = useRef<number>(0);
@@ -471,23 +472,26 @@ export function RadioPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Pre-generate greeting ─────────────────────────────────────────────────
-  // Fires whenever `name` state is confirmed (including after a Settings return).
-  // Using `name` as dep avoids a timing race where `getStoredName()` on bare
-  // mount returns 'Listener' before the stored value has been read into state.
-  // Skips if the radio has already played a greeting this session.
+  // Fires once on mount — as early as possible, before firstName state may
+  // re-settle. nameRef.current is already correct at mount (initialised from
+  // getStoredName() synchronously). preGenStartedRef prevents a second run
+  // if the effect fires twice in StrictMode.
   useEffect(() => {
+    if (preGenStartedRef.current) return;
+    preGenStartedRef.current = true;
     if (greetedRef.current) return; // don't regenerate once the session is live
 
-    const storedLang = (() => { try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; } })();
-    console.log(`[TTS-Pre] scheduling greeting pre-gen — name="${firstName}" lang="${storedLang}"`);
+    const name     = nameRef.current;
+    const lang     = (() => { try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; } })();
+    console.log(`[TTS-Pre] scheduling greeting pre-gen — name="${name}" lang="${lang}"`);
 
-    moderator.generateGreetingAudio(firstName).then(url => {
+    moderatorRef.current.generateGreetingAudio(name).then(url => {
       if (!url) { console.warn('[TTS-Pre] greeting pre-gen returned null — will generate on play'); return; }
       if (greetingCacheRef.current) URL.revokeObjectURL(greetingCacheRef.current.blob);
       greetingCacheRef.current = { blob: url, timestamp: Date.now() };
-      console.log(`[TTS-Pre] greeting ready — name="${firstName}" lang="${storedLang}"`);
+      console.log(`[TTS-Pre] greeting ready — name="${name}" lang="${lang}"`);
     }).catch(() => {});
-  }, [firstName]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Push listener memory context to the AI moderator whenever memory changes.
   useEffect(() => {
@@ -1422,26 +1426,17 @@ export function RadioPage() {
         silentCountRef.current  = 0;
         silentBudgetRef.current = randInt(1, 2);
       } else {
-        // Check if we have a pre-generated intro for this track.
+        // Use pre-generated intro if available, otherwise generate now.
         const preGenUrl = nextIntroUrlRef.current;
-        nextIntroUrlRef.current = null; // consume (or clear if not matching)
+        nextIntroUrlRef.current = null; // consume
         if (preGenUrl) {
-          console.log('[TTS] using pre-generated track intro');
+          console.log(`[TTS-Pre] using cached intro for: "${t.name}"`);
           await moderatorRef.current.playAudio(preGenUrl);
           console.log('[TTS] pre-generated intro finished — continuing loop');
         } else {
-          // No speech this track — fade up immediately
-          console.log('[Loop] no speech — fading up now');
-          cancelRampRef.current?.();
-          const target = mutedRef.current ? 0 : volumeRef.current;
-          const howlNoSpeech = howlRef.current;
-          if (howlNoSpeech) {
-            console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
-            howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
-            musicVolumeRef.current = target;
-          } else {
-            cancelRampRef.current = rampVolume(audio, target, 1000);
-          }
+          console.log(`[TTS-Pre] no cached intro — generating now`);
+          const isLikedTrack = listenerMemoryRef.current.memory.likedSongs.includes(t.id);
+          await moderatorRef.current.speakTrackIntro(t, t.isTopChart, isLikedTrack);
         }
       }
 
