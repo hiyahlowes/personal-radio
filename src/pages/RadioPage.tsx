@@ -367,7 +367,16 @@ export function RadioPage() {
   const markMusicPlayedRef = useRef<(id: string) => void>(() => {});
   // Pre-generated TTS blob URL for the next track intro.
   // Generated in the background while the current track plays; consumed (and revoked) at loop top.
-  const nextIntroUrlRef = useRef<string | null>(null);
+  const nextIntroUrlRef     = useRef<string | null>(null);
+  // Pre-generated greeting blob — generated on page load, consumed on first play.
+  const greetingBlobRef     = useRef<string | null>(null);
+  const greetingBlobTimeRef = useRef<number>(0);
+  // Pre-generated podcast transition blob — generated when podcast slot is predicted.
+  const podTransitionBlobRef     = useRef<string | null>(null);
+  const podTransitionBlobTimeRef = useRef<number>(0);
+  // Pre-generated podcast interruption commentary blob.
+  const podInterruptBlobRef     = useRef<string | null>(null);
+  const podInterruptBlobTimeRef = useRef<number>(0);
   // Set to true by Howler's onend when the track ends naturally.
   // Checked in the crossfade wait so it can resolve even if the 'ended' event
   // fired on audioRef while no listener was registered (e.g. during TTS playback).
@@ -457,6 +466,21 @@ export function RadioPage() {
   // playlist, used only as background music under podcast transition speech.
   useEffect(() => {
     fetchAmbientBridgePool(5).then(pool => { ambientBridgeRef.current = pool; });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Pre-generate greeting on page load ────────────────────────────────────
+  // Runs once after mount so the greeting is ready before the user presses play.
+  // The blob is consumed (and revoked) on first play. TTL: 5 minutes.
+  useEffect(() => {
+    const n = getStoredName() || 'Listener';
+    moderator.generateGreetingAudio(n).then(url => {
+      if (!url) return;
+      // Discard any stale cached blob before replacing
+      if (greetingBlobRef.current) URL.revokeObjectURL(greetingBlobRef.current);
+      greetingBlobRef.current     = url;
+      greetingBlobTimeRef.current = Date.now();
+      console.log('[TTS-Pre] greeting ready');
+    }).catch(() => { /* silent — advanceLoop will generate on demand */ });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Push listener memory context to the AI moderator whenever memory changes.
@@ -909,17 +933,44 @@ export function RadioPage() {
           // to fire on iOS, creating two competing audio sessions.
           console.log('[Cleanup] old audioRef crossfade disabled');
 
-          // Pre-generate TTS intro for the next track while the current one plays.
-          // Discard any previously cached intro that was never used.
+          // Pre-generate TTS for what comes AFTER the current track.
+          // If the NEXT slot is a podcast (silentCount + 1 reaches budget AND episodes exist),
+          // pre-generate the podcast transition; otherwise pre-generate the track intro.
           if (nextIntroUrlRef.current) {
             URL.revokeObjectURL(nextIntroUrlRef.current);
             nextIntroUrlRef.current = null;
           }
-          const nextIsLiked = listenerMemoryRef.current.memory.likedSongs.includes(nextTrack.id);
-          console.log(`[TTS] pre-generating next intro for: "${nextTrack.name}"`);
-          moderatorRef.current.generateTrackIntroAudio(nextTrack, nextTrack.isTopChart, nextIsLiked)
-            .then(url => { nextIntroUrlRef.current = url; })
-            .catch(() => { /* silent — loop will fall back to speakTrackIntro */ });
+
+          const nextIsPodcast =
+            (silentCountRef.current + 1) >= silentBudgetRef.current &&
+            episodesRef.current.length > 0;
+
+          if (nextIsPodcast) {
+            // Pick the upcoming episode (same logic as the podcast slot below).
+            const eps    = episodesRef.current;
+            const epIdx  = podcastIdxRef.current % eps.length;
+            const upcomingEp = eps[epIdx];
+            if (upcomingEp) {
+              // Discard stale podcast transition blob.
+              if (podTransitionBlobRef.current) {
+                URL.revokeObjectURL(podTransitionBlobRef.current);
+                podTransitionBlobRef.current = null;
+              }
+              console.log(`[TTS-Pre] pre-generating podcast intro for: "${upcomingEp.feedTitle}"`);
+              moderatorRef.current.generatePodcastTransitionAudio(
+                upcomingEp.title, upcomingEp.feedTitle, upcomingEp.description, upcomingEp.author,
+              ).then(url => {
+                podTransitionBlobRef.current     = url;
+                podTransitionBlobTimeRef.current = Date.now();
+              }).catch(() => {});
+            }
+          } else {
+            const nextIsLiked = listenerMemoryRef.current.memory.likedSongs.includes(nextTrack.id);
+            console.log(`[TTS-Pre] pre-generating intro for: "${nextTrack.name}"`);
+            moderatorRef.current.generateTrackIntroAudio(nextTrack, nextTrack.isTopChart, nextIsLiked)
+              .then(url => { nextIntroUrlRef.current = url; })
+              .catch(() => {});
+          }
         }
 
         // Wait for the current track to buffer before playing — prevents dead air.
@@ -963,14 +1014,31 @@ export function RadioPage() {
         await moderatorRef.current.speakUserControlReaction();
       } else if (!greetedRef.current) {
         greetedRef.current = true;
-        console.log('[TTS] parallel generation: greeting + intro');
         const isLiked = listenerMemoryRef.current.memory.likedSongs.includes(t.id);
-        const [greetingUrl, introUrl] = await Promise.all([
-          moderatorRef.current.generateGreetingAudio(nameRef.current),
-          moderatorRef.current.generateTrackIntroAudio(t, t.isTopChart, isLiked),
-        ]);
+        const TTL = 300_000; // 5 minutes
+
+        // Use pre-generated greeting if fresh; otherwise generate now.
+        const cachedGreeting = greetingBlobRef.current;
+        const greetingFresh  = cachedGreeting && (Date.now() - greetingBlobTimeRef.current) < TTL;
+
+        // Start intro generation immediately in background (runs while greeting plays).
+        const introPromise = moderatorRef.current.generateTrackIntroAudio(t, t.isTopChart, isLiked);
+
+        let greetingUrl: string | null;
+        if (greetingFresh && cachedGreeting) {
+          console.log('[TTS-Pre] using cached greeting');
+          greetingBlobRef.current = null; // consume
+          greetingUrl = cachedGreeting;
+        } else {
+          console.log('[TTS] greeting cache miss — generating now');
+          if (cachedGreeting) URL.revokeObjectURL(cachedGreeting);
+          greetingBlobRef.current = null;
+          greetingUrl = await moderatorRef.current.generateGreetingAudio(nameRef.current);
+        }
+
         if (greetingUrl) await moderatorRef.current.playAudio(greetingUrl);
         await sleep(400);
+        const introUrl = await introPromise;
         if (introUrl) await moderatorRef.current.playAudio(introUrl);
       } else if (silentCountRef.current >= silentBudgetRef.current && recentTracksRef.current.length > 0) {
         // Time for a DJ break — review recent tracks and intro this one.
@@ -1253,9 +1321,28 @@ export function RadioPage() {
             `[Loop] podcast transition — isResuming=${!!resumeCtx}`,
             resumeCtx ? `lastPosition=${Math.round(resumeCtx.lastPosition)}s topics=[${resumeCtx.topics.join(', ')}]` : '',
           );
-          await moderatorRef.current.speakPodcastTransition(
-            episode.title, episode.feedTitle, episode.description, episode.author, resumeCtx,
-          );
+
+          // Use pre-generated podcast transition blob if fresh (5 min TTL) and
+          // this is not a resume (resume has different personalised content).
+          const TTL_POD = 300_000;
+          const cachedTransition  = podTransitionBlobRef.current;
+          const transitionFresh   = cachedTransition &&
+            !resumeCtx &&
+            (Date.now() - podTransitionBlobTimeRef.current) < TTL_POD;
+
+          if (transitionFresh && cachedTransition) {
+            console.log('[TTS-Pre] using cached podcast intro');
+            podTransitionBlobRef.current = null; // consume
+            await moderatorRef.current.playAudio(cachedTransition);
+          } else {
+            if (cachedTransition) {
+              URL.revokeObjectURL(cachedTransition);
+              podTransitionBlobRef.current = null;
+            }
+            await moderatorRef.current.speakPodcastTransition(
+              episode.title, episode.feedTitle, episode.description, episode.author, resumeCtx,
+            );
+          }
           console.log('[Loop] podcast intro done');
 
           if (!runningRef.current) {
@@ -1462,9 +1549,36 @@ export function RadioPage() {
                 /* callbacks ↓ */ {
                   isRunning: () => runningRef.current,
 
+                  onCommentaryReady: (script) => {
+                    // Fire-and-forget: pre-generate TTS while the segmenter does
+                    // cleanup (stopping recorder, bridge fade, jingle, etc.)
+                    // so audio is ready when speakCommentary is called.
+                    if (podInterruptBlobRef.current) {
+                      URL.revokeObjectURL(podInterruptBlobRef.current);
+                      podInterruptBlobRef.current = null;
+                    }
+                    moderatorRef.current.generateCommentaryAudio(script).then(url => {
+                      podInterruptBlobRef.current     = url;
+                      podInterruptBlobTimeRef.current = Date.now();
+                    }).catch(() => {});
+                  },
+
                   speakCommentary: async (script) => {
                     await playJingle('/studio-return.mp3');
-                    await localMod.current.speakPodcastSegmentCommentary(script);
+                    const TTL_INTERRUPT = 300_000;
+                    const cached        = podInterruptBlobRef.current;
+                    const fresh         = cached && (Date.now() - podInterruptBlobTimeRef.current) < TTL_INTERRUPT;
+                    if (fresh && cached) {
+                      console.log('[TTS-Pre] using cached interrupt commentary');
+                      podInterruptBlobRef.current = null; // consume
+                      await localMod.current.playAudio(cached);
+                    } else {
+                      if (cached) {
+                        URL.revokeObjectURL(cached);
+                        podInterruptBlobRef.current = null;
+                      }
+                      await localMod.current.speakPodcastSegmentCommentary(script);
+                    }
                   },
 
                   playMusicBreak: async () => {

@@ -510,6 +510,108 @@ export function useRadioModerator() {
     [playUrl]
   );
 
+  /**
+   * Pre-generate podcast transition audio (no resume context — fresh episode).
+   * Returns a blob URL or null. Caller is responsible for revoking when done.
+   */
+  const generatePodcastTransitionAudio = useCallback(
+    async (
+      episodeTitle: string,
+      showName: string,
+      description?: string,
+      author?: string,
+    ): Promise<string | null> => {
+      const isNews     = isNewsShow(showName, episodeTitle);
+      const isDateDump = episodeTitleIsDateDump(episodeTitle);
+
+      const noSongRule = lp(
+        'Do NOT mention what song was just playing or what music comes next. Focus only on the podcast. No "coming up after this" or "stay tuned for more music".',
+        'Erwähne NICHT welcher Song gerade gespielt wurde oder welche Musik als nächstes kommt. Fokussiere dich nur auf den Podcast.',
+        "Ne mentionnez PAS quelle chanson venait de jouer ou quelle musique vient ensuite. Concentrez-vous uniquement sur le podcast.",
+      );
+
+      const rssContext = [
+        author      ? lp(`Host/author: ${author}.`, `Moderator/Autor: ${author}.`, `Présentateur/auteur : ${author}.`) : '',
+        description ? lp(`Episode description: "${description}"`, `Episodenbeschreibung: "${description}"`, `Description de l'épisode : "${description}"`) : '',
+      ].filter(Boolean).join(' ');
+
+      let prompt: string;
+      if (isNews) {
+        prompt = lp(
+          `You're a radio host transitioning from music to a news segment. ` +
+          `The news show is called ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Say something like "time to check in with the headlines". Mention the show name. Never mention dates, times, or episode numbers. ${noSongRule}`,
+
+          `Du bist ein Radiosprecher der von Musik zu einem Nachrichtensegment übergeht. ` +
+          `Die Nachrichtensendung heißt ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Sage etwas wie "Zeit für die aktuellen Nachrichten". Erwähne den Sendungsnamen. Niemals Datum, Uhrzeit oder Episodennummern. ${noSongRule}`,
+
+          `Tu es un animateur radio qui passe de la musique à un segment d'actualités. ` +
+          `L'émission de nouvelles s'appelle ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Dis quelque chose comme "l'heure de faire le point sur l'actualité". Mentionne le nom de l'émission. ${noSongRule}`,
+        );
+      } else if (isDateDump) {
+        prompt = lp(
+          `You're a radio host transitioning from music to a podcast. ` +
+          `The show is called ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Introduce using only the show name, skip the episode title entirely. Keep it smooth, max 2 sentences. ${noSongRule}`,
+
+          `Du bist ein Radiosprecher der von Musik zu einem Podcast übergeht. ` +
+          `Die Sendung heißt ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Führe nur mit dem Sendungsnamen ein, Episodentitel weglassen. Flüssig, max. 2 Sätze. ${noSongRule}`,
+
+          `Tu es un animateur radio qui passe de la musique à un podcast. ` +
+          `L'émission s'appelle ${showName}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Présente uniquement avec le nom de l'émission, pas le titre de l'épisode. Maximum 2 phrases. ${noSongRule}`,
+        );
+      } else {
+        prompt = lp(
+          `You're a radio host transitioning from music to a podcast episode. ` +
+          `Show: ${showName}. Episode: ${isDateDump ? '' : `"${episodeTitle}"`}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Write a smooth intro — max 2–3 sentences. Reference the show name and episode if it's meaningful. ${noSongRule}`,
+
+          `Du bist ein Radiosprecher der von Musik zu einer Podcast-Episode übergeht. ` +
+          `Sendung: ${showName}. Episode: ${isDateDump ? '' : `"${episodeTitle}"`}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Schreibe eine flüssige Ansage — max. 2–3 Sätze. Sendungsname und Episode wenn sinnvoll erwähnen. ${noSongRule}`,
+
+          `Tu es un animateur radio qui passe de la musique à un épisode de podcast. ` +
+          `Émission : ${showName}. Épisode : ${isDateDump ? '' : `"${episodeTitle}"`}. ` +
+          (rssContext ? `${rssContext} ` : '') +
+          `Écris une intro fluide — maximum 2–3 phrases. Mentionne l'émission et l'épisode si pertinent. ${noSongRule}`,
+        );
+      }
+
+      console.log(`[TTS-Pre] pre-generating podcast intro for: "${showName}"`);
+      return buildAndGenerate(prompt, lp(
+        `Up next: ${showName}.`,
+        `Als nächstes: ${showName}.`,
+        `Ensuite : ${showName}.`,
+      ));
+    },
+    [buildAndGenerate],
+  );
+
+  /**
+   * Pre-generate commentary audio for a podcast interruption.
+   * Just wraps generate() — the script is already determined by the segmenter.
+   * Returns a blob URL or null. Caller revokes when done.
+   */
+  const generateCommentaryAudio = useCallback(
+    async (script: string): Promise<string | null> => {
+      console.log('[TTS-Pre] pre-generating interrupt commentary');
+      return generate(script);
+    },
+    [generate],
+  );
+
   const speakGreeting = useCallback(
     async (listenerName: string): Promise<void> => {
       const firstName = listenerName.split(' ')[0];
@@ -962,6 +1064,8 @@ export function useRadioModerator() {
     // Parallel pre-generation API
     generateGreetingAudio,
     generateTrackIntroAudio,
+    generatePodcastTransitionAudio,
+    generateCommentaryAudio,
     playAudio,
   };
 }
