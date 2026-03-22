@@ -429,6 +429,7 @@ export function useRadioModerator() {
    */
   const buildAndGenerate = useCallback(
     async (prompt: string, fallback: string): Promise<string | null> => {
+      console.log('[TTS-Pre] generating silently — no duck');
       const longForm = Math.random() < 0.2;
       const aiScript = await generateScript(prompt, longForm, memoryContextRef.current);
       return generate(aiScript ?? fallback);

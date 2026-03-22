@@ -1426,26 +1426,17 @@ export function RadioPage() {
         silentCountRef.current  = 0;
         silentBudgetRef.current = randInt(1, 2);
       } else {
-        // Check if we have a pre-generated intro for this track.
+        // Use pre-generated intro if available, otherwise generate now.
         const preGenUrl = nextIntroUrlRef.current;
-        nextIntroUrlRef.current = null; // consume (or clear if not matching)
+        nextIntroUrlRef.current = null; // consume
         if (preGenUrl) {
-          console.log('[TTS] using pre-generated track intro');
+          console.log(`[TTS-Pre] using cached intro for: "${t.name}"`);
           await moderatorRef.current.playAudio(preGenUrl);
           console.log('[TTS] pre-generated intro finished — continuing loop');
         } else {
-          // No speech this track — fade up immediately
-          console.log('[Loop] no speech — fading up now');
-          cancelRampRef.current?.();
-          const target = mutedRef.current ? 0 : volumeRef.current;
-          const howlNoSpeech = howlRef.current;
-          if (howlNoSpeech) {
-            console.log(`[Howler] fade: ${DUCK_LEVEL} → ${target}`);
-            howlNoSpeech.fade(DUCK_LEVEL, target, 1000);
-            musicVolumeRef.current = target;
-          } else {
-            cancelRampRef.current = rampVolume(audio, target, 1000);
-          }
+          console.log(`[TTS-Pre] no cached intro — generating now`);
+          const isLikedTrack = listenerMemoryRef.current.memory.likedSongs.includes(t.id);
+          await moderatorRef.current.speakTrackIntro(t, t.isTopChart, isLikedTrack);
         }
       }
 
