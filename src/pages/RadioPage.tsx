@@ -471,20 +471,25 @@ export function RadioPage() {
     fetchAmbientBridgePool(5).then(pool => { ambientBridgeRef.current = pool; });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Pre-generate greeting on page load ────────────────────────────────────
-  // Runs once after mount so the greeting is ready before the user presses play.
-  // The blob is consumed (and revoked) on first play. TTL: 5 minutes.
+  // ── Pre-generate greeting ─────────────────────────────────────────────────
+  // Fires whenever `name` state is confirmed (including after a Settings return).
+  // Using `name` as dep avoids a timing race where `getStoredName()` on bare
+  // mount returns 'Listener' before the stored value has been read into state.
+  // Skips if the radio has already played a greeting this session.
   useEffect(() => {
-    const n = getStoredName() || 'Listener';
-    moderator.generateGreetingAudio(n).then(url => {
-      if (!url) return;
-      // Discard any stale cached blob before replacing
+    if (greetedRef.current) return; // don't regenerate once the session is live
+
+    const storedLang = (() => { try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; } })();
+    console.log(`[TTS-Pre] scheduling greeting pre-gen — name="${firstName}" lang="${storedLang}"`);
+
+    moderator.generateGreetingAudio(firstName).then(url => {
+      if (!url) { console.warn('[TTS-Pre] greeting pre-gen returned null — will generate on play'); return; }
       if (greetingBlobRef.current) URL.revokeObjectURL(greetingBlobRef.current);
       greetingBlobRef.current     = url;
       greetingBlobTimeRef.current = Date.now();
-      console.log('[TTS-Pre] greeting ready');
-    }).catch(() => { /* silent — advanceLoop will generate on demand */ });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+      console.log(`[TTS-Pre] greeting ready — name="${firstName}" lang="${storedLang}"`);
+    }).catch(() => {});
+  }, [firstName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Push listener memory context to the AI moderator whenever memory changes.
   useEffect(() => {
@@ -1378,7 +1383,10 @@ export function RadioPage() {
 
         // Use pre-generated greeting if fresh; otherwise generate now.
         const cachedGreeting = greetingBlobRef.current;
-        const greetingFresh  = cachedGreeting && (Date.now() - greetingBlobTimeRef.current) < TTL;
+        const ageMs          = Date.now() - greetingBlobTimeRef.current;
+        const greetingFresh  = !!cachedGreeting && ageMs < TTL;
+        const playLang       = (() => { try { return localStorage.getItem('pr:language') ?? 'English'; } catch { return 'English'; } })();
+        console.log(`[TTS-Pre] greeting cache check — cached=${!!cachedGreeting} ageMs=${ageMs} fresh=${greetingFresh} name="${nameRef.current}" lang="${playLang}"`);
 
         // Start intro generation immediately in background (runs while greeting plays).
         const introPromise = moderatorRef.current.generateTrackIntroAudio(t, t.isTopChart, isLiked);
@@ -1389,7 +1397,7 @@ export function RadioPage() {
           greetingBlobRef.current = null; // consume
           greetingUrl = cachedGreeting;
         } else {
-          console.log('[TTS] greeting cache miss — generating now');
+          console.log(`[TTS] greeting cache miss — reason: cached=${!!cachedGreeting} ageMs=${ageMs} — generating now`);
           if (cachedGreeting) URL.revokeObjectURL(cachedGreeting);
           greetingBlobRef.current = null;
           greetingUrl = await moderatorRef.current.generateGreetingAudio(nameRef.current);
