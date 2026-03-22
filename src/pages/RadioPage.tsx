@@ -889,6 +889,7 @@ export function RadioPage() {
         console.log('[TTS-Pre] using cached podcast intro');
         podTransitionBlobRef.current = null;
         await moderatorRef.current.playAudio(cachedTransition);
+        console.log('[TTS-Pre] podcast intro finished — continuing to podcast start');
       } else {
         if (cachedTransition) { URL.revokeObjectURL(cachedTransition); podTransitionBlobRef.current = null; }
         await moderatorRef.current.speakPodcastTransition(
