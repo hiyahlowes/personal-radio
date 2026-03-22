@@ -596,7 +596,12 @@ async function handleTtsFish(event) {
   }
 
   const { text, reference_id, lang } = parsed;
-  console.log(`[Fish] lang received: "${lang ?? '(none)'}"`);
+
+  // ── Debug logs — visible in Netlify Dashboard → Functions → podcast-proxy ──
+  console.log('[Fish] env voices — EN:', process.env.FISH_AUDIO_VOICE_ID?.slice(0, 8), 'DE:', process.env.FISH_AUDIO_VOICE_ID_DE?.slice(0, 8));
+  console.log('[Fish] lang received:', lang);
+  console.log('[Fish] reference_id from client:', reference_id?.slice(0, 8) || 'none');
+
   if (!text) {
     return {
       statusCode: 400,
@@ -608,11 +613,7 @@ async function handleTtsFish(event) {
   // Resolve voice: client-supplied custom voice > env-var default for language.
   const envVoiceEn = process.env.FISH_AUDIO_VOICE_ID;
   const envVoiceDe = process.env.FISH_AUDIO_VOICE_ID_DE;
-  console.log(`[Fish] env voices — EN: ${envVoiceEn ? envVoiceEn.slice(0, 8) + '…' : '(not set)'} DE: ${envVoiceDe ? envVoiceDe.slice(0, 8) + '…' : '(not set)'}`);
-
-  const defaultVoiceId = lang === 'de'
-    ? (envVoiceDe ?? envVoiceEn)
-    : envVoiceEn;
+  const defaultVoiceId  = lang === 'de' ? (envVoiceDe ?? envVoiceEn) : envVoiceEn;
   const resolvedVoiceId = reference_id || defaultVoiceId;
   const voiceSource     = reference_id ? 'client' : (defaultVoiceId ? 'env' : 'none');
   console.log(`[Fish] using voice: ${resolvedVoiceId ? resolvedVoiceId.slice(0, 8) + '…' : '(none)'} (source: ${voiceSource})`);
