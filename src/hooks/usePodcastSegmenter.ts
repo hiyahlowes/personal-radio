@@ -686,6 +686,12 @@ export function usePodcastSegmenter() {
       let scribeCaptureStarted   = false;
       let scribeCutTime: number | null = null;
 
+      // TTS pre-gen: for chapter-based splits, start Claude + onCommentaryReady
+      // 30 s before the cut so Fish Audio TTS is ready at the actual break point.
+      let preGenStarted   = false;
+      let preGenCommentary: string | null = null;
+      let preGenPromise: Promise<string> | null = null;
+
       // Promise that resolves true on natural end, false on split or pause
       const result = await new Promise<'ended' | 'split' | 'paused'>((resolve) => {
         let pollId: ReturnType<typeof setInterval>;
@@ -773,6 +779,28 @@ export function usePodcastSegmenter() {
               findNaturalCutPoint(transcriptUrl, targetChapterTime)
                 .then(t  => { naturalCutTime = t; })
                 .catch(() => { naturalCutTime = targetChapterTime; });
+
+              // Start commentary pre-gen immediately — 30s before the cut —
+              // so TTS audio is ready when speakCommentary fires.
+              if (!preGenStarted) {
+                preGenStarted = true;
+                console.log('[TTS-Pre] starting interrupt pre-gen 30s early');
+                const preGenAt = ct;
+                preGenPromise = (async () => {
+                  const preCtx = await buildContext(preGenAt, transcriptUrl, chapters, description);
+                  const preMain = preCtx.primaryText;
+                  let script: string;
+                  if (preMain.length > 20 || preCtx.backgroundText.length > 20) {
+                    const ai = await generateCommentary(episodeFeedTitle, preMain, preCtx.backgroundText);
+                    script = ai ?? fallbackCommentary(episodeFeedTitle);
+                  } else {
+                    script = fallbackCommentary(episodeFeedTitle);
+                  }
+                  preGenCommentary = script;
+                  callbacks.onCommentaryReady?.(script);
+                  return script;
+                })();
+              }
             }
 
             // Use the refined cut time once it arrives; fall back to chapter boundary.
@@ -887,38 +915,49 @@ export function usePodcastSegmenter() {
         }
       }
 
-      // ── Context (tiered: transcript URL → chapters → description) ─────────
-      const podCtx = await buildContext(resumeAt, transcriptUrl, chapters, description);
-
-      // ── STT — only when no RSS transcript window was available ───────────
-      // Tier 1 provides equivalent precision without an ElevenLabs API call.
-      let sttText = '';
-      if (podCtx.tier > 1 && capturedBlob.size > 5_000) {
-        try {
-          sttText = await transcribeBlob(capturedBlob);
-        } catch (err) {
-          console.warn('[Segmenter] STT failed:', err);
-        }
-      }
-
-      if (!callbacks.isRunning()) break;
-
-      // ── Commentary ───────────────────────────────────────────────────────
-      // T1 window or STT transcript = mainText (specific words spoken).
-      // T2/T3 text = backgroundText (chapter / description context).
-      const mainText = podCtx.tier === 1 ? podCtx.primaryText : sttText;
+      // ── Commentary: use pre-gen result if available, else full pipeline ───
       let commentary: string;
-      if (mainText.length > 20 || podCtx.backgroundText.length > 20) {
-        const ai = await generateCommentary(episodeFeedTitle, mainText, podCtx.backgroundText);
-        commentary = ai ?? fallbackCommentary(episodeFeedTitle);
+      if (preGenCommentary !== null || preGenPromise !== null) {
+        // Pre-gen was started 30 s early — skip buildContext + STT.
+        // onCommentaryReady was already called during pre-gen.
+        if (preGenCommentary !== null) {
+          commentary = preGenCommentary;
+        } else {
+          commentary = await preGenPromise!;
+        }
+        preGenCommentary = null;
+        preGenPromise    = null;
+        if (!callbacks.isRunning()) break;
       } else {
-        commentary = fallbackCommentary(episodeFeedTitle);
+        // No pre-gen (silence-based split) — run full context + STT pipeline.
+        const podCtx = await buildContext(resumeAt, transcriptUrl, chapters, description);
+
+        // ── STT — only when no RSS transcript window was available ─────────
+        // Tier 1 provides equivalent precision without an ElevenLabs API call.
+        let sttText = '';
+        if (podCtx.tier > 1 && capturedBlob.size > 5_000) {
+          try {
+            sttText = await transcribeBlob(capturedBlob);
+          } catch (err) {
+            console.warn('[Segmenter] STT failed:', err);
+          }
+        }
+
+        if (!callbacks.isRunning()) break;
+
+        const mainText = podCtx.tier === 1 ? podCtx.primaryText : sttText;
+        if (mainText.length > 20 || podCtx.backgroundText.length > 20) {
+          const ai = await generateCommentary(episodeFeedTitle, mainText, podCtx.backgroundText);
+          commentary = ai ?? fallbackCommentary(episodeFeedTitle);
+        } else {
+          commentary = fallbackCommentary(episodeFeedTitle);
+        }
+
+        if (!callbacks.isRunning()) break;
+
+        // Notify caller so it can start TTS pre-generation in background.
+        callbacks.onCommentaryReady?.(commentary);
       }
-
-      if (!callbacks.isRunning()) break;
-
-      // Notify caller so it can start TTS pre-generation in background.
-      callbacks.onCommentaryReady?.(commentary);
 
       // ── Speak commentary ─────────────────────────────────────────────────
       await callbacks.speakCommentary(commentary);
