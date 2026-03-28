@@ -51,6 +51,8 @@ export function useNIP90() {
       privateKey,
     } = params;
 
+    console.log('[NIP-90] sending to relay:', localStorage.getItem('pr:agent-relay'));
+
     // ── NIP-04 encrypt the prompt so only the agent can read it ───────────
     let content = '';
     try {
@@ -83,6 +85,7 @@ export function useNIP90() {
       privateKey,
     );
 
+    console.log('[NIP-90] publishing event:', JSON.stringify(event));
     console.log('[NIP-90] job sent:', event.id);
 
     // ── Open WebSocket, publish event, wait for result ────────────────────
@@ -124,6 +127,7 @@ export function useNIP90() {
 
       ws.onmessage = (msg) => {
         try {
+          console.log('[NIP-90] relay response:', msg.data);
           const data = JSON.parse(msg.data as string) as unknown[];
           if (
             Array.isArray(data) &&
