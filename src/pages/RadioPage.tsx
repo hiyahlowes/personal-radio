@@ -1081,6 +1081,9 @@ export function RadioPage() {
                   loopGenRef.current++;
                   const breakGen = loopGenRef.current;
                   try { await audio.play(); } catch (e) { console.error('[Loop] break music play failed:', e); break; }
+                  // Reset progress bar to music track position (not podcast position).
+                  setCT(howlRef.current ? (howlRef.current.seek() as number) : audio.currentTime);
+                  setDur(breakTrack.duration || 0);
                   cancelRampRef.current?.();
                   cancelRampRef.current = rampVolume(audio, localMuted.current ? 0 : localVolume.current, 1000);
                   await new Promise<void>(res => {

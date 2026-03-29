@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSeoMeta } from '@unhead/react';
+import { useNostrKey } from '@/hooks/useNostrKey';
 import {
   getStoredFeeds,
   setStoredFeeds,
@@ -46,7 +47,8 @@ function loadStoredGenres(): string[] {
 
 export function SettingsPage() {
   useSeoMeta({ title: 'Settings — PR Personal Radio' });
-  const navigate = useNavigate();
+  const navigate   = useNavigate();
+  const nostrKey   = useNostrKey();
 
   // ── Listener name ─────────────────────────────────────────────────────────
   const [listenerName, setListenerName] = useState(getStoredName);
@@ -90,6 +92,31 @@ export function SettingsPage() {
   const saveFishVoiceIds = () => {
     localStorage.setItem('pr:fish-voice-id-en', fishVoiceIdEn.trim());
     localStorage.setItem('pr:fish-voice-id-de', fishVoiceIdDe.trim());
+  };
+
+  // ── Agent (NIP-90) settings ───────────────────────────────────────────────
+  const [moderatorSource, setModeratorSource] = useState<'claude' | 'agent'>(
+    () => (localStorage.getItem('pr:moderator-source') === 'agent' ? 'agent' : 'claude')
+  );
+  const [agentNpub, setAgentNpub]         = useState(() => localStorage.getItem('pr:agent-npub')  ?? '');
+  const [agentRelay, setAgentRelay]       = useState(() => localStorage.getItem('pr:agent-relay') ?? 'wss://relay.damus.io');
+  const [listenerNpub, setListenerNpub]   = useState(() => localStorage.getItem('pr:listener-npub') ?? '');
+  const [npubCopied, setNpubCopied]       = useState(false);
+
+  const selectModeratorSource = (src: 'claude' | 'agent') => {
+    setModeratorSource(src);
+    localStorage.setItem('pr:moderator-source', src);
+  };
+  const saveAgentSettings = () => {
+    localStorage.setItem('pr:agent-npub',    agentNpub.trim());
+    localStorage.setItem('pr:agent-relay',   agentRelay.trim() || 'wss://relay.damus.io');
+    localStorage.setItem('pr:listener-npub', listenerNpub.trim());
+  };
+  const copyNpub = () => {
+    navigator.clipboard.writeText(nostrKey.npub).then(() => {
+      setNpubCopied(true);
+      setTimeout(() => setNpubCopied(false), 2000);
+    }).catch(() => {});
   };
 
   // ── Genre selection ───────────────────────────────────────────────────────
@@ -359,6 +386,99 @@ export function SettingsPage() {
                 </div>
               </div>
             )}
+          </div>
+        </section>
+
+        {/* ── Connect Your Agent (NIP-90) ────────────────────────────────── */}
+        <section className="fade-in-up-delay-1 space-y-3">
+          <div>
+            <h2 className="text-lg font-bold">Connect Your Agent</h2>
+            <p className="text-sm text-white/40 mt-0.5">Use your personal AI agent as radio host via NIP-90</p>
+          </div>
+          <div className="glass-card rounded-2xl p-5 space-y-4">
+
+            {/* PR Identity */}
+            <div className="space-y-1.5">
+              <p className="text-xs font-semibold text-white/50 uppercase tracking-widest">Your PR Identity</p>
+              <p className="text-xs text-white/30">Share this with your agent so it recognises you</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 px-3 py-2 bg-white/5 border border-white/10 rounded-xl text-xs text-white/60 truncate select-all">
+                  {nostrKey.npub}
+                </code>
+                <button
+                  onClick={copyNpub}
+                  className="flex-shrink-0 px-3 py-2 rounded-xl text-xs font-semibold border transition-all text-white/50 border-white/10 hover:border-purple-500/40 hover:text-purple-300"
+                >
+                  {npubCopied ? '✓ Copied' : 'Copy'}
+                </button>
+              </div>
+            </div>
+
+            {/* Agent npub */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-white/50 uppercase tracking-widest">Agent npub</label>
+              <input
+                type="text"
+                value={agentNpub}
+                onChange={e => setAgentNpub(e.target.value)}
+                onBlur={saveAgentSettings}
+                placeholder="npub1…"
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+              />
+            </div>
+
+            {/* Relay */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-white/50 uppercase tracking-widest">Relay</label>
+              <input
+                type="text"
+                value={agentRelay}
+                onChange={e => setAgentRelay(e.target.value)}
+                onBlur={saveAgentSettings}
+                placeholder="wss://relay.damus.io"
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+              />
+            </div>
+
+            {/* Your Nostr identity (optional context hint) */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-white/50 uppercase tracking-widest">Your npub <span className="text-white/25 normal-case font-normal">(optional)</span></label>
+              <input
+                type="text"
+                value={listenerNpub}
+                onChange={e => setListenerNpub(e.target.value)}
+                onBlur={saveAgentSettings}
+                placeholder="npub1… (your own Nostr identity)"
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+              />
+            </div>
+
+            {/* Source selection */}
+            <div className="space-y-2 pt-1">
+              <p className="text-xs font-semibold text-white/50 uppercase tracking-widest">Moderator source</p>
+              <div className="flex gap-2">
+                {(['claude', 'agent'] as const).map(src => (
+                  <button
+                    key={src}
+                    onClick={() => selectModeratorSource(src)}
+                    aria-pressed={moderatorSource === src}
+                    className={`flex-1 py-2.5 rounded-xl border text-sm font-semibold transition-all duration-150 select-none
+                      ${moderatorSource === src
+                        ? 'bg-purple-600/25 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
+                        : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
+                      }`}
+                  >
+                    {src === 'claude' ? 'Claude (Standard)' : 'My Agent (NIP-90)'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Info note */}
+            <p className="text-xs text-white/30 leading-relaxed">
+              Your agent must respond within 3 s or Claude is used as fallback.
+              The prompt sent to your agent is identical to the one sent to Claude.
+            </p>
           </div>
         </section>
 

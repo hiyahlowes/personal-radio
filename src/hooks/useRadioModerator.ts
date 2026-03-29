@@ -1,5 +1,8 @@
 import { useCallback, useRef } from 'react';
 import { useElevenLabs } from './useElevenLabs';
+import { useNostrKey } from './useNostrKey';
+import { useNIP90 } from './useNIP90';
+import { nip19 } from 'nostr-tools';
 import type { WavlakeTrack } from './useWavlakeTracks';
 import type { PodcastEpisode } from './usePodcastFeeds';
 
@@ -273,6 +276,21 @@ function fallbackSkipTransition(nextLabel: string): string {
   return list[Math.floor(Math.random() * list.length)];
 }
 
+// NIP-90 helpers
+
+/** Convert an npub or hex public key to its hex form. */
+function npubToHex(npubOrHex: string): string {
+  try {
+    const decoded = nip19.decode(npubOrHex);
+    if (decoded.type === 'npub') return decoded.data;
+  } catch { /* not an npub — assume hex */ }
+  return npubOrHex;
+}
+
+function lsGet(key: string, fallback = ''): string {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+
 // Shakespeare AI script generator
 
 /** Maps the stored display name (e.g. "Deutsch") to the English language name Claude understands. */
@@ -397,12 +415,50 @@ export interface ModeratorState {
 
 export function useRadioModerator() {
   const { speak, stop, generate, playUrl, isSpeaking, isGenerating, error } = useElevenLabs();
+  const nostrKey = useNostrKey();
+  const { sendJob } = useNIP90();
   const currentScriptRef = useRef('');
   const memoryContextRef = useRef('');
 
   const setMemoryContext = useCallback((ctx: string) => {
     memoryContextRef.current = ctx;
   }, []);
+
+  /**
+   * Resolve a moderator script: tries the user's NIP-90 agent first (if
+   * pr:moderator-source === "agent"), falls back to Claude Haiku silently.
+   */
+  const resolveScript = useCallback(
+    async (prompt: string, longForm = false): Promise<string | null> => {
+      if (lsGet('pr:moderator-source') === 'agent') {
+        const agentNpub = lsGet('pr:agent-npub');
+        if (agentNpub) {
+          const relay              = lsGet('pr:agent-relay', 'wss://relay.damus.io');
+          const agentPubkeyHex    = npubToHex(agentNpub);
+          const listenerNpubRaw   = lsGet('pr:listener-npub');
+          const listenerPubkeyHex = listenerNpubRaw ? npubToHex(listenerNpubRaw) : undefined;
+          const listenerName      = lsGet('pr:name', 'Listener');
+
+          const agentResult = await sendJob({
+            prompt,
+            listenerInfo: `Listener: ${listenerName}, Language: ${getStoredLanguage()}`,
+            agentPubkeyHex,
+            listenerPubkeyHex,
+            relay,
+            privateKey: nostrKey.privateKey,
+          });
+
+          if (agentResult) {
+            console.log('[Moderator] using agent response');
+            return agentResult;
+          }
+          console.log('[Moderator] agent timeout — using Claude fallback');
+        }
+      }
+      return generateScript(prompt, longForm, memoryContextRef.current);
+    },
+    [sendJob, nostrKey.privateKey],
+  );
 
   const sayScript = useCallback(
     async (script: string): Promise<void> => {
@@ -416,14 +472,14 @@ export function useRadioModerator() {
     async (prompt: string, fallback: string): Promise<void> => {
       // 20% of calls: ask the AI to be more elaborate (3-4 sentences)
       const longForm = Math.random() < 0.2;
-      const aiScript = await generateScript(prompt, longForm, memoryContextRef.current);
+      const aiScript = await resolveScript(prompt, longForm);
       await sayScript(aiScript ?? fallback);
     },
-    [sayScript]
+    [resolveScript, sayScript]
   );
 
   /**
-   * Generate Claude script + TTS audio without playing.
+   * Generate script + TTS audio without playing.
    * Returns a blob URL (caller owns it — call URL.revokeObjectURL when done),
    * or null on failure. Used for parallel pre-generation.
    */
@@ -431,10 +487,10 @@ export function useRadioModerator() {
     async (prompt: string, fallback: string): Promise<string | null> => {
       console.log('[TTS-Pre] generating silently — no duck');
       const longForm = Math.random() < 0.2;
-      const aiScript = await generateScript(prompt, longForm, memoryContextRef.current);
+      const aiScript = await resolveScript(prompt, longForm);
       return generate(aiScript ?? fallback);
     },
-    [generate]
+    [resolveScript, generate]
   );
 
   /** Pre-generate greeting audio without playing it. */
@@ -732,11 +788,11 @@ export function useRadioModerator() {
       "Réagis en une courte phrase décontractée — comme un vrai animateur radio qui respecte que l'auditeur prenne le contrôle. " +
       'Sois naturel et détendu. Pas de didascalies, pas d\'emojis.',
     );
-    // generateScript already applies the CRITICAL language rule (reads localStorage).
-    // If the AI call fails, skip silently — better than speaking in the wrong language.
-    const aiScript = await generateScript(prompt);
+    // resolveScript tries the agent first, then falls back to Claude.
+    // If the call fails, skip silently — better than speaking in the wrong language.
+    const aiScript = await resolveScript(prompt);
     if (aiScript) await sayScript(aiScript);
-  }, [sayScript]);
+  }, [resolveScript, sayScript]);
 
   const speakPodcastTransition = useCallback(
     async (
