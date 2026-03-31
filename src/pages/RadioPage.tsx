@@ -116,6 +116,18 @@ function randInt(min: number, max: number) {
 }
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+const MIX_RATIO_KEY = 'pr:mix-ratio';
+/** Map mix slider value (0–100) to number of music tracks before a podcast slot. */
+function computeBudget(ratio: number): number {
+  return Math.round(1 + (ratio / 100) * 8);
+}
+function loadMixRatio(): number {
+  try {
+    const v = parseInt(localStorage.getItem(MIX_RATIO_KEY) ?? '', 10);
+    return isNaN(v) ? 50 : Math.max(0, Math.min(100, v));
+  } catch { return 50; }
+}
+
 // Pre-load jingles as Howl instances — HTMLAudioElement is not gesture-unlocked
 // on iOS; Howler handles the iOS AudioContext unlock internally.
 const _introHowl  = new Howl({ src: ['/podcast-intro.mp3'],  html5: true, preload: true, volume: 1.0 });
@@ -291,6 +303,8 @@ export function RadioPage() {
   const durationRef           = useRef(0);
   const [volume, setVol]      = useState(0.9);
   const [muted, setMuted]     = useState(false);
+  const [mixRatio, setMixRatio] = useState<number>(loadMixRatio);
+  const mixRatioRef = useRef<number>(loadMixRatio());
 
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
   // Initialise from persisted queue so content appears instantly on page return,
@@ -349,7 +363,7 @@ export function RadioPage() {
   const ambientBridgeRef   = useRef<WavlakeTrack[]>([]); // separate bridge pool, never in playlist
   const bridgeHowlRef      = useRef<Howl | null>(null);
   const silentCountRef   = useRef(0);
-  const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
+  const silentBudgetRef  = useRef(computeBudget(loadMixRatio())); // derived from mix slider
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
   const episodesRef      = useRef<PodcastEpisode[]>([]);
   const podcastIdxRef    = useRef(0); // cycles through episodes
@@ -1435,7 +1449,7 @@ export function RadioPage() {
         // Reset the silent counter AFTER speaking so the podcast check below
         // still has access to the accumulated count before we cleared it.
         silentCountRef.current  = 0;
-        silentBudgetRef.current = randInt(1, 2);
+        silentBudgetRef.current = computeBudget(mixRatioRef.current);
       } else {
         // Use pre-generated intro if available, otherwise generate now.
         const preGenUrl = nextIntroUrlRef.current;
@@ -1594,13 +1608,13 @@ export function RadioPage() {
         console.log(`[Loop] index advanced → ${nextMusicIdx}`);
         console.log(`[Loop] silentCount=${silentCountRef.current} / budget=${silentBudgetRef.current}, episodes=${episodesRef.current.length}`);
 
-        // ── Podcast slot every 2–3 music tracks ──────────────────────────────
+        // ── Podcast slot (frequency controlled by mix slider) ────────────────
         const eps = episodesRef.current;
         if (silentCountRef.current >= silentBudgetRef.current && eps.length > 0) {
           // Reset counters BEFORE entering podcast block so the next music
           // cycle starts fresh regardless of what happens inside.
           silentCountRef.current  = 0;
-          silentBudgetRef.current = randInt(2, 3);
+          silentBudgetRef.current = computeBudget(mixRatioRef.current);
 
           const epIdx   = podcastIdxRef.current % eps.length;
           const episode = eps[epIdx];
@@ -2220,6 +2234,37 @@ export function RadioPage() {
               <a href="https://wavlake.com" target="_blank" rel="noopener noreferrer" className="hidden sm:inline text-white/20 hover:text-purple-400 transition-colors text-xs">⚡ Wavlake</a>
             </div>
           </div>
+        </div>
+
+        {/* Mix ratio slider — controls music/podcast balance */}
+        <div className="fade-in-up-delay-2 glass-card rounded-2xl px-5 py-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-white/40">🎵 Music</span>
+            <span className="text-xs text-white/50 font-medium tabular-nums">
+              {computeBudget(mixRatio) === 1
+                ? '1 song · then podcast'
+                : `${computeBudget(mixRatio)} songs · then podcast`}
+            </span>
+            <span className="text-xs text-white/40">Podcast 🎙️</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={mixRatio}
+            onChange={e => {
+              const next = Number(e.target.value);
+              setMixRatio(next);
+              mixRatioRef.current = next;
+              silentBudgetRef.current = computeBudget(next);
+              try { localStorage.setItem(MIX_RATIO_KEY, String(next)); } catch { /* ignore */ }
+              console.log(`[Mix] ratio changed → budget: ${computeBudget(next)} songs before podcast`);
+            }}
+            className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+            style={{
+              background: `linear-gradient(to right, rgb(168 85 247 / 0.6) ${mixRatio}%, rgb(255 255 255 / 0.08) ${mixRatio}%)`,
+            }}
+          />
         </div>
 
         {/* Genre selector — directly below player, above podcasts */}
