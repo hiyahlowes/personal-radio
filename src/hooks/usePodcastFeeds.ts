@@ -273,7 +273,7 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
 
   const episodes: PodcastEpisode[] = [];
 
-  for (const item of items.slice(0, 5)) { // take 5 most recent per feed
+  for (const item of items.slice(0, 2)) { // take 2 most recent per feed
     // Audio URL — pick best enclosure by MIME-type preference.
     // Prefers audio/mpeg over video/mp4 so iOS never receives an undecodable container.
     const enc      = getEnclosureAudioUrl(item);
@@ -356,11 +356,11 @@ export function useSingleFeedEpisodes(feedUrl: string, enabled: boolean) {
  *   - This guarantees the pattern: A→B→C→A→B→C→… with graceful degradation
  *     when feeds have different episode counts.
  *
- * Example (3 feeds, 5 / 2 / 3 episodes):
- *   A0 B0 C0  A1 B1 C1  A2 C2  A3  A4
+ * Example (3 feeds, 2 / 1 / 2 episodes after cap):
+ *   A0 B0 C0  A1 C1
  *
- * The cap (MAX_PER_FEED) ensures that a prolific feed (e.g. hourly news)
- * never takes more slots than ceil(totalSlots / numFeeds).
+ * The cap (2/feed) keeps the auto-queue small. Additional episodes are
+ * available in the Episode Browser for manual queuing.
  */
 function roundRobinInterleave(perFeed: PodcastEpisode[][]): PodcastEpisode[] {
   const numFeeds = perFeed.length;
@@ -368,9 +368,9 @@ function roundRobinInterleave(perFeed: PodcastEpisode[][]): PodcastEpisode[] {
   if (numFeeds === 1) return perFeed[0]; // single feed — no interleaving needed
 
   const totalEpisodes = perFeed.reduce((s, f) => s + f.length, 0);
-  const maxPerFeed    = Math.ceil(totalEpisodes / numFeeds);
+  const maxPerFeed    = 2;
 
-  // Cap each feed at maxPerFeed so a high-volume feed can't dominate
+  // Cap each feed at 2 episodes — the rest are available in Episode Browser
   const capped  = perFeed.map(eps => eps.slice(0, maxPerFeed));
   const cursors = new Array<number>(numFeeds).fill(0);
   const result: PodcastEpisode[] = [];
@@ -388,7 +388,7 @@ function roundRobinInterleave(perFeed: PodcastEpisode[][]): PodcastEpisode[] {
 
   console.log(
     `[Podcast] round-robin queue: ${result.length} episodes from ${numFeeds} feeds` +
-    ` (cap ${maxPerFeed}/feed, total raw ${totalEpisodes})`,
+    ` (cap 2/feed, total raw ${totalEpisodes})`,
   );
 
   return result;

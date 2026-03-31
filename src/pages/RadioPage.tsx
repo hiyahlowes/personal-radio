@@ -116,6 +116,18 @@ function randInt(min: number, max: number) {
 }
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+const MIX_RATIO_KEY = 'pr:mix-ratio';
+/** Map mix slider value (0–100) to number of music tracks before a podcast slot. */
+function computeBudget(ratio: number): number {
+  return Math.round(1 + (ratio / 100) * 8);
+}
+function loadMixRatio(): number {
+  try {
+    const v = parseInt(localStorage.getItem(MIX_RATIO_KEY) ?? '', 10);
+    return isNaN(v) ? 50 : Math.max(0, Math.min(100, v));
+  } catch { return 50; }
+}
+
 // Pre-load jingles as Howl instances — HTMLAudioElement is not gesture-unlocked
 // on iOS; Howler handles the iOS AudioContext unlock internally.
 const _introHowl  = new Howl({ src: ['/podcast-intro.mp3'],  html5: true, preload: true, volume: 1.0 });
@@ -291,6 +303,8 @@ export function RadioPage() {
   const durationRef           = useRef(0);
   const [volume, setVol]      = useState(0.9);
   const [muted, setMuted]     = useState(false);
+  const [mixRatio, setMixRatio] = useState<number>(loadMixRatio);
+  const mixRatioRef = useRef<number>(loadMixRatio());
 
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
   // Initialise from persisted queue so content appears instantly on page return,
@@ -349,7 +363,7 @@ export function RadioPage() {
   const ambientBridgeRef   = useRef<WavlakeTrack[]>([]); // separate bridge pool, never in playlist
   const bridgeHowlRef      = useRef<Howl | null>(null);
   const silentCountRef   = useRef(0);
-  const silentBudgetRef  = useRef(randInt(2, 3)); // 2-3 music tracks before podcast
+  const silentBudgetRef  = useRef(computeBudget(loadMixRatio())); // derived from mix slider
   const recentTracksRef  = useRef<WavlakeTrack[]>([]);
   const episodesRef      = useRef<PodcastEpisode[]>([]);
   const podcastIdxRef    = useRef(0); // cycles through episodes
@@ -709,8 +723,9 @@ export function RadioPage() {
           howl.play();
           console.log('[Duck] iOS — resuming music');
         } else {
-          console.log(`[Duck] Howler fadeBack: ${DUCK_LEVEL} → 0.9 over 2000ms`);
-          howl.fade(DUCK_LEVEL, 0.9, 2000);
+          const actualVol = howl.volume() as number;
+          console.log(`[Duck] fadeBack triggered — current volume: ${actualVol.toFixed(2)}`);
+          howl.fade(actualVol, 0.9, 2000);
           musicVolumeRef.current = 0.9;
         }
       }
@@ -943,12 +958,8 @@ export function RadioPage() {
           console.warn('[Podcast] URL resolution failed — falling back to direct URL:', resolveErr);
         }
 
-        if (isIOS) {
-          pod.src = `/podcast-stream?url=${encodeURIComponent(audioSrc)}`;
-          console.log('[Podcast] iOS: streaming via Edge Function proxy');
-        } else {
-          pod.src = audioSrc;
-        }
+        pod.src = `/podcast-stream?url=${encodeURIComponent(audioSrc)}`;
+        console.log('[Podcast] streaming via proxy (CORS safe)');
         pod.volume = 1.0;
 
         const savedPos = loadPodcastPosition(episode.id);
@@ -1002,23 +1013,41 @@ export function RadioPage() {
           console.log(`[Podcast] volume after play: ${pod.volume}`);
           (Howler as any).ctx?.resume();
           console.log('[Loop] podcast play() resolved — podcast playing');
+          // Re-sync timeline state after play() resolves.
+          // The pre-play setCT/setDur calls use episode.duration which may be 0
+          // for streaming content. Now that the browser has started buffering we
+          // can read actual element values, with episode.duration as fallback.
+          {
+            const podEl  = podAudioRef.current;
+            const ct     = podEl ? (podEl.currentTime || 0) : 0;
+            const podDur = podEl ? podEl.duration : NaN;
+            const dur    = (podDur > 0 && isFinite(podDur)) ? podDur : (episode.duration || 0);
+            setCT(ct);
+            setDur(dur);
+            // Ensure React nowPlaying state is set (in case the earlier setNowPlaying
+            // was batched before play() and lost a race with a stale render).
+            nowPlayingRef.current = { kind: 'podcast', episode };
+            setNowPlaying({ kind: 'podcast', episode });
+            setPlaying(true);
+            console.log(`[Podcast] timeline initialized — dur: ${dur.toFixed(0)}s ct: ${ct.toFixed(1)}s`);
+          }
         } catch (e) {
           const isNotSupported = e instanceof DOMException && e.name === 'NotSupportedError';
           if (isIOS && isNotSupported) {
             console.warn('[Podcast] iOS: NotSupportedError — skipping episode');
-            markPlayedRef.current(episode.id);
-            setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
-            skipEpisode = true;
           } else {
-            console.error('[Loop] podcast play failed — resetting state:', e);
-            runningRef.current = false;
-            resumePodcastEpisodeRef.current = null;
-            nowPlayingRef.current = null; setNowPlaying(null); setPlaying(false);
+            console.error('[Loop] podcast play failed — playing recovery message + continuing:', e);
           }
+          // Always recover gracefully: skip the failed episode and continue the loop
+          markPlayedRef.current(episode.id);
+          setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
+          resumePodcastEpisodeRef.current = null;
+          nowPlayingRef.current = null; setNowPlaying(null);
+          skipEpisode = true;
+          try { await moderatorRef.current.speakTechnicalDifficulty(); } catch { /* best effort */ }
         }
 
-        // Pod failed — skipEpisode: return so outer while continues (runningRef still true).
-        // Non-iOS failure: runningRef set false above → outer while exits.
+        // Pod failed — return so outer while continues (runningRef still true).
         if (!podStarted) return;
 
         // ── Run episode through segmenter ─────────────────────────────────────
@@ -1071,8 +1100,13 @@ export function RadioPage() {
                   if (!runningRef.current) break;
                   const breakTrack = allTracks[Math.floor(Math.random() * allTracks.length)];
                   console.log(`[Loop] music break ${b + 1}/${breakCount}: "${breakTrack.name}"`);
+                  // Reset timeline to music before playing — onMusicTime is gated by
+                  // howlRef, so breaks (which play on audio, not Howler) need their own poll.
+                  console.log('[Loop] music break — resetting timeline to music');
                   nowPlayingRef.current = { kind: 'music', track: breakTrack };
                   setNowPlaying({ kind: 'music', track: breakTrack });
+                  setCT(0);
+                  setDur(breakTrack.duration || 0);
                   if (b === 0) await localMod.current.speakTrackIntro(breakTrack);
                   if (!runningRef.current) break;
                   audio.src    = breakTrack.liveUrl;
@@ -1081,15 +1115,21 @@ export function RadioPage() {
                   loopGenRef.current++;
                   const breakGen = loopGenRef.current;
                   try { await audio.play(); } catch (e) { console.error('[Loop] break music play failed:', e); break; }
-                  // Reset progress bar to music track position (not podcast position).
-                  setCT(howlRef.current ? (howlRef.current.seek() as number) : audio.currentTime);
-                  setDur(breakTrack.duration || 0);
                   cancelRampRef.current?.();
                   cancelRampRef.current = rampVolume(audio, localMuted.current ? 0 : localVolume.current, 1000);
+                  // Poll audio.currentTime directly — onMusicTime bails when howlRef is set,
+                  // and Howler's poll only covers tracks playing through Howler.
+                  const breakPoll = setInterval(() => {
+                    if (isFinite(audio.currentTime)) setCT(audio.currentTime);
+                  }, 250);
                   await new Promise<void>(res => {
                     const onEnded = () => { if (loopGenRef.current !== breakGen) return; cleanup(); res(); };
                     const onPause = () => { if (loopGenRef.current !== breakGen) return; if (!runningRef.current) { cleanup(); res(); } };
-                    function cleanup() { audio.removeEventListener('ended', onEnded); audio.removeEventListener('pause', onPause); }
+                    function cleanup() {
+                      clearInterval(breakPoll);
+                      audio.removeEventListener('ended', onEnded);
+                      audio.removeEventListener('pause', onPause);
+                    }
                     audio.addEventListener('ended', onEnded);
                     audio.addEventListener('pause', onPause);
                   });
@@ -1427,7 +1467,7 @@ export function RadioPage() {
         // Reset the silent counter AFTER speaking so the podcast check below
         // still has access to the accumulated count before we cleared it.
         silentCountRef.current  = 0;
-        silentBudgetRef.current = randInt(1, 2);
+        silentBudgetRef.current = computeBudget(mixRatioRef.current);
       } else {
         // Use pre-generated intro if available, otherwise generate now.
         const preGenUrl = nextIntroUrlRef.current;
@@ -1586,13 +1626,13 @@ export function RadioPage() {
         console.log(`[Loop] index advanced → ${nextMusicIdx}`);
         console.log(`[Loop] silentCount=${silentCountRef.current} / budget=${silentBudgetRef.current}, episodes=${episodesRef.current.length}`);
 
-        // ── Podcast slot every 2–3 music tracks ──────────────────────────────
+        // ── Podcast slot (frequency controlled by mix slider) ────────────────
         const eps = episodesRef.current;
         if (silentCountRef.current >= silentBudgetRef.current && eps.length > 0) {
           // Reset counters BEFORE entering podcast block so the next music
           // cycle starts fresh regardless of what happens inside.
           silentCountRef.current  = 0;
-          silentBudgetRef.current = randInt(2, 3);
+          silentBudgetRef.current = computeBudget(mixRatioRef.current);
 
           const epIdx   = podcastIdxRef.current % eps.length;
           const episode = eps[epIdx];
@@ -2214,6 +2254,37 @@ export function RadioPage() {
           </div>
         </div>
 
+        {/* Mix ratio slider — controls music/podcast balance */}
+        <div className="fade-in-up-delay-2 glass-card rounded-2xl px-5 py-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-white/40">🎵 Music</span>
+            <span className="text-xs text-white/50 font-medium tabular-nums">
+              {computeBudget(mixRatio) === 1
+                ? '1 song · then podcast'
+                : `${computeBudget(mixRatio)} songs · then podcast`}
+            </span>
+            <span className="text-xs text-white/40">Podcast 🎙️</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={mixRatio}
+            onChange={e => {
+              const next = Number(e.target.value);
+              setMixRatio(next);
+              mixRatioRef.current = next;
+              silentBudgetRef.current = computeBudget(next);
+              try { localStorage.setItem(MIX_RATIO_KEY, String(next)); } catch { /* ignore */ }
+              console.log(`[Mix] ratio changed → budget: ${computeBudget(next)} songs before podcast`);
+            }}
+            className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+            style={{
+              background: `linear-gradient(to right, rgb(168 85 247 / 0.6) ${mixRatio}%, rgb(255 255 255 / 0.08) ${mixRatio}%)`,
+            }}
+          />
+        </div>
+
         {/* Genre selector — directly below player, above podcasts */}
         <div className="fade-in-up-delay-3 space-y-3">
           <div className="flex items-center justify-between px-1">
@@ -2264,135 +2335,6 @@ export function RadioPage() {
 
         {/* Drag-and-drop context wraps both sortable lists */}
         <DragDropContext onDragEnd={handleDragEnd}>
-
-          {/* Coming Up — podcast queue (draggable) */}
-          {(orderedEpisodes.length > 0 || storedFeeds.length > 0) && (
-            <div className="fade-in-up-delay-3 space-y-3">
-              <div className="flex items-center justify-between px-1">
-                <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up · Podcasts</h3>
-                <div className="flex items-center gap-3">
-                  {orderedEpisodes.some(ep => ep.transcriptUrl) && (
-                    <span className="text-xs text-emerald-400/60">✓ Best listening experience</span>
-                  )}
-                  {orderedEpisodes.length > 0 && (
-                    <span className="text-xs text-amber-400/60">drag to reorder</span>
-                  )}
-                  <button
-                    onClick={() => { setStoredFeeds(getStoredFeeds()); refetchEpisodes(); }}
-                    disabled={episodesFetching}
-                    className="flex items-center gap-1 text-xs text-amber-400/70 hover:text-amber-300 transition-colors disabled:opacity-40"
-                    aria-label="Refresh podcast queue"
-                  >
-                    <svg className={`w-3 h-3 ${episodesFetching ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/>
-                    </svg>
-                    {episodesFetching ? 'Loading…' : 'Refresh'}
-                  </button>
-                </div>
-              </div>
-              <Droppable droppableId="podcast-queue">
-                {(provided, snapshot) => (
-                  <div
-                    ref={provided.innerRef}
-                    {...provided.droppableProps}
-                    className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
-                  >
-                     {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
-                       <div className="glass-card rounded-2xl px-5 py-6 text-center">
-                         <p className="text-sm text-white/40">
-                           {episodesFetching ? 'Loading episodes…' : 'No episodes loaded yet.'}
-                         </p>
-                         {!episodesFetching && (
-                           <button
-                             onClick={() => refetchEpisodes()}
-                             className="mt-2 text-xs text-amber-400 hover:text-amber-300 transition-colors underline underline-offset-2"
-                           >
-                             Tap to refresh
-                           </button>
-                         )}
-                       </div>
-                     )}
-                     {orderedEpisodes.slice(0, 5).map((ep, i) => (
-                       <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
-                         {(drag, dragSnapshot) => (
-                           <PortalAware
-                             provided={drag}
-                             snapshot={dragSnapshot}
-                             className={`glass-card rounded-2xl p-4 flex items-start gap-4 transition-all
-                               ${dragSnapshot.isDragging ? 'shadow-2xl shadow-amber-900/30 ring-1 ring-amber-500/30 opacity-95' : ''}
-                             `}
-                           >
-                             {/* Drag handle */}
-                             <div
-                               {...drag.dragHandleProps}
-                               className="flex-shrink-0 flex items-center justify-center w-5 self-center cursor-grab active:cursor-grabbing text-white/20 hover:text-white/50 transition-colors"
-                               aria-label="Drag to reorder"
-                             >
-                               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                                 <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
-                               </svg>
-                             </div>
-                             <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-0.5">
-                                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
-                                  {ep.duration > 0 && (() => {
-                                    const saved = loadPodcastPosition(ep.id);
-                                    const remaining = saved > 5 ? ep.duration - saved : ep.duration;
-                                    return remaining > 0 ? (
-                                      <>
-                                        <span className="text-xs text-white/25">·</span>
-                                        <span className="text-xs text-white/40">
-                                          {saved > 5 ? `${fmt(remaining)} left` : fmt(ep.duration)}
-                                        </span>
-                                      </>
-                                    ) : null;
-                                  })()}
-                                  {ep.transcriptUrl && (
-                                    <span
-                                      title="Best listening experience — full transcript available"
-                                      className="text-emerald-400/80 text-xs leading-none"
-                                    >✓</span>
-                                  )}
-                                  {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
-                                </div>
-                                <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
-                                <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
-                              </div>
-                              {/* Play episode now */}
-                              <button
-                                onClick={e => { e.stopPropagation(); startPodcastFromQueue(ep); }}
-                                aria-label="Play episode now"
-                                title="Play now"
-                                className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-amber-400/60 hover:text-amber-300 hover:bg-amber-900/30 transition-colors"
-                              >
-                                <svg className="w-3.5 h-3.5 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
-                                  <path d="M8 5v14l11-7z"/>
-                                </svg>
-                              </button>
-                              {/* Remove episode from queue */}
-                              <button
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  setOrderedEpisodes(prev => prev.filter(e => e.id !== ep.id));
-                                }}
-                                aria-label="Remove episode from queue"
-                                className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white/25 hover:text-red-400 hover:bg-red-900/20 transition-colors"
-                              >
-                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                                </svg>
-                              </button>
-                            </PortalAware>
-                         )}
-                       </Draggable>
-                     ))}
-                    {provided.placeholder}
-                  </div>
-                )}
-              </Droppable>
-            </div>
-          )}
 
           {/* Playlist (draggable) */}
           <div className="fade-in-up-delay-3 space-y-3">
@@ -2545,6 +2487,136 @@ export function RadioPage() {
               )}
             </div>
           </div>
+
+          {/* Coming Up — podcast queue (draggable) */}
+          {(orderedEpisodes.length > 0 || storedFeeds.length > 0) && (
+            <div className="fade-in-up-delay-3 space-y-3">
+              <div className="flex items-center justify-between px-1">
+                <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up · Podcasts</h3>
+                <div className="flex items-center gap-3">
+                  {orderedEpisodes.some(ep => ep.transcriptUrl) && (
+                    <span className="text-xs text-emerald-400/60">✓ Best listening experience</span>
+                  )}
+                  {orderedEpisodes.length > 0 && (
+                    <span className="text-xs text-amber-400/60">drag to reorder</span>
+                  )}
+                  <button
+                    onClick={() => { setStoredFeeds(getStoredFeeds()); refetchEpisodes(); }}
+                    disabled={episodesFetching}
+                    className="flex items-center gap-1 text-xs text-amber-400/70 hover:text-amber-300 transition-colors disabled:opacity-40"
+                    aria-label="Refresh podcast queue"
+                  >
+                    <svg className={`w-3 h-3 ${episodesFetching ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/>
+                    </svg>
+                    {episodesFetching ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
+              </div>
+              <Droppable droppableId="podcast-queue">
+                {(provided, snapshot) => (
+                  <div
+                    ref={provided.innerRef}
+                    {...provided.droppableProps}
+                    className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
+                    style={{ maxHeight: 400, overflowY: 'auto' }}
+                  >
+                     {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
+                       <div className="glass-card rounded-2xl px-5 py-6 text-center">
+                         <p className="text-sm text-white/40">
+                           {episodesFetching ? 'Loading episodes…' : 'No episodes loaded yet.'}
+                         </p>
+                         {!episodesFetching && (
+                           <button
+                             onClick={() => refetchEpisodes()}
+                             className="mt-2 text-xs text-amber-400 hover:text-amber-300 transition-colors underline underline-offset-2"
+                           >
+                             Tap to refresh
+                           </button>
+                         )}
+                       </div>
+                     )}
+                     {orderedEpisodes.map((ep, i) => (
+                       <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
+                         {(drag, dragSnapshot) => (
+                           <PortalAware
+                             provided={drag}
+                             snapshot={dragSnapshot}
+                             className={`glass-card rounded-2xl p-4 flex items-start gap-4 transition-all
+                               ${dragSnapshot.isDragging ? 'shadow-2xl shadow-amber-900/30 ring-1 ring-amber-500/30 opacity-95' : ''}
+                             `}
+                           >
+                             {/* Drag handle */}
+                             <div
+                               {...drag.dragHandleProps}
+                               className="flex-shrink-0 flex items-center justify-center w-5 self-center cursor-grab active:cursor-grabbing text-white/20 hover:text-white/50 transition-colors"
+                               aria-label="Drag to reorder"
+                             >
+                               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                                 <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
+                               </svg>
+                             </div>
+                             <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-0.5">
+                                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
+                                  {ep.duration > 0 && (() => {
+                                    const saved = loadPodcastPosition(ep.id);
+                                    const remaining = saved > 5 ? ep.duration - saved : ep.duration;
+                                    return remaining > 0 ? (
+                                      <>
+                                        <span className="text-xs text-white/25">·</span>
+                                        <span className="text-xs text-white/40">
+                                          {saved > 5 ? `${fmt(remaining)} left` : fmt(ep.duration)}
+                                        </span>
+                                      </>
+                                    ) : null;
+                                  })()}
+                                  {ep.transcriptUrl && (
+                                    <span
+                                      title="Best listening experience — full transcript available"
+                                      className="text-emerald-400/80 text-xs leading-none"
+                                    >✓</span>
+                                  )}
+                                  {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
+                                </div>
+                                <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
+                                <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
+                              </div>
+                              {/* Play episode now */}
+                              <button
+                                onClick={e => { e.stopPropagation(); startPodcastFromQueue(ep); }}
+                                aria-label="Play episode now"
+                                title="Play now"
+                                className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-amber-400/60 hover:text-amber-300 hover:bg-amber-900/30 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M8 5v14l11-7z"/>
+                                </svg>
+                              </button>
+                              {/* Remove episode from queue */}
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setOrderedEpisodes(prev => prev.filter(e => e.id !== ep.id));
+                                }}
+                                aria-label="Remove episode from queue"
+                                className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white/25 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                              </button>
+                            </PortalAware>
+                         )}
+                       </Draggable>
+                     ))}
+                    {provided.placeholder}
+                  </div>
+                )}
+              </Droppable>
+            </div>
+          )}
 
         </DragDropContext>
 

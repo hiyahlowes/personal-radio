@@ -265,6 +265,29 @@ function fallbackPodcastOutro(feedTitle: string, nextArtist: string, cleanNextTi
   return t[lang];
 }
 
+function fallbackTechnicalDifficulty(): string {
+  const lang = getLangCode();
+  const t: Record<'en' | 'de' | 'fr', string[]> = {
+    en: [
+      "We're having some technical difficulties — let's keep the music going.",
+      "That episode seems to be having issues — back to the music for now.",
+      "Technical glitch on that one — no worries, here's some music instead.",
+    ],
+    de: [
+      'Wir haben gerade technische Schwierigkeiten — weiter mit Musik.',
+      'Diese Folge macht Probleme — zurück zur Musik für jetzt.',
+      'Technischer Fehler — kein Problem, hier ist Musik stattdessen.',
+    ],
+    fr: [
+      "On a quelques difficultés techniques — on continue avec la musique.",
+      "Cet épisode semble avoir des problèmes — retour à la musique pour l'instant.",
+      "Problème technique sur celui-là — pas de souci, voici de la musique à la place.",
+    ],
+  };
+  const list = t[lang];
+  return list[Math.floor(Math.random() * list.length)];
+}
+
 function fallbackSkipTransition(nextLabel: string): string {
   const lang = getLangCode();
   const t: Record<'en' | 'de' | 'fr', string[]> = {
@@ -426,11 +449,11 @@ export function useRadioModerator() {
 
   /**
    * Resolve a moderator script: tries the user's NIP-90 agent first (if
-   * pr:moderator-source === "agent"), falls back to Claude Haiku silently.
+   * pr:nip90-enabled === "true"), falls back to Claude Haiku silently.
    */
   const resolveScript = useCallback(
     async (prompt: string, longForm = false): Promise<string | null> => {
-      if (lsGet('pr:moderator-source') === 'agent') {
+      if (lsGet('pr:nip90-enabled') === 'true') {
         const agentNpub = lsGet('pr:agent-npub');
         if (agentNpub) {
           const relay              = lsGet('pr:agent-relay', 'wss://relay.damus.io');
@@ -1101,6 +1124,23 @@ export function useRadioModerator() {
     [sayScript],
   );
 
+  const speakTechnicalDifficulty = useCallback(async (): Promise<void> => {
+    const aiScript = await resolveScript(lp(
+      'A podcast episode failed to load due to a technical error. ' +
+      'Say one short, casual sentence letting the listener know and that you\'re switching back to music. ' +
+      'Sound unbothered. No stage directions.',
+
+      'Eine Podcast-Folge konnte wegen eines technischen Fehlers nicht geladen werden. ' +
+      'Sage einen kurzen, lockeren Satz der den Hörer informiert und ankündigt dass es mit Musik weitergeht. ' +
+      'Klingt entspannt. Keine Regieanweisungen.',
+
+      'Un épisode de podcast n\'a pas pu se charger suite à une erreur technique. ' +
+      'Dis une courte phrase décontractée pour informer l\'auditeur et annoncer qu\'on reprend la musique. ' +
+      'Sois détendu. Pas de didascalies.',
+    ));
+    await sayScript(aiScript ?? fallbackTechnicalDifficulty());
+  }, [resolveScript, sayScript]);
+
   return {
     speakGreeting,
     speakTrackIntro,
@@ -1112,6 +1152,7 @@ export function useRadioModerator() {
     speakPodcastReturn,
     speakSkipTransition,
     speakUserControlReaction,
+    speakTechnicalDifficulty,
     setMemoryContext,
     stop,
     isSpeaking,

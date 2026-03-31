@@ -544,20 +544,22 @@ function fallbackCommentary(podcastTitle: string): string {
 export function usePodcastSegmenter() {
   // We keep a stable ref to the active AudioContext so we can close it cleanly.
   const audioCtxRef    = useRef<AudioContext | null>(null);
+  // The MediaElementAudioSourceNode can only be created once per HTMLMediaElement.
+  // We store it here and reuse it across episodes to avoid the
+  // "already connected to a different MediaElementSourceNode" error.
+  const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const recorderRef    = useRef<MediaRecorder | null>(null);
   const chunksRef      = useRef<Blob[]>([]);
 
   /**
-   * Tear down Web Audio resources. Safe to call multiple times.
+   * Tear down recorder resources between episodes.
+   * Intentionally does NOT close the AudioContext or null mediaSourceRef,
+   * because the MediaElementAudioSourceNode must be reused across episodes.
    */
   const teardown = useCallback(() => {
     recorderRef.current?.stop();
     recorderRef.current = null;
     chunksRef.current   = [];
-    if (audioCtxRef.current?.state !== 'closed') {
-      audioCtxRef.current?.close().catch(() => {});
-    }
-    audioCtxRef.current = null;
   }, []);
 
   /**
@@ -583,11 +585,17 @@ export function usePodcastSegmenter() {
     teardown(); // clean slate
 
     // ── Set up AudioContext for this podcast element ──────────────────────
-    // We need a fresh AudioContext because the podcast <audio> element may
-    // have been connected to a previous context that is now closed.
+    // Reuse an existing non-closed AudioContext when available so we can also
+    // reuse the MediaElementAudioSourceNode (which can only be created once
+    // per HTMLMediaElement — recreating it throws "already connected").
     let ctx: AudioContext;
     try {
-      ctx = new AudioContext();
+      if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+        ctx = new AudioContext();
+        audioCtxRef.current = ctx;
+      } else {
+        ctx = audioCtxRef.current;
+      }
       // iOS Safari creates AudioContext in 'suspended' state.
       // Fire resume() immediately — it succeeds if the user's gesture chain is
       // still active (which it is: the user tapped Play → advanceLoop() awaited
@@ -598,16 +606,24 @@ export function usePodcastSegmenter() {
       await playUntilEnd(audio, callbacks.isRunning);
       return;
     }
-    audioCtxRef.current = ctx;
 
     // Connect: audio element → analyser → destination (so audio still plays)
+    // Reuse the existing source node if we already created one for this element.
     let source: MediaElementAudioSourceNode;
     try {
-      source = ctx.createMediaElementSource(audio);
+      if (!mediaSourceRef.current) {
+        mediaSourceRef.current = ctx.createMediaElementSource(audio);
+      }
+      source = mediaSourceRef.current;
+      // Disconnect from any previous graph before rewiring below.
+      source.disconnect();
     } catch (e) {
       console.warn('[Segmenter] createMediaElementSource failed (CORS?):', e);
-      ctx.close();
+      if (audioCtxRef.current?.state !== 'closed') {
+        audioCtxRef.current?.close().catch(() => {});
+      }
       audioCtxRef.current = null;
+      mediaSourceRef.current = null;
       await playUntilEnd(audio, callbacks.isRunning);
       return;
     }
