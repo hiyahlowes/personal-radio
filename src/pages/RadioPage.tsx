@@ -2297,6 +2297,7 @@ export function RadioPage() {
                     ref={provided.innerRef}
                     {...provided.droppableProps}
                     className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
+                    style={{ maxHeight: 400, overflowY: 'auto' }}
                   >
                      {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
                        <div className="glass-card rounded-2xl px-5 py-6 text-center">
@@ -2313,7 +2314,7 @@ export function RadioPage() {
                          )}
                        </div>
                      )}
-                     {orderedEpisodes.slice(0, 5).map((ep, i) => (
+                     {orderedEpisodes.map((ep, i) => (
                        <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
                          {(drag, dragSnapshot) => (
                            <PortalAware
