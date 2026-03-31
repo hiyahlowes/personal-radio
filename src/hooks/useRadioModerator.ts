@@ -426,11 +426,11 @@ export function useRadioModerator() {
 
   /**
    * Resolve a moderator script: tries the user's NIP-90 agent first (if
-   * pr:moderator-source === "agent"), falls back to Claude Haiku silently.
+   * pr:nip90-enabled === "true"), falls back to Claude Haiku silently.
    */
   const resolveScript = useCallback(
     async (prompt: string, longForm = false): Promise<string | null> => {
-      if (lsGet('pr:moderator-source') === 'agent') {
+      if (lsGet('pr:nip90-enabled') === 'true') {
         const agentNpub = lsGet('pr:agent-npub');
         if (agentNpub) {
           const relay              = lsGet('pr:agent-relay', 'wss://relay.damus.io');

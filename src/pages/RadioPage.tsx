@@ -709,8 +709,9 @@ export function RadioPage() {
           howl.play();
           console.log('[Duck] iOS — resuming music');
         } else {
-          console.log(`[Duck] Howler fadeBack: ${DUCK_LEVEL} → 0.9 over 2000ms`);
-          howl.fade(DUCK_LEVEL, 0.9, 2000);
+          const actualVol = howl.volume() as number;
+          console.log(`[Duck] fadeBack triggered — current volume: ${actualVol.toFixed(2)}`);
+          howl.fade(actualVol, 0.9, 2000);
           musicVolumeRef.current = 0.9;
         }
       }

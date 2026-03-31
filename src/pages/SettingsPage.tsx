@@ -153,17 +153,18 @@ export function SettingsPage() {
   };
 
   // ── Agent (NIP-90) ─────────────────────────────────────────────────────────
-  const [moderatorSource, setModeratorSource] = useState<'claude' | 'agent'>(
-    () => (localStorage.getItem('pr:moderator-source') === 'agent' ? 'agent' : 'claude')
+  const [nip90Enabled, setNip90Enabled] = useState<boolean>(
+    () => localStorage.getItem('pr:nip90-enabled') === 'true'
   );
   const [agentNpub, setAgentNpub]       = useState(() => localStorage.getItem('pr:agent-npub')      ?? '');
   const [agentRelay, setAgentRelay]     = useState(() => localStorage.getItem('pr:agent-relay')     ?? 'wss://relay.damus.io');
   const [listenerNpub, setListenerNpub] = useState(() => localStorage.getItem('pr:listener-npub')   ?? '');
   const [npubCopied, setNpubCopied]     = useState(false);
 
-  const selectModeratorSource = (src: 'claude' | 'agent') => {
-    setModeratorSource(src);
-    localStorage.setItem('pr:moderator-source', src);
+  const toggleNip90 = () => {
+    const next = !nip90Enabled;
+    setNip90Enabled(next);
+    localStorage.setItem('pr:nip90-enabled', String(next));
   };
   const saveAgentSettings = () => {
     localStorage.setItem('pr:agent-npub',    agentNpub.trim());
@@ -520,28 +521,30 @@ export function SettingsPage() {
                   />
                 </div>
 
-                {/* Claude / My Agent toggle */}
-                <div className="space-y-2">
-                  <p className="text-xs font-semibold text-white/35 uppercase tracking-widest">Moderator</p>
-                  <div className="flex gap-2">
-                    {(['claude', 'agent'] as const).map(src => (
-                      <button
-                        key={src}
-                        onClick={() => selectModeratorSource(src)}
-                        aria-pressed={moderatorSource === src}
-                        className={`flex-1 py-2.5 rounded-xl border text-sm font-semibold transition-all duration-150 select-none
-                          ${moderatorSource === src
-                            ? 'bg-purple-600/25 border-purple-500/60 text-purple-200 shadow-sm shadow-purple-900/40'
-                            : 'bg-white/5 border-white/10 text-white/40 hover:border-white/25 hover:text-white/60'
-                          }`}
-                      >
-                        {src === 'claude' ? 'Claude' : 'My Agent (NIP-90)'}
-                      </button>
-                    ))}
+                {/* Enable Agent toggle */}
+                <div className="flex items-start gap-3">
+                  <button
+                    role="checkbox"
+                    aria-checked={nip90Enabled}
+                    onClick={toggleNip90}
+                    className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded-md border transition-all duration-150 flex items-center justify-center
+                      ${nip90Enabled
+                        ? 'bg-purple-600/70 border-purple-500/80'
+                        : 'bg-white/5 border-white/15 hover:border-white/30'
+                      }`}
+                  >
+                    {nip90Enabled && (
+                      <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 12 12" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M2 6l3 3 5-5" />
+                      </svg>
+                    )}
+                  </button>
+                  <div>
+                    <p className="text-sm text-white/70 leading-snug">Enable Agent (NIP-90)</p>
+                    <p className="text-xs text-white/25 leading-relaxed mt-0.5">
+                      Enable when your agent is ready to receive requests. Falls back to Claude if no response within 3 s.
+                    </p>
                   </div>
-                  <p className="text-xs text-white/25 leading-relaxed">
-                    Agent must respond within 3 s or Claude is used as fallback.
-                  </p>
                 </div>
               </div>
             </div>
