@@ -944,12 +944,8 @@ export function RadioPage() {
           console.warn('[Podcast] URL resolution failed — falling back to direct URL:', resolveErr);
         }
 
-        if (isIOS) {
-          pod.src = `/podcast-stream?url=${encodeURIComponent(audioSrc)}`;
-          console.log('[Podcast] iOS: streaming via Edge Function proxy');
-        } else {
-          pod.src = audioSrc;
-        }
+        pod.src = `/podcast-stream?url=${encodeURIComponent(audioSrc)}`;
+        console.log('[Podcast] streaming via proxy (CORS safe)');
         pod.volume = 1.0;
 
         const savedPos = loadPodcastPosition(episode.id);
@@ -1007,19 +1003,19 @@ export function RadioPage() {
           const isNotSupported = e instanceof DOMException && e.name === 'NotSupportedError';
           if (isIOS && isNotSupported) {
             console.warn('[Podcast] iOS: NotSupportedError — skipping episode');
-            markPlayedRef.current(episode.id);
-            setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
-            skipEpisode = true;
           } else {
-            console.error('[Loop] podcast play failed — resetting state:', e);
-            runningRef.current = false;
-            resumePodcastEpisodeRef.current = null;
-            nowPlayingRef.current = null; setNowPlaying(null); setPlaying(false);
+            console.error('[Loop] podcast play failed — playing recovery message + continuing:', e);
           }
+          // Always recover gracefully: skip the failed episode and continue the loop
+          markPlayedRef.current(episode.id);
+          setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
+          resumePodcastEpisodeRef.current = null;
+          nowPlayingRef.current = null; setNowPlaying(null);
+          skipEpisode = true;
+          try { await moderatorRef.current.speakTechnicalDifficulty(); } catch { /* best effort */ }
         }
 
-        // Pod failed — skipEpisode: return so outer while continues (runningRef still true).
-        // Non-iOS failure: runningRef set false above → outer while exits.
+        // Pod failed — return so outer while continues (runningRef still true).
         if (!podStarted) return;
 
         // ── Run episode through segmenter ─────────────────────────────────────
