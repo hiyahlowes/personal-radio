@@ -1072,8 +1072,13 @@ export function RadioPage() {
                   if (!runningRef.current) break;
                   const breakTrack = allTracks[Math.floor(Math.random() * allTracks.length)];
                   console.log(`[Loop] music break ${b + 1}/${breakCount}: "${breakTrack.name}"`);
+                  // Reset timeline to music before playing — onMusicTime is gated by
+                  // howlRef, so breaks (which play on audio, not Howler) need their own poll.
+                  console.log('[Loop] music break — resetting timeline to music');
                   nowPlayingRef.current = { kind: 'music', track: breakTrack };
                   setNowPlaying({ kind: 'music', track: breakTrack });
+                  setCT(0);
+                  setDur(breakTrack.duration || 0);
                   if (b === 0) await localMod.current.speakTrackIntro(breakTrack);
                   if (!runningRef.current) break;
                   audio.src    = breakTrack.liveUrl;
@@ -1082,15 +1087,21 @@ export function RadioPage() {
                   loopGenRef.current++;
                   const breakGen = loopGenRef.current;
                   try { await audio.play(); } catch (e) { console.error('[Loop] break music play failed:', e); break; }
-                  // Reset progress bar to music track position (not podcast position).
-                  setCT(howlRef.current ? (howlRef.current.seek() as number) : audio.currentTime);
-                  setDur(breakTrack.duration || 0);
                   cancelRampRef.current?.();
                   cancelRampRef.current = rampVolume(audio, localMuted.current ? 0 : localVolume.current, 1000);
+                  // Poll audio.currentTime directly — onMusicTime bails when howlRef is set,
+                  // and Howler's poll only covers tracks playing through Howler.
+                  const breakPoll = setInterval(() => {
+                    if (isFinite(audio.currentTime)) setCT(audio.currentTime);
+                  }, 250);
                   await new Promise<void>(res => {
                     const onEnded = () => { if (loopGenRef.current !== breakGen) return; cleanup(); res(); };
                     const onPause = () => { if (loopGenRef.current !== breakGen) return; if (!runningRef.current) { cleanup(); res(); } };
-                    function cleanup() { audio.removeEventListener('ended', onEnded); audio.removeEventListener('pause', onPause); }
+                    function cleanup() {
+                      clearInterval(breakPoll);
+                      audio.removeEventListener('ended', onEnded);
+                      audio.removeEventListener('pause', onPause);
+                    }
                     audio.addEventListener('ended', onEnded);
                     audio.addEventListener('pause', onPause);
                   });
