@@ -2336,136 +2336,6 @@ export function RadioPage() {
         {/* Drag-and-drop context wraps both sortable lists */}
         <DragDropContext onDragEnd={handleDragEnd}>
 
-          {/* Coming Up — podcast queue (draggable) */}
-          {(orderedEpisodes.length > 0 || storedFeeds.length > 0) && (
-            <div className="fade-in-up-delay-3 space-y-3">
-              <div className="flex items-center justify-between px-1">
-                <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up · Podcasts</h3>
-                <div className="flex items-center gap-3">
-                  {orderedEpisodes.some(ep => ep.transcriptUrl) && (
-                    <span className="text-xs text-emerald-400/60">✓ Best listening experience</span>
-                  )}
-                  {orderedEpisodes.length > 0 && (
-                    <span className="text-xs text-amber-400/60">drag to reorder</span>
-                  )}
-                  <button
-                    onClick={() => { setStoredFeeds(getStoredFeeds()); refetchEpisodes(); }}
-                    disabled={episodesFetching}
-                    className="flex items-center gap-1 text-xs text-amber-400/70 hover:text-amber-300 transition-colors disabled:opacity-40"
-                    aria-label="Refresh podcast queue"
-                  >
-                    <svg className={`w-3 h-3 ${episodesFetching ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/>
-                    </svg>
-                    {episodesFetching ? 'Loading…' : 'Refresh'}
-                  </button>
-                </div>
-              </div>
-              <Droppable droppableId="podcast-queue">
-                {(provided, snapshot) => (
-                  <div
-                    ref={provided.innerRef}
-                    {...provided.droppableProps}
-                    className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
-                    style={{ maxHeight: 400, overflowY: 'auto' }}
-                  >
-                     {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
-                       <div className="glass-card rounded-2xl px-5 py-6 text-center">
-                         <p className="text-sm text-white/40">
-                           {episodesFetching ? 'Loading episodes…' : 'No episodes loaded yet.'}
-                         </p>
-                         {!episodesFetching && (
-                           <button
-                             onClick={() => refetchEpisodes()}
-                             className="mt-2 text-xs text-amber-400 hover:text-amber-300 transition-colors underline underline-offset-2"
-                           >
-                             Tap to refresh
-                           </button>
-                         )}
-                       </div>
-                     )}
-                     {orderedEpisodes.map((ep, i) => (
-                       <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
-                         {(drag, dragSnapshot) => (
-                           <PortalAware
-                             provided={drag}
-                             snapshot={dragSnapshot}
-                             className={`glass-card rounded-2xl p-4 flex items-start gap-4 transition-all
-                               ${dragSnapshot.isDragging ? 'shadow-2xl shadow-amber-900/30 ring-1 ring-amber-500/30 opacity-95' : ''}
-                             `}
-                           >
-                             {/* Drag handle */}
-                             <div
-                               {...drag.dragHandleProps}
-                               className="flex-shrink-0 flex items-center justify-center w-5 self-center cursor-grab active:cursor-grabbing text-white/20 hover:text-white/50 transition-colors"
-                               aria-label="Drag to reorder"
-                             >
-                               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                                 <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
-                               </svg>
-                             </div>
-                             <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2 mb-0.5">
-                                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
-                                  {ep.duration > 0 && (() => {
-                                    const saved = loadPodcastPosition(ep.id);
-                                    const remaining = saved > 5 ? ep.duration - saved : ep.duration;
-                                    return remaining > 0 ? (
-                                      <>
-                                        <span className="text-xs text-white/25">·</span>
-                                        <span className="text-xs text-white/40">
-                                          {saved > 5 ? `${fmt(remaining)} left` : fmt(ep.duration)}
-                                        </span>
-                                      </>
-                                    ) : null;
-                                  })()}
-                                  {ep.transcriptUrl && (
-                                    <span
-                                      title="Best listening experience — full transcript available"
-                                      className="text-emerald-400/80 text-xs leading-none"
-                                    >✓</span>
-                                  )}
-                                  {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
-                                </div>
-                                <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
-                                <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
-                              </div>
-                              {/* Play episode now */}
-                              <button
-                                onClick={e => { e.stopPropagation(); startPodcastFromQueue(ep); }}
-                                aria-label="Play episode now"
-                                title="Play now"
-                                className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-amber-400/60 hover:text-amber-300 hover:bg-amber-900/30 transition-colors"
-                              >
-                                <svg className="w-3.5 h-3.5 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
-                                  <path d="M8 5v14l11-7z"/>
-                                </svg>
-                              </button>
-                              {/* Remove episode from queue */}
-                              <button
-                                onClick={e => {
-                                  e.stopPropagation();
-                                  setOrderedEpisodes(prev => prev.filter(e => e.id !== ep.id));
-                                }}
-                                aria-label="Remove episode from queue"
-                                className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white/25 hover:text-red-400 hover:bg-red-900/20 transition-colors"
-                              >
-                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                                </svg>
-                              </button>
-                            </PortalAware>
-                         )}
-                       </Draggable>
-                     ))}
-                    {provided.placeholder}
-                  </div>
-                )}
-              </Droppable>
-            </div>
-          )}
-
           {/* Playlist (draggable) */}
           <div className="fade-in-up-delay-3 space-y-3">
             <div className="flex items-center justify-between px-1">
@@ -2617,6 +2487,136 @@ export function RadioPage() {
               )}
             </div>
           </div>
+
+          {/* Coming Up — podcast queue (draggable) */}
+          {(orderedEpisodes.length > 0 || storedFeeds.length > 0) && (
+            <div className="fade-in-up-delay-3 space-y-3">
+              <div className="flex items-center justify-between px-1">
+                <h3 className="text-sm font-semibold text-white/60 uppercase tracking-widest">Coming Up · Podcasts</h3>
+                <div className="flex items-center gap-3">
+                  {orderedEpisodes.some(ep => ep.transcriptUrl) && (
+                    <span className="text-xs text-emerald-400/60">✓ Best listening experience</span>
+                  )}
+                  {orderedEpisodes.length > 0 && (
+                    <span className="text-xs text-amber-400/60">drag to reorder</span>
+                  )}
+                  <button
+                    onClick={() => { setStoredFeeds(getStoredFeeds()); refetchEpisodes(); }}
+                    disabled={episodesFetching}
+                    className="flex items-center gap-1 text-xs text-amber-400/70 hover:text-amber-300 transition-colors disabled:opacity-40"
+                    aria-label="Refresh podcast queue"
+                  >
+                    <svg className={`w-3 h-3 ${episodesFetching ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                      <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/>
+                    </svg>
+                    {episodesFetching ? 'Loading…' : 'Refresh'}
+                  </button>
+                </div>
+              </div>
+              <Droppable droppableId="podcast-queue">
+                {(provided, snapshot) => (
+                  <div
+                    ref={provided.innerRef}
+                    {...provided.droppableProps}
+                    className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
+                    style={{ maxHeight: 400, overflowY: 'auto' }}
+                  >
+                     {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
+                       <div className="glass-card rounded-2xl px-5 py-6 text-center">
+                         <p className="text-sm text-white/40">
+                           {episodesFetching ? 'Loading episodes…' : 'No episodes loaded yet.'}
+                         </p>
+                         {!episodesFetching && (
+                           <button
+                             onClick={() => refetchEpisodes()}
+                             className="mt-2 text-xs text-amber-400 hover:text-amber-300 transition-colors underline underline-offset-2"
+                           >
+                             Tap to refresh
+                           </button>
+                         )}
+                       </div>
+                     )}
+                     {orderedEpisodes.map((ep, i) => (
+                       <Draggable key={ep.id} draggableId={`ep-${ep.id}`} index={i}>
+                         {(drag, dragSnapshot) => (
+                           <PortalAware
+                             provided={drag}
+                             snapshot={dragSnapshot}
+                             className={`glass-card rounded-2xl p-4 flex items-start gap-4 transition-all
+                               ${dragSnapshot.isDragging ? 'shadow-2xl shadow-amber-900/30 ring-1 ring-amber-500/30 opacity-95' : ''}
+                             `}
+                           >
+                             {/* Drag handle */}
+                             <div
+                               {...drag.dragHandleProps}
+                               className="flex-shrink-0 flex items-center justify-center w-5 self-center cursor-grab active:cursor-grabbing text-white/20 hover:text-white/50 transition-colors"
+                               aria-label="Drag to reorder"
+                             >
+                               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                                 <path d="M8 6a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 12a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM8 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM14 6a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 12a2 2 0 1 1 4 0 2 2 0 0 1-4 0zM14 18a2 2 0 1 1 4 0 2 2 0 0 1-4 0z"/>
+                               </svg>
+                             </div>
+                             <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center flex-shrink-0 text-lg">🎙️</div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-0.5">
+                                  <span className="text-xs font-bold uppercase tracking-wider text-amber-400">Podcast</span>
+                                  {ep.duration > 0 && (() => {
+                                    const saved = loadPodcastPosition(ep.id);
+                                    const remaining = saved > 5 ? ep.duration - saved : ep.duration;
+                                    return remaining > 0 ? (
+                                      <>
+                                        <span className="text-xs text-white/25">·</span>
+                                        <span className="text-xs text-white/40">
+                                          {saved > 5 ? `${fmt(remaining)} left` : fmt(ep.duration)}
+                                        </span>
+                                      </>
+                                    ) : null;
+                                  })()}
+                                  {ep.transcriptUrl && (
+                                    <span
+                                      title="Best listening experience — full transcript available"
+                                      className="text-emerald-400/80 text-xs leading-none"
+                                    >✓</span>
+                                  )}
+                                  {i === 0 && <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full px-2 py-0.5">Up next</span>}
+                                </div>
+                                <p className="text-sm font-semibold text-white truncate">{ep.title}</p>
+                                <p className="text-xs text-white/40 mt-0.5">{ep.feedTitle}</p>
+                              </div>
+                              {/* Play episode now */}
+                              <button
+                                onClick={e => { e.stopPropagation(); startPodcastFromQueue(ep); }}
+                                aria-label="Play episode now"
+                                title="Play now"
+                                className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-amber-400/60 hover:text-amber-300 hover:bg-amber-900/30 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M8 5v14l11-7z"/>
+                                </svg>
+                              </button>
+                              {/* Remove episode from queue */}
+                              <button
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  setOrderedEpisodes(prev => prev.filter(e => e.id !== ep.id));
+                                }}
+                                aria-label="Remove episode from queue"
+                                className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white/25 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                  <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                                </svg>
+                              </button>
+                            </PortalAware>
+                         )}
+                       </Draggable>
+                     ))}
+                    {provided.placeholder}
+                  </div>
+                )}
+              </Droppable>
+            </div>
+          )}
 
         </DragDropContext>
 
