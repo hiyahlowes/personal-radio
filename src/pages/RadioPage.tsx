@@ -1013,6 +1013,24 @@ export function RadioPage() {
           console.log(`[Podcast] volume after play: ${pod.volume}`);
           (Howler as any).ctx?.resume();
           console.log('[Loop] podcast play() resolved — podcast playing');
+          // Re-sync timeline state after play() resolves.
+          // The pre-play setCT/setDur calls use episode.duration which may be 0
+          // for streaming content. Now that the browser has started buffering we
+          // can read actual element values, with episode.duration as fallback.
+          {
+            const podEl  = podAudioRef.current;
+            const ct     = podEl ? (podEl.currentTime || 0) : 0;
+            const podDur = podEl ? podEl.duration : NaN;
+            const dur    = (podDur > 0 && isFinite(podDur)) ? podDur : (episode.duration || 0);
+            setCT(ct);
+            setDur(dur);
+            // Ensure React nowPlaying state is set (in case the earlier setNowPlaying
+            // was batched before play() and lost a race with a stale render).
+            nowPlayingRef.current = { kind: 'podcast', episode };
+            setNowPlaying({ kind: 'podcast', episode });
+            setPlaying(true);
+            console.log(`[Podcast] timeline initialized — dur: ${dur.toFixed(0)}s ct: ${ct.toFixed(1)}s`);
+          }
         } catch (e) {
           const isNotSupported = e instanceof DOMException && e.name === 'NotSupportedError';
           if (isIOS && isNotSupported) {
