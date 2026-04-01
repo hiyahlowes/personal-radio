@@ -1906,16 +1906,22 @@ export function RadioPage() {
     if (droppableId === 'playlist') {
       setOrderedTracks(prev => {
         const next = [...prev];
-        // source/destination indices are relative to the visible window.
-        // When music is playing the current track is hidden from the list
-        // (offset +1).  When a podcast is playing or idle, the window
-        // starts at idxRef.current with no skip.
-        const isPlayingMusic = nowPlayingRef.current?.kind === 'music';
-        const offset = isPlayingMusic ? idxRef.current + 1 : idxRef.current;
-        const actualSrc = offset + source.index;
-        const actualDst = offset + destination.index;
-        const [moved] = next.splice(actualSrc, 1);
-        next.splice(actualDst, 0, moved);
+        // source.index / destination.index are 0-based within the RENDERED list.
+        // playlistOffset is the absolute index where that rendered list starts:
+        //   music   → idx+1  (current song is hidden from the list)
+        //   podcast → 0      (no music is "current"; show full list)
+        //   idle    → idx
+        // Applying this offset once gives the absolute indices into the full array.
+        const kind = nowPlayingRef.current?.kind;
+        const playlistOffset = kind === 'music' ? idxRef.current + 1
+                             : kind === 'podcast' ? 0
+                             : idxRef.current;
+        const absoluteSource = source.index + playlistOffset;
+        const absoluteDestination = destination.index + playlistOffset;
+        console.log(`[Playlist] drag: source=${source.index} dest=${destination.index} offset=${playlistOffset}`);
+        console.log(`[Playlist] absolute: ${absoluteSource} → ${absoluteDestination}`);
+        const [moved] = next.splice(absoluteSource, 1);
+        next.splice(absoluteDestination, 0, moved);
 
         // Keep idxRef pointing at the same track after reorder
         const currentTrack = tracksRef.current[idxRef.current];
@@ -2006,8 +2012,9 @@ export function RadioPage() {
   const track = (orderedTracks.length > 0 ? orderedTracks : tracks)[idx];
   // When music is playing the current song is shown in the player — hide it from
   // the "Next Songs" list so it doesn't appear twice.  When a podcast is playing
-  // (or nothing yet) show all songs starting from the current position.
-  const playlistOffset = nowPlaying === 'music' ? idx + 1 : idx;
+  // no music track is "current", so show the full list from position 0.
+  // When idle, show from the current position.
+  const playlistOffset = nowPlaying === 'music' ? idx + 1 : nowPlaying === 'podcast' ? 0 : idx;
   const windowTracks = orderedTracks.slice(playlistOffset, playlistOffset + 10);
   // For streaming podcasts duration may be 0/Infinity even while playing.
   // Fall through to the RSS episode.duration as a best-effort estimate.
