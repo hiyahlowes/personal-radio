@@ -1906,9 +1906,14 @@ export function RadioPage() {
     if (droppableId === 'playlist') {
       setOrderedTracks(prev => {
         const next = [...prev];
-        // source/destination indices are relative to the visible window; offset by current position
-        const actualSrc = idxRef.current + source.index;
-        const actualDst = idxRef.current + destination.index;
+        // source/destination indices are relative to the visible window.
+        // When music is playing the current track is hidden from the list
+        // (offset +1).  When a podcast is playing or idle, the window
+        // starts at idxRef.current with no skip.
+        const isPlayingMusic = nowPlayingRef.current?.kind === 'music';
+        const offset = isPlayingMusic ? idxRef.current + 1 : idxRef.current;
+        const actualSrc = offset + source.index;
+        const actualDst = offset + destination.index;
         const [moved] = next.splice(actualSrc, 1);
         next.splice(actualDst, 0, moved);
 
@@ -1999,8 +2004,11 @@ export function RadioPage() {
   // ── Derived UI ────────────────────────────────────────────────────────────
   // Use orderedTracks so the displayed track matches what the loop is playing
   const track = (orderedTracks.length > 0 ? orderedTracks : tracks)[idx];
-  // Sliding window: current track is always at position 0, show up to 10 ahead
-  const windowTracks = orderedTracks.slice(idx, idx + 10);
+  // When music is playing the current song is shown in the player — hide it from
+  // the "Next Songs" list so it doesn't appear twice.  When a podcast is playing
+  // (or nothing yet) show all songs starting from the current position.
+  const playlistOffset = nowPlaying === 'music' ? idx + 1 : idx;
+  const windowTracks = orderedTracks.slice(playlistOffset, playlistOffset + 10);
   // For streaming podcasts duration may be 0/Infinity even while playing.
   // Fall through to the RSS episode.duration as a best-effort estimate.
   const effectiveDuration =
@@ -2389,13 +2397,17 @@ export function RadioPage() {
                        {windowTracks.map((t, i) => (
                          <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
                            {(drag, dragSnapshot) => {
-                             const isCurrent = i === 0;
+                             // isCurrent is never true here: when music plays the current song
+                             // is hidden from this list (shown in the player instead).
+                             // Keep the variable for the aria-label / wave-bar path just in
+                             // case future logic re-uses it, but it is always false.
+                             const isCurrent = false;
                              return (
                              <PortalAware
                                provided={drag}
                                snapshot={dragSnapshot}
                                className={`flex items-center gap-3 px-4 py-3.5 transition-all
-                                 ${isCurrent ? 'bg-purple-900/20' : 'hover:bg-white/5'}
+                                 hover:bg-white/5
                                  ${dragSnapshot.isDragging ? 'shadow-xl shadow-purple-900/40 bg-[rgba(30,20,60,0.95)] ring-1 ring-purple-500/40 rounded-xl opacity-95' : ''}
                                `}
                              >
@@ -2412,13 +2424,13 @@ export function RadioPage() {
 
                                {/* Track number / playing indicator */}
                                <button
-                                 onClick={() => handleSelect(idx + i)}
+                                 onClick={() => handleSelect(playlistOffset + i)}
                                  className="w-6 flex items-center justify-center flex-shrink-0"
-                                 aria-label={isCurrent ? 'Currently playing' : `Play ${t.name}`}
+                                 aria-label={`Play ${t.name}`}
                                >
                                  {isCurrent
                                    ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                                   : <span className="text-white/30 text-xs hover:text-white/60">{idx + i + 1}</span>
+                                   : <span className="text-white/30 text-xs hover:text-white/60">{playlistOffset + i + 1}</span>
                                  }
                                </button>
 
