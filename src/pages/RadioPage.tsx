@@ -2028,6 +2028,7 @@ export function RadioPage() {
           <div>
             <button onClick={() => navigate('/settings')} className="text-xs tracking-[0.25em] text-purple-400 uppercase font-semibold hover:text-purple-300 transition-colors flex items-center gap-1.5">
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+              <img src="/PR_logo.png" alt="PR" className="w-5 h-5 object-contain" />
               PR Personal Radio
             </button>
             <h2 className="text-2xl font-bold mt-1">Hey, <span className="text-purple-300">{firstName}</span> 👋</h2>
