@@ -360,6 +360,7 @@ export function RadioPage() {
   // skips the src reload and just calls play() from the current position.
   const resumeMusicRef = useRef(false);
   const tracksRef          = useRef<WavlakeTrack[]>([]);
+  const displayedTracksRef = useRef<WavlakeTrack[]>([]); // mirrors the rendered displayedTracks each frame
   const ambientBridgeRef   = useRef<WavlakeTrack[]>([]); // separate bridge pool, never in playlist
   const bridgeHowlRef      = useRef<Howl | null>(null);
   const silentCountRef   = useRef(0);
@@ -1904,14 +1905,11 @@ export function RadioPage() {
     const droppableId = source.droppableId;
 
     if (droppableId === 'playlist') {
-      // Resolve positions using IDs from the displayed snapshot — no offset math needed.
-      // displayedTracks is derived from orderedTracks at render time; we look up
-      // the absolute position in orderedTracks by ID so a mid-drag index advance can't corrupt the move.
-      const displayed = nowPlayingRef.current?.kind === 'music'
-        ? tracksRef.current.slice(idxRef.current + 1, idxRef.current + 11)
-        : nowPlayingRef.current?.kind === 'podcast'
-          ? tracksRef.current.slice(0, 10)
-          : tracksRef.current.slice(idxRef.current, idxRef.current + 10);
+      // Use the ref that mirrors the rendered displayedTracks — this guarantees
+      // source/destination indices map to the same tracks the user sees.
+      // Re-deriving from idxRef.current would be wrong if idxRef advanced (async
+      // track advance) while the drag was in flight, causing an off-by-one.
+      const displayed = displayedTracksRef.current;
 
       const draggedTrack = displayed[source.index];
       const targetTrack  = displayed[destination.index];
@@ -2030,6 +2028,10 @@ export function RadioPage() {
   // displayedTracks is ONLY for rendering — reordering uses ID lookup into orderedTracks.
   const displayedStart = nowPlaying === 'music' ? idx + 1 : nowPlaying === 'podcast' ? 0 : idx;
   const displayedTracks = orderedTracks.slice(displayedStart, displayedStart + 10);
+  // Keep a ref in sync so handleDragEnd (memoised, no closure over idx) always
+  // sees the exact same slice the user is looking at — not a re-derived slice
+  // from idxRef.current, which can be one step ahead of idx state.
+  displayedTracksRef.current = displayedTracks;
   // For streaming podcasts duration may be 0/Infinity even while playing.
   // Fall through to the RSS episode.duration as a best-effort estimate.
   const effectiveDuration =
