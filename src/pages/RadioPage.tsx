@@ -344,7 +344,6 @@ export function RadioPage() {
 
   const nextAudioRef     = radioCtx.nextAudioRef;
 
-  const dragOffsetRef          = useRef<number>(0);
   const cancelRampRef          = useRef<(() => void) | null>(null);
   const cancelNextRampRef      = useRef<(() => void) | null>(null);
   // Non-null when the user paused mid-podcast; advanceLoop resumes from here on next play.
@@ -1897,12 +1896,6 @@ export function RadioPage() {
   }, [advanceLoop]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Drag-and-drop handlers ─────────────────────────────────────────────────
-  const handleDragStart = useCallback(() => {
-    const kind = nowPlayingRef.current?.kind;
-    dragOffsetRef.current = kind === 'music' ? idxRef.current + 1 : 0;
-    console.log(`[Playlist] drag started — offset frozen at: ${dragOffsetRef.current}`);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   const handleDragEnd = useCallback((result: DropResult) => {
     const { source, destination } = result;
     if (!destination) return; // dropped outside a list
@@ -1911,24 +1904,30 @@ export function RadioPage() {
     const droppableId = source.droppableId;
 
     if (droppableId === 'playlist') {
+      // Resolve positions using IDs from the displayed snapshot — no offset math needed.
+      // displayedTracks is derived from orderedTracks at render time; we look up
+      // the absolute position in orderedTracks by ID so a mid-drag index advance can't corrupt the move.
+      const displayed = nowPlayingRef.current?.kind === 'music'
+        ? tracksRef.current.slice(idxRef.current + 1, idxRef.current + 11)
+        : nowPlayingRef.current?.kind === 'podcast'
+          ? tracksRef.current.slice(0, 10)
+          : tracksRef.current.slice(idxRef.current, idxRef.current + 10);
+
+      const draggedTrack = displayed[source.index];
+      const targetTrack  = displayed[destination.index];
+      if (!draggedTrack || !targetTrack) return;
+
       setOrderedTracks(prev => {
         const next = [...prev];
-        // source.index / destination.index are 0-based within the RENDERED list.
-        // playlistOffset is the absolute index where that rendered list starts:
-        //   music   → idx+1  (current song is hidden from the list)
-        //   podcast → 0      (no music is "current"; show full list)
-        //   idle    → idx
-        // Applying this offset once gives the absolute indices into the full array.
-        // Use the offset frozen at drag-start so an index advance mid-drag doesn't corrupt the reorder.
-        const playlistOffset = dragOffsetRef.current;
-        const absoluteSource = source.index + playlistOffset;
-        const absoluteDestination = destination.index + playlistOffset;
-        console.log(`[Playlist] drag: source=${source.index} dest=${destination.index} offset=${playlistOffset}`);
-        console.log(`[Playlist] absolute: ${absoluteSource} → ${absoluteDestination}`);
-        const [moved] = next.splice(absoluteSource, 1);
-        next.splice(absoluteDestination, 0, moved);
+        const sourceAbsolute = next.findIndex(t => t.id === draggedTrack.id);
+        const destAbsolute   = next.findIndex(t => t.id === targetTrack.id);
+        if (sourceAbsolute === -1 || destAbsolute === -1) return prev;
 
-        // Keep idxRef pointing at the same track after reorder
+        console.log(`[Playlist] drag by ID: "${draggedTrack.title}" → position ${destAbsolute}`);
+        const [moved] = next.splice(sourceAbsolute, 1);
+        next.splice(destAbsolute, 0, moved);
+
+        // Keep idxRef pointing at the same currently-playing track after reorder
         const currentTrack = tracksRef.current[idxRef.current];
         if (currentTrack) {
           const newIdx = next.findIndex(t => t.id === currentTrack.id);
@@ -2019,8 +2018,9 @@ export function RadioPage() {
   // the "Next Songs" list so it doesn't appear twice.  When a podcast is playing
   // no music track is "current", so show the full list from position 0.
   // When idle, show from the current position.
-  const playlistOffset = nowPlaying === 'music' ? idx + 1 : nowPlaying === 'podcast' ? 0 : idx;
-  const windowTracks = orderedTracks.slice(playlistOffset, playlistOffset + 10);
+  // displayedTracks is ONLY for rendering — reordering uses ID lookup into orderedTracks.
+  const displayedStart = nowPlaying === 'music' ? idx + 1 : nowPlaying === 'podcast' ? 0 : idx;
+  const displayedTracks = orderedTracks.slice(displayedStart, displayedStart + 10);
   // For streaming podcasts duration may be 0/Infinity even while playing.
   // Fall through to the RSS episode.duration as a best-effort estimate.
   const effectiveDuration =
@@ -2355,7 +2355,7 @@ export function RadioPage() {
         </div>
 
         {/* Drag-and-drop context wraps both sortable lists */}
-        <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+        <DragDropContext onDragEnd={handleDragEnd}>
 
           {/* Playlist (draggable) */}
           <div className="fade-in-up-delay-3 space-y-3">
@@ -2406,7 +2406,7 @@ export function RadioPage() {
                       {...provided.droppableProps}
                       className={`divide-y divide-white/5 transition-colors ${snapshot.isDraggingOver ? 'bg-purple-900/10' : ''}`}
                     >
-                       {windowTracks.map((t, i) => (
+                       {displayedTracks.map((t, i) => (
                          <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
                            {(drag, dragSnapshot) => {
                              // isCurrent is never true here: when music plays the current song
@@ -2436,13 +2436,13 @@ export function RadioPage() {
 
                                {/* Track number / playing indicator */}
                                <button
-                                 onClick={() => handleSelect(playlistOffset + i)}
+                                 onClick={() => handleSelect(displayedStart + i)}
                                  className="w-6 flex items-center justify-center flex-shrink-0"
                                  aria-label={`Play ${t.name}`}
                                >
                                  {isCurrent
                                    ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                                   : <span className="text-white/30 text-xs hover:text-white/60">{playlistOffset + i + 1}</span>
+                                   : <span className="text-white/30 text-xs hover:text-white/60">{displayedStart + i + 1}</span>
                                  }
                                </button>
 
