@@ -344,6 +344,7 @@ export function RadioPage() {
 
   const nextAudioRef     = radioCtx.nextAudioRef;
 
+  const dragOffsetRef          = useRef<number>(0);
   const cancelRampRef          = useRef<(() => void) | null>(null);
   const cancelNextRampRef      = useRef<(() => void) | null>(null);
   // Non-null when the user paused mid-podcast; advanceLoop resumes from here on next play.
@@ -1896,6 +1897,12 @@ export function RadioPage() {
   }, [advanceLoop]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Drag-and-drop handlers ─────────────────────────────────────────────────
+  const handleDragStart = useCallback(() => {
+    const kind = nowPlayingRef.current?.kind;
+    dragOffsetRef.current = kind === 'music' ? idxRef.current + 1 : 0;
+    console.log(`[Playlist] drag started — offset frozen at: ${dragOffsetRef.current}`);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleDragEnd = useCallback((result: DropResult) => {
     const { source, destination } = result;
     if (!destination) return; // dropped outside a list
@@ -1912,10 +1919,8 @@ export function RadioPage() {
         //   podcast → 0      (no music is "current"; show full list)
         //   idle    → idx
         // Applying this offset once gives the absolute indices into the full array.
-        const kind = nowPlayingRef.current?.kind;
-        const playlistOffset = kind === 'music' ? idxRef.current + 1
-                             : kind === 'podcast' ? 0
-                             : idxRef.current;
+        // Use the offset frozen at drag-start so an index advance mid-drag doesn't corrupt the reorder.
+        const playlistOffset = dragOffsetRef.current;
         const absoluteSource = source.index + playlistOffset;
         const absoluteDestination = destination.index + playlistOffset;
         console.log(`[Playlist] drag: source=${source.index} dest=${destination.index} offset=${playlistOffset}`);
@@ -2350,7 +2355,7 @@ export function RadioPage() {
         </div>
 
         {/* Drag-and-drop context wraps both sortable lists */}
-        <DragDropContext onDragEnd={handleDragEnd}>
+        <DragDropContext onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
 
           {/* Playlist (draggable) */}
           <div className="fade-in-up-delay-3 space-y-3">
