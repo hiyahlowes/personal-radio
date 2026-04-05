@@ -1916,13 +1916,13 @@ export function RadioPage() {
       const draggedTrack = displayed[source.index];
       const targetTrack  = displayed[destination.index];
 
-      console.log('[Drag] displayed:', displayed.map(t => t.title));
+      console.log('[Drag] displayed:', displayed.map(t => t.name));
       console.log('[Drag] source:', source.index, '→ dest:', destination.index);
       if (!draggedTrack || !targetTrack) {
         console.log('[Drag] ERROR: draggedTrack or targetTrack is undefined', { draggedTrack, targetTrack });
         return;
       }
-      console.log('[Drag] moving:', draggedTrack.title, '(id:', draggedTrack.id, ') to:', targetTrack.title, '(id:', targetTrack.id, ')');
+      console.log('[Drag] moving:', draggedTrack.name, '(id:', draggedTrack.id, ') to:', targetTrack.name, '(id:', targetTrack.id, ')');
 
       setOrderedTracks(prev => {
         const next = [...prev];
@@ -1931,10 +1931,10 @@ export function RadioPage() {
         if (sourceAbsolute === -1 || destAbsolute === -1) return prev;
 
         console.log('[Drag] absolute:', sourceAbsolute, '→', destAbsolute);
-        console.log('[Drag] full before:', next.map(t => t.title));
+        console.log('[Drag] full before:', next.map(t => t.name));
         const [moved] = next.splice(sourceAbsolute, 1);
         next.splice(destAbsolute, 0, moved);
-        console.log('[Drag] full after:', next.map(t => t.title));
+        console.log('[Drag] full after:', next.map(t => t.name));
 
         // Keep idxRef pointing at the same currently-playing track after reorder
         const currentTrack = tracksRef.current[idxRef.current];
