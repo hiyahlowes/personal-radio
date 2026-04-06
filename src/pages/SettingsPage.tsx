@@ -5,10 +5,12 @@
  * 2. MODERATOR        — language, TTS provider, voice IDs, agent/NIP-90
  * 3. MUSIC            — genres, liked songs, song graveyard
  * 4. PODCASTS         — active feeds (draggable), search, history
- * 5. START OVER       — danger zone, clears all localStorage
+ * 5. VALUE4VALUE      — NWC connection, sat rate, PR split
+ * 6. START OVER       — danger zone, clears all localStorage
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { useV4VContext } from '@/contexts/V4VContext';
 import { useNavigate } from 'react-router-dom';
 import { useSeoMeta } from '@unhead/react';
 import { useNostrKey } from '@/hooks/useNostrKey';
@@ -320,6 +322,26 @@ export function SettingsPage() {
 
   const songInfo = (trackId: string) =>
     [...graveyardMemory.playedSongs].reverse().find(s => s.id === trackId);
+
+  // ── Value4Value ────────────────────────────────────────────────────────────
+  const v4v = useV4VContext();
+  const [v4vOpen, setV4vOpen]           = useState(false);
+  const [nwcInput, setNwcInput]         = useState(v4v.connectionString ?? '');
+  const [v4vSaved, setV4vSaved]         = useState(false);
+
+  const saveV4VSettings = () => {
+    v4v.setSatRatePerMinute(v4v.satRatePerMinute);
+    v4v.setSupportPREnabled(v4v.supportPREnabled);
+    v4v.setPRSplitPercent(v4v.prSplitPercent);
+    setV4vSaved(true);
+    setTimeout(() => setV4vSaved(false), 2000);
+  };
+
+  const handleConnectNWC = async () => {
+    const trimmed = nwcInput.trim();
+    if (!trimmed) return;
+    await v4v.connect(trimmed);
+  };
 
   // ── Start Over ─────────────────────────────────────────────────────────────
   const [confirmStartOver, setConfirmStartOver] = useState(false);
@@ -888,7 +910,131 @@ export function SettingsPage() {
           </div>
         )}
 
-        {/* ── 5. START OVER ────────────────────────────────────────────────── */}
+        {/* ── 5. VALUE4VALUE ───────────────────────────────────────────────── */}
+        <div className="mt-2 border-t border-white/[0.06]">
+          <SectionHeader title="Value4Value ⚡" open={v4vOpen} onToggle={() => setV4vOpen(o => !o)} />
+        </div>
+
+        {v4vOpen && (
+          <div className="pb-4 space-y-6">
+
+            {/* NWC Connection */}
+            <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-3">
+              <div>
+                <p className="text-xs font-semibold text-white/50 uppercase tracking-widest mb-1">NWC Connection</p>
+                <p className="text-xs text-white/30">Connect your Bitcoin Lightning wallet to stream sats to artists</p>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={nwcInput}
+                  onChange={e => setNwcInput(e.target.value)}
+                  placeholder="nostr+walletconnect://..."
+                  className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white/80 placeholder-white/20 focus:outline-none focus:border-purple-500/50 font-mono"
+                />
+                <button
+                  onClick={handleConnectNWC}
+                  disabled={v4v.isConnecting || !nwcInput.trim()}
+                  className="px-4 py-2 rounded-xl text-sm font-semibold bg-purple-600 hover:bg-purple-500 disabled:opacity-40 disabled:cursor-not-allowed transition-all text-white"
+                >
+                  {v4v.isConnecting ? 'Connecting…' : 'Connect'}
+                </button>
+              </div>
+              {v4v.isConnected && (
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-green-400 flex items-center gap-1">
+                    <span>✅</span>
+                    Connected{v4v.walletAlias ? ` — ${v4v.walletAlias}` : ''}
+                  </p>
+                  <button
+                    onClick={v4v.disconnect}
+                    className="text-xs text-white/30 hover:text-red-400 transition-colors"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )}
+              {v4v.connectError && (
+                <p className="text-xs text-red-400">⚠ {v4v.connectError}</p>
+              )}
+            </div>
+
+            {/* Sats per Minute */}
+            <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-white/50 uppercase tracking-widest">Sats per Minute</p>
+                <span className="text-sm font-bold text-yellow-400">{v4v.satRatePerMinute} sats/min</span>
+              </div>
+              <input
+                type="range"
+                min={1} max={100}
+                value={v4v.satRatePerMinute}
+                onChange={e => v4v.setSatRatePerMinute(parseInt(e.target.value, 10))}
+                className="w-full accent-yellow-400"
+              />
+              <div className="flex justify-between text-xs text-white/25">
+                <span>1</span>
+                <span>100</span>
+              </div>
+            </div>
+
+            {/* Support Personal Radio toggle + split */}
+            <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-white/50 uppercase tracking-widest mb-0.5">Support Personal Radio</p>
+                  <p className="text-xs text-white/30">Split a portion of your sats with PR</p>
+                </div>
+                <button
+                  onClick={() => v4v.setSupportPREnabled(!v4v.supportPREnabled)}
+                  className={`relative w-10 h-5 rounded-full transition-colors ${v4v.supportPREnabled ? 'bg-yellow-500' : 'bg-white/15'}`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${v4v.supportPREnabled ? 'translate-x-5' : ''}`} />
+                </button>
+              </div>
+
+              {v4v.supportPREnabled && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs text-white/40">
+                    <span>Artists {100 - v4v.prSplitPercent}%</span>
+                    <span>Personal Radio {v4v.prSplitPercent}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1} max={50}
+                    value={v4v.prSplitPercent}
+                    onChange={e => v4v.setPRSplitPercent(parseInt(e.target.value, 10))}
+                    className="w-full accent-yellow-400"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Save button */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={saveV4VSettings}
+                className="px-5 py-2 rounded-xl text-sm font-semibold bg-white/8 hover:bg-white/12 border border-white/10 text-white/70 hover:text-white transition-all"
+              >
+                Save
+              </button>
+              {v4vSaved && <SavedBadge />}
+            </div>
+
+            {/* Status */}
+            {v4v.isConnected && (
+              <div className="text-xs text-white/25 space-y-0.5">
+                <p>⚡ {v4v.pendingTotal} sats pending in buffer</p>
+                <p>✓ {v4v.totalSentThisSession} sats sent this session</p>
+                {v4v.lastFlushResult && (
+                  <p>Last flush: {v4v.lastFlushResult.payments} payment(s), {v4v.lastFlushResult.sent} sats</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── 6. START OVER ────────────────────────────────────────────────── */}
         <div className="mt-2 border-t border-white/[0.06] pt-6 pb-4">
           <p className="text-xs font-bold tracking-[0.2em] uppercase text-white/40 mb-3 px-1">Start Over</p>
           <div className="rounded-2xl p-4 bg-red-950/20 border border-red-900/30">

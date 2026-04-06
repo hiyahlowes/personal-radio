@@ -670,6 +670,56 @@ async function handleTtsFish(event) {
   }
 }
 
+// ── action=lnurl ──────────────────────────────────────────────────────────────
+// CORS proxy for LNURL-pay / lightning address lookups.
+// Client passes the full URL to fetch via ?url=https://...
+// Used by useV4V.ts to resolve lightning addresses to BOLT11 invoices.
+
+async function handleLnurl(params) {
+  const url = params.url ?? '';
+  if (!url) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Missing "url" query parameter' }),
+    };
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    return {
+      statusCode: 400,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid URL scheme — only http/https allowed' }),
+    };
+  }
+
+  try {
+    const res = await fetch(url, {
+      headers: { 'Accept': 'application/json', 'User-Agent': 'PersonalRadio/1.0 (lnurl)' },
+      signal: AbortSignal.timeout(10_000),
+      redirect: 'follow',
+    });
+    if (!res.ok) {
+      return {
+        statusCode: res.status,
+        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: `LNURL upstream returned HTTP ${res.status}` }),
+      };
+    }
+    const json = await res.text();
+    return {
+      statusCode: 200,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      body: json,
+    };
+  } catch (err) {
+    return {
+      statusCode: 502,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: `LNURL fetch failed: ${String(err)}` }),
+    };
+  }
+}
+
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export const handler = async (event) => {
@@ -683,6 +733,7 @@ export const handler = async (event) => {
   if (action === 'rss')           return handleRss(params);
   if (action === 'json')          return handleJson(params);
   if (action === 'text')          return handleText(params);
+  if (action === 'lnurl')         return handleLnurl(params);
   if (action === 'audioresolver') return handleAudioResolver(params);
   if (action === 'stream')        return handleStream(event, params);
   if (action === 'tts')           return handleTts(event);
