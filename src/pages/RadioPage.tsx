@@ -360,6 +360,8 @@ export function RadioPage() {
   // skips the src reload and just calls play() from the current position.
   const resumeMusicRef = useRef(false);
   const tracksRef          = useRef<WavlakeTrack[]>([]);
+  const displayedTracksRef = useRef<WavlakeTrack[]>([]); // mirrors the rendered displayedTracks each frame
+  const displayedStartRef  = useRef(0);                  // mirrors the rendered displayedStart each frame
   const ambientBridgeRef   = useRef<WavlakeTrack[]>([]); // separate bridge pool, never in playlist
   const bridgeHowlRef      = useRef<Howl | null>(null);
   const silentCountRef   = useRef(0);
@@ -1904,15 +1906,41 @@ export function RadioPage() {
     const droppableId = source.droppableId;
 
     if (droppableId === 'playlist') {
+      // Use the ref that mirrors the rendered displayedTracks — this guarantees
+      // source/destination indices map to the same tracks the user sees.
+      // Re-deriving from idxRef.current would be wrong if idxRef advanced (async
+      // track advance) while the drag was in flight, causing an off-by-one.
+      const displayed = displayedTracksRef.current;
+
+      const draggedTrack = displayed[source.index];
+      const targetTrack  = displayed[destination.index];
+
+      console.log('[Drag] displayed:', displayed.map(t => t.name));
+      console.log('[Drag] source:', source.index, '→ dest:', destination.index);
+      if (!draggedTrack || !targetTrack) {
+        console.log('[Drag] ERROR: draggedTrack or targetTrack is undefined', { draggedTrack, targetTrack });
+        return;
+      }
+      console.log('[Drag] moving:', draggedTrack.name, '(id:', draggedTrack.id, ') to:', targetTrack.name, '(id:', targetTrack.id, ')');
+
       setOrderedTracks(prev => {
         const next = [...prev];
-        // source/destination indices are relative to the visible window; offset by current position
-        const actualSrc = idxRef.current + source.index;
-        const actualDst = idxRef.current + destination.index;
-        const [moved] = next.splice(actualSrc, 1);
-        next.splice(actualDst, 0, moved);
+        // sourceAbsolute: find the dragged track by ID — correct regardless of offset.
+        // destAbsolute: use displayedStart + visual index, NOT findIndex by ID.
+        //   findIndex of targetTrack would return wrong results when the target happens
+        //   to also appear at position 0 in the full array (e.g. dropping to visual
+        //   position 0 when the displayed list doesn't start at absolute 0).
+        const sourceAbsolute = next.findIndex(t => t.id === draggedTrack.id);
+        const destAbsolute   = displayedStartRef.current + destination.index;
+        if (sourceAbsolute === -1) return prev;
 
-        // Keep idxRef pointing at the same track after reorder
+        console.log('[Drag] absolute:', sourceAbsolute, '→', destAbsolute);
+        console.log('[Drag] full before:', next.map(t => t.name));
+        const [moved] = next.splice(sourceAbsolute, 1);
+        next.splice(destAbsolute, 0, moved);
+        console.log('[Drag] full after:', next.map(t => t.name));
+
+        // Keep idxRef pointing at the same currently-playing track after reorder
         const currentTrack = tracksRef.current[idxRef.current];
         if (currentTrack) {
           const newIdx = next.findIndex(t => t.id === currentTrack.id);
@@ -1999,8 +2027,18 @@ export function RadioPage() {
   // ── Derived UI ────────────────────────────────────────────────────────────
   // Use orderedTracks so the displayed track matches what the loop is playing
   const track = (orderedTracks.length > 0 ? orderedTracks : tracks)[idx];
-  // Sliding window: current track is always at position 0, show up to 10 ahead
-  const windowTracks = orderedTracks.slice(idx, idx + 10);
+  // When music is playing the current song is shown in the player — hide it from
+  // the "Next Songs" list so it doesn't appear twice.  When a podcast is playing
+  // no music track is "current", so show the full list from position 0.
+  // When idle, show from the current position.
+  // displayedTracks is ONLY for rendering — reordering uses ID lookup into orderedTracks.
+  const displayedStart = nowPlaying === 'music' ? idx + 1 : nowPlaying === 'podcast' ? 0 : idx;
+  const displayedTracks = orderedTracks.slice(displayedStart, displayedStart + 10);
+  // Keep refs in sync so handleDragEnd (memoised, no closure over idx) always
+  // sees the exact same slice and offset the user is looking at — not a
+  // re-derived value from idxRef.current, which can be one step ahead of idx.
+  displayedTracksRef.current = displayedTracks;
+  displayedStartRef.current  = displayedStart;
   // For streaming podcasts duration may be 0/Infinity even while playing.
   // Fall through to the RSS episode.duration as a best-effort estimate.
   const effectiveDuration =
@@ -2028,6 +2066,7 @@ export function RadioPage() {
           <div>
             <button onClick={() => navigate('/settings')} className="text-xs tracking-[0.25em] text-purple-400 uppercase font-semibold hover:text-purple-300 transition-colors flex items-center gap-1.5">
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+              <img src="/PR_logo.png" alt="PR" className="w-5 h-5 object-contain" />
               PR Personal Radio
             </button>
             <h2 className="text-2xl font-bold mt-1">Hey, <span className="text-purple-300">{firstName}</span> 👋</h2>
@@ -2385,16 +2424,20 @@ export function RadioPage() {
                       {...provided.droppableProps}
                       className={`divide-y divide-white/5 transition-colors ${snapshot.isDraggingOver ? 'bg-purple-900/10' : ''}`}
                     >
-                       {windowTracks.map((t, i) => (
+                       {displayedTracks.map((t, i) => (
                          <Draggable key={t.id} draggableId={`track-${t.id}`} index={i}>
                            {(drag, dragSnapshot) => {
-                             const isCurrent = i === 0;
+                             // isCurrent is never true here: when music plays the current song
+                             // is hidden from this list (shown in the player instead).
+                             // Keep the variable for the aria-label / wave-bar path just in
+                             // case future logic re-uses it, but it is always false.
+                             const isCurrent = false;
                              return (
                              <PortalAware
                                provided={drag}
                                snapshot={dragSnapshot}
                                className={`flex items-center gap-3 px-4 py-3.5 transition-all
-                                 ${isCurrent ? 'bg-purple-900/20' : 'hover:bg-white/5'}
+                                 hover:bg-white/5
                                  ${dragSnapshot.isDragging ? 'shadow-xl shadow-purple-900/40 bg-[rgba(30,20,60,0.95)] ring-1 ring-purple-500/40 rounded-xl opacity-95' : ''}
                                `}
                              >
@@ -2411,13 +2454,13 @@ export function RadioPage() {
 
                                {/* Track number / playing indicator */}
                                <button
-                                 onClick={() => handleSelect(idx + i)}
+                                 onClick={() => handleSelect(displayedStart + i)}
                                  className="w-6 flex items-center justify-center flex-shrink-0"
-                                 aria-label={isCurrent ? 'Currently playing' : `Play ${t.name}`}
+                                 aria-label={`Play ${t.name}`}
                                >
                                  {isCurrent
                                    ? <div className="flex items-end gap-0.5 h-5">{[1,2,3].map(b => <div key={b} className={`w-1 rounded-full bg-purple-400 wave-bar ${(!playing || isModerating) ? 'paused' : ''}`} style={{ height: '4px' }} />)}</div>
-                                   : <span className="text-white/30 text-xs hover:text-white/60">{idx + i + 1}</span>
+                                   : <span className="text-white/30 text-xs hover:text-white/60">{displayedStart + i + 1}</span>
                                  }
                                </button>
 

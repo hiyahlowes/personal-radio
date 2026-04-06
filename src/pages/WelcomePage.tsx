@@ -42,16 +42,7 @@ export function WelcomePage() {
         {/* Logo / Icon */}
         <div className="fade-in-up flex items-center justify-center mb-8">
           <div className="relative float-animation">
-            <div className="w-24 h-24 rounded-full bg-gradient-to-br from-violet-600 to-purple-800 flex items-center justify-center glow-purple">
-              <svg className="w-12 h-12 text-white" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="12" cy="12" r="3" fill="currentColor" />
-                <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2z" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2 2" />
-                <path d="M6.343 6.343A8 8 0 0 0 4 12a8 8 0 0 0 8 8 8 8 0 0 0 8-8 8 8 0 0 0-2.343-5.657" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                <path d="M8.464 8.464A5 5 0 0 0 7 12a5 5 0 0 0 5 5 5 5 0 0 0 5-5 5 5 0 0 0-1.464-3.536" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              </svg>
-            </div>
-            {/* Pulse ring */}
-            <div className="absolute inset-0 rounded-full border-2 border-purple-500/40 animate-ping" />
+            <img src="/PR_logo.png" alt="PR Personal Radio" className="w-24 h-24 object-contain" />
           </div>
         </div>
 
