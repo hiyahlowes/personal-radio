@@ -19,7 +19,7 @@ const NWC_PR_SPLIT_KEY    = 'nwc_pr_split';
 const NWC_SENDER_ID_KEY   = 'nwc_sender_id';
 const NWC_PENDING_KEY     = 'nwc_pending_buffer';
 
-const PR_LIGHTNING_ADDRESS = 'personalradio@getalby.com'; // TODO: replace with real address
+const PR_LIGHTNING_ADDRESS = 'accoladecool329256@getalby.com';
 const MIN_FLUSH_SATS       = 10;    // don't send payments below this threshold
 const MAX_BUFFER_AGE_MS    = 30 * 60 * 1000; // flush stale entries after 30 min
 const FLUSH_INTERVAL_MS    = 15 * 60 * 1000; // 15-minute periodic flush
