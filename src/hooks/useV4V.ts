@@ -197,12 +197,14 @@ export function useV4V() {
 
   // ── Flush logic ────────────────────────────────────────────────────────────
 
-  const flushPendingPayments = useCallback(async (): Promise<FlushResult> => {
+  const flushPendingPayments = useCallback(async (reason?: string): Promise<FlushResult> => {
     const client = nwcClientRef.current;
     const buf    = bufferRef.current;
     const result: FlushResult = { sent: 0, payments: 0, errors: [], timestamp: Date.now() };
 
     if (!client || buf.size === 0) return result;
+
+    if (reason) console.log(`[V4V] flush triggered — reason: "${reason}"`);
 
     const now          = Date.now();
     const senderId     = senderIdRef.current;
@@ -214,7 +216,12 @@ export function useV4V() {
     for (const [address, entry] of buf.entries()) {
       const overThreshold = entry.accumulatedSats >= MIN_FLUSH_SATS;
       const isStale       = (now - entry.firstAccumulatedAt) >= MAX_BUFFER_AGE_MS;
-      if (!overThreshold && !isStale) continue;
+      if (!overThreshold && !isStale) {
+        if (entry.accumulatedSats > 0) {
+          console.log(`[V4V] skipping "${entry.recipientName}" — only ${entry.accumulatedSats} sats (below 10 sat threshold)`);
+        }
+        continue;
+      }
       if (entry.accumulatedSats <= 0) continue;
 
       if (entry.recipientType === 'node') {
@@ -223,6 +230,8 @@ export function useV4V() {
         invoiceBatch.push({ address, entry });
       }
     }
+
+    console.log(`[V4V] flush — ${keysendBatch.length + invoiceBatch.length} recipients, total: ${[...keysendBatch, ...invoiceBatch].reduce((s, { entry }) => s + entry.accumulatedSats, 0)} sats`);
 
     // TLV stream metadata (bLIP-10, type 7629169)
     const streamMeta = currentMeta ? {
@@ -256,19 +265,28 @@ export function useV4V() {
             amount:     entry.accumulatedSats,
             tlv_records: tlvHex ? [{ type: 7629169, value: tlvHex }] : [],
           }));
+          for (const { entry } of keysendBatch) {
+            console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via keysend`);
+          }
           await (client as unknown as { multiKeysend: (p: unknown) => Promise<void> })
             .multiKeysend({ keysends });
           for (const { address, entry } of keysendBatch) {
+            console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
             buf.get(address)!.accumulatedSats = 0;
           }
         } catch (e) {
-          result.errors.push(`multi_pay_keysend failed: ${e instanceof Error ? e.message : String(e)}`);
+          const msg = e instanceof Error ? e.message : String(e);
+          for (const { entry } of keysendBatch) {
+            console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
+          }
+          result.errors.push(`multi_pay_keysend failed: ${msg}`);
         }
       } else {
         // Individual keysend per recipient
         for (const { address, entry } of keysendBatch) {
+          console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via keysend`);
           try {
             await client.keysend({
               destination: address,
@@ -278,11 +296,14 @@ export function useV4V() {
                 ...(entry.customRecords ?? {}),
               },
             });
+            console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
             buf.get(address)!.accumulatedSats = 0;
           } catch (e) {
-            result.errors.push(`keysend to ${entry.recipientName} failed: ${e instanceof Error ? e.message : String(e)}`);
+            const msg = e instanceof Error ? e.message : String(e);
+            console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
+            result.errors.push(`keysend to ${entry.recipientName} failed: ${msg}`);
           }
         }
       }
@@ -290,14 +311,18 @@ export function useV4V() {
 
     // ── Invoice payments (lnaddress via LNURL) ───────────────────────────────
     for (const { address, entry } of invoiceBatch) {
+      console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via lnaddress`);
       try {
         const invoice = await fetchInvoiceForLnAddress(address, entry.accumulatedSats);
         await client.sendPayment(invoice);
+        console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
         result.sent     += entry.accumulatedSats;
         result.payments += 1;
         buf.get(address)!.accumulatedSats = 0;
       } catch (e) {
-        result.errors.push(`lnaddress payment to ${entry.recipientName} failed: ${e instanceof Error ? e.message : String(e)}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
+        result.errors.push(`lnaddress payment to ${entry.recipientName} failed: ${msg}`);
       }
     }
 
@@ -305,8 +330,11 @@ export function useV4V() {
     saveBuffer(buf);
 
     if (result.sent > 0) {
-      setTotalSent(prev => prev + result.sent);
-      console.log(`[V4V] flushed ${result.sent} sats across ${result.payments} payments`);
+      setTotalSent(prev => {
+        const newTotal = prev + result.sent;
+        console.log(`[V4V] session total: ${newTotal} sats sent`);
+        return newTotal;
+      });
     }
     if (result.errors.length > 0) {
       console.warn('[V4V] flush errors:', result.errors);
@@ -331,14 +359,16 @@ export function useV4V() {
       await client.enable();
 
       // Fetch wallet info / capabilities
+      let detectedMethods: string[] = [];
       try {
         const info = await client.getInfo();
         setWalletAlias(info.node?.alias ?? null);
-        const methods = (info as unknown as { methods?: string[] }).methods ?? [];
-        setCapabilities(methods);
+        detectedMethods = (info as unknown as { methods?: string[] }).methods ?? [];
+        setCapabilities(detectedMethods);
       } catch {
         // Non-fatal — not all wallets support get_info
-        setCapabilities(['pay_invoice', 'pay_keysend']);
+        detectedMethods = ['pay_invoice', 'pay_keysend'];
+        setCapabilities(detectedMethods);
       }
 
       nwcClientRef.current = client;
@@ -346,7 +376,7 @@ export function useV4V() {
       localStorage.setItem(NWC_CONN_KEY, connString);
       setIsConnected(true);
       setIsConnecting(false);
-      console.log('[V4V] NWC connected');
+      console.log(`[V4V] connected — wallet capabilities: ${detectedMethods.join(', ')}`);
       return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -366,7 +396,7 @@ export function useV4V() {
     setCapabilities([]);
     localStorage.removeItem(NWC_CONN_KEY);
     stopStreaming();
-    console.log('[V4V] NWC disconnected');
+    console.log('[V4V] disconnected');
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -409,19 +439,30 @@ export function useV4V() {
 
     setIsStreaming(true);
 
+    console.log(`[V4V] streaming started — item: "${meta.itemTitle}" recipients: ${recipients.length} rate: ${satRateRef.current} sats/min`);
+
     // Every second: increment counter; every 60 s: accumulate sats into buffer
     streamIntervalRef.current = setInterval(() => {
       secondsAccRef.current += 1;
       if (secondsAccRef.current % 60 === 0) {
-        accumulateToBuffer(bufferRef.current, currentRecipientsRef.current, satRateRef.current);
+        const satsThisMinute = satRateRef.current;
+        const recs = currentRecipientsRef.current;
+        const totalShares = recs.reduce((s, r) => s + r.split, 0);
+        accumulateToBuffer(bufferRef.current, recs, satsThisMinute);
         saveBuffer(bufferRef.current);
-        const total = [...bufferRef.current.values()].reduce((s, e) => s + e.accumulatedSats, 0);
-        setPendingTotal(total);
-        console.log(`[V4V] accumulated ${satRateRef.current} sats → buffer total: ${total}`);
+        const bufTotal = [...bufferRef.current.values()].reduce((s, e) => s + e.accumulatedSats, 0);
+        setPendingTotal(bufTotal);
+        if (totalShares > 0) {
+          for (const r of recs) {
+            const sats = Math.round(satsThisMinute * (r.split / totalShares));
+            if (sats > 0) {
+              const entry = bufferRef.current.get(r.address);
+              console.log(`[V4V] tick — accumulated ${sats} sats for "${r.name}" (total: ${entry?.accumulatedSats ?? sats})`);
+            }
+          }
+        }
       }
     }, 1000);
-
-    console.log(`[V4V] streaming started for "${meta.itemTitle}" (${recipients.length} recipients)`);
   }, []);
 
   /** Call on track change — does NOT flush, just swaps recipients */
@@ -440,7 +481,7 @@ export function useV4V() {
   const onPause = useCallback(() => {
     stopStreaming();
     pauseTimerRef.current = setTimeout(() => {
-      flushPendingPayments();
+      flushPendingPayments('pause');
     }, PAUSE_FLUSH_MS);
   }, [flushPendingPayments, stopStreaming]);
 
@@ -453,14 +494,14 @@ export function useV4V() {
   // ── 15-minute periodic flush ───────────────────────────────────────────────
   useEffect(() => {
     if (!isConnected) return;
-    flushIntervalRef.current = setInterval(() => { flushPendingPayments(); }, FLUSH_INTERVAL_MS);
+    flushIntervalRef.current = setInterval(() => { flushPendingPayments('interval'); }, FLUSH_INTERVAL_MS);
     return () => { if (flushIntervalRef.current) clearInterval(flushIntervalRef.current); };
   }, [isConnected, flushPendingPayments]);
 
   // ── Tab close / visibility change ─────────────────────────────────────────
   useEffect(() => {
-    const onBeforeUnload = () => { flushPendingPayments(); };
-    const onVisibility   = () => { if (document.visibilityState === 'hidden') flushPendingPayments(); };
+    const onBeforeUnload = () => { flushPendingPayments('close'); };
+    const onVisibility   = () => { if (document.visibilityState === 'hidden') flushPendingPayments('close'); };
     window.addEventListener('beforeunload', onBeforeUnload);
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
