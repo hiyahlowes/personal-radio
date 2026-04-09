@@ -1701,6 +1701,12 @@ export function RadioPage() {
   const handlePlay = useCallback(() => {
     console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
 
+    // Guard: if the loop is already running and there is no paused podcast waiting
+    // to resume, this call is a duplicate (e.g. rapid multi-tap or a spurious pod
+    // 'pause' event that set playing=false while the loop kept going). Bail out
+    // immediately — even before the iOS unlock — to prevent duplicate advanceLoop calls.
+    if (runningRef.current && !resumePodcastEpisodeRef.current) return;
+
     // ── Pre-unlock the podcast element on EVERY play press (before any awaits) ──
     // pod.play() is called 10+ seconds after the gesture (bridge fade + TTS +
     // jingle). iOS revokes the gesture token after ~1 second of async work.
@@ -1722,9 +1728,10 @@ export function RadioPage() {
       console.log('[iOS] podcast pre-unlock with silent blob');
     }
 
-    // If the loop is already running (e.g. we navigated away and came back),
-    // there's nothing to do — audio is already playing in the background.
-    if (runningRef.current) return;
+    // Secondary guard after the iOS unlock: if running with no resume pending,
+    // nothing left to do. If a podcast resume IS pending, fall through even when
+    // runningRef is true (the loop may have exited but the ref wasn't reset yet).
+    if (runningRef.current && !resumePodcastEpisodeRef.current) return;
     if (!greetedRef.current) {
       startRadio();
     } else {
@@ -1760,14 +1767,13 @@ export function RadioPage() {
     runningRef.current = false;
     moderatorRef.current.stop();
 
-    // Set the resume ref synchronously here rather than relying on the async
-    // loop to set it (race: the loop sets it only after awaited promises resolve,
-    // but handlePlay can be called before that completes).
-    // Guard: only set if not already populated, so the loop's own assignment
-    // (which may run later) is a harmless no-op.
-    if (nowPlayingRef.current?.kind === 'podcast' && !resumePodcastEpisodeRef.current) {
+    // Capture the paused podcast synchronously so handlePlay can resume it
+    // immediately, without racing the async loop (which sets this only after
+    // awaited promises resolve). Always overwrite — a stale ref from a previous
+    // incomplete resume must never block capturing the correct current episode.
+    if (nowPlayingRef.current?.kind === 'podcast') {
       resumePodcastEpisodeRef.current = nowPlayingRef.current.episode;
-      console.log('[PlayPause] handlePause — set resumePodcastEpisodeRef:', nowPlayingRef.current.episode.title);
+      console.log('[PlayPause] handlePause — set resumePodcastEpisodeRef:', nowPlayingRef.current.episode.title, 'ct:', podAudioRef.current?.currentTime.toFixed(1) ?? '?');
     }
 
     if (howlRef.current) {
