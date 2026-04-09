@@ -27,6 +27,28 @@ const PAUSE_FLUSH_MS       = 5  * 60 * 1000; // flush after 5-min pause
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/**
+ * Retry a payment call up to `maxAttempts` times with linear backoff.
+ * Used for both keysend and lnaddress payments where relay lag can cause
+ * false "reply timeout" errors even when the payment actually succeeded.
+ */
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts: number, label: string): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (attempt < maxAttempts) {
+        const delay = 3000 * attempt;
+        console.log(`[V4V] attempt ${attempt}/${maxAttempts} failed for "${label}" — retrying in ${delay / 1000}s`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw e;
+      }
+    }
+  }
+  throw new Error('unreachable');
+}
+
 function getOrCreateSenderId(): string {
   let id = localStorage.getItem(NWC_SENDER_ID_KEY);
   if (!id) {
@@ -288,14 +310,14 @@ export function useV4V() {
         for (const { address, entry } of keysendBatch) {
           console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via keysend`);
           try {
-            await client.keysend({
+            await withRetry(() => client.keysend({
               destination: address,
               amount:      entry.accumulatedSats,
               customRecords: {
                 ...(tlvHex ? { '7629169': tlvHex } : {}),
                 ...(entry.customRecords ?? {}),
               },
-            });
+            }), 2, entry.recipientName);
             console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
@@ -313,8 +335,11 @@ export function useV4V() {
     for (const { address, entry } of invoiceBatch) {
       console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via lnaddress`);
       try {
-        const invoice = await fetchInvoiceForLnAddress(address, entry.accumulatedSats);
-        await client.sendPayment(invoice);
+        // Fetch a fresh invoice on each attempt (invoices expire, can't reuse).
+        await withRetry(async () => {
+          const invoice = await fetchInvoiceForLnAddress(address, entry.accumulatedSats);
+          await client.sendPayment(invoice);
+        }, 2, entry.recipientName);
         console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
         result.sent     += entry.accumulatedSats;
         result.payments += 1;
@@ -355,7 +380,9 @@ export function useV4V() {
     setConnectError(null);
     try {
       const { webln } = await import('@getalby/sdk');
-      const client = new webln.NWC({ nostrWalletConnectUrl: connString });
+      // Default replyTimeout is 10 s — far too short for Lightning routing plus
+      // LNURL resolution (which itself takes up to 20 s). Use 120 s.
+      const client = new webln.NWC({ nostrWalletConnectUrl: connString, replyTimeout: 120_000 });
       await client.enable();
 
       // Fetch wallet info / capabilities

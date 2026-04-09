@@ -360,6 +360,8 @@ export function RadioPage() {
   const resumePodcastEpisodeRef = useRef<PodcastEpisode | null>(null);
   // Timestamp of last podcast position save (throttle to every 5 s).
   const lastPodSaveRef          = useRef(0);
+  const podReconnectTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const podIsReconnectingRef    = useRef(false);
   // Set true after a crossfade completes so the loop top skips re-loading audio
   const crossfadeActiveRef  = useRef(false);
   const crossfadeTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -627,11 +629,78 @@ export function RadioPage() {
     };
     const onPodDur   = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
     const onPodMeta  = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
-    const onPodPlay  = () => { console.log('[Podcast] play'); setPlaying(true);  setBuf(false); };
-    const onPodPause = () => { console.log('[Podcast] pause'); setPlaying(false); };
-    const onPodWait  = () => setBuf(true);
-    const onPodCan   = () => setBuf(false);
-    const onPodErr   = () => { if (pod.src) console.error('[Podcast] audio error', pod.error?.message); };
+    // ── Podcast reconnect helper ──────────────────────────────────────────────
+    // The Netlify Edge Function drops TCP connections every ~7.5 min.
+    // On error or prolonged stall, re-assign the same src to open a fresh stream.
+    const reconnectPodcast = (resumeTime: number) => {
+      if (podIsReconnectingRef.current) return;      // already reconnecting
+      if (!runningRef.current) return;               // user paused — don't reconnect
+      const src = pod.getAttribute('src');
+      if (!src) return;                              // no podcast loaded
+      podIsReconnectingRef.current = true;
+      console.log(`[Podcast] reconnecting from ${resumeTime.toFixed(1)}s`);
+      pod.src = '';
+      pod.src = src;
+      pod.addEventListener('loadedmetadata', () => {
+        if (isFinite(pod.duration) && resumeTime < pod.duration - 2) {
+          pod.currentTime = resumeTime;
+        }
+        pod.play().catch(e => console.warn('[Podcast] reconnect play failed:', e));
+      }, { once: true });
+    };
+
+    const onPodPlay  = () => {
+      console.log('[Podcast] play');
+      setPlaying(true); setBuf(false);
+      // Clear any pending reconnect — audio is actually playing now
+      if (podReconnectTimerRef.current) { clearTimeout(podReconnectTimerRef.current); podReconnectTimerRef.current = null; }
+      podIsReconnectingRef.current = false;
+      // Restart V4V for ANY play (user button OR reconnect after network drop).
+      // handlePlay() also calls onPlay() for user-initiated presses; calling twice
+      // is harmless — it just clears the pause timer and restarts the tick interval.
+      if (v4vCurrentRef.current && nowPlayingRef.current?.kind === 'podcast') {
+        const ep = nowPlayingRef.current.episode;
+        v4vRef.current.onPlay(ep.valueTag, v4vCurrentRef.current.meta);
+      }
+    };
+    const onPodPause = () => {
+      console.log('[Podcast] pause');
+      setPlaying(false);
+      // Stop V4V for ANY pause (user button, network drop, segmenter music break).
+      // handlePause() also calls onPause() for user presses; calling twice resets
+      // the 5-min flush timer, which is acceptable.
+      if (nowPlayingRef.current?.kind === 'podcast') {
+        v4vRef.current.onPause();
+      }
+    };
+    const onPodWait  = () => {
+      setBuf(true);
+      // If waiting more than 5 s and the radio is still supposed to be running, reconnect.
+      if (podReconnectTimerRef.current) clearTimeout(podReconnectTimerRef.current);
+      podReconnectTimerRef.current = setTimeout(() => {
+        if (!runningRef.current || pod.paused) return;
+        console.log('[Podcast] waiting >5s — reconnecting');
+        reconnectPodcast(pod.currentTime);
+      }, 5000);
+    };
+    const onPodCan   = () => {
+      setBuf(false);
+      if (podReconnectTimerRef.current) { clearTimeout(podReconnectTimerRef.current); podReconnectTimerRef.current = null; }
+    };
+    const onPodStalled = () => {
+      if (podReconnectTimerRef.current) clearTimeout(podReconnectTimerRef.current);
+      podReconnectTimerRef.current = setTimeout(() => {
+        if (!runningRef.current || pod.paused) return;
+        console.log('[Podcast] stalled for 3s — reconnecting');
+        reconnectPodcast(pod.currentTime);
+      }, 3000);
+    };
+    const onPodErr   = () => {
+      if (!pod.src) return;
+      console.error('[Podcast] audio error:', pod.error?.message);
+      if (!runningRef.current) return;
+      reconnectPodcast(pod.currentTime);
+    };
 
     pod.addEventListener('timeupdate',     onPodTime);
     pod.addEventListener('durationchange', onPodDur);
@@ -640,6 +709,7 @@ export function RadioPage() {
     pod.addEventListener('pause',          onPodPause);
     pod.addEventListener('waiting',        onPodWait);
     pod.addEventListener('canplay',        onPodCan);
+    pod.addEventListener('stalled',        onPodStalled);
     pod.addEventListener('error',          onPodErr);
 
     // Sync UI state immediately on mount — handles returning from Settings
@@ -672,7 +742,9 @@ export function RadioPage() {
       pod.removeEventListener('pause',          onPodPause);
       pod.removeEventListener('waiting',        onPodWait);
       pod.removeEventListener('canplay',        onPodCan);
+      pod.removeEventListener('stalled',        onPodStalled);
       pod.removeEventListener('error',          onPodErr);
+      if (podReconnectTimerRef.current) { clearTimeout(podReconnectTimerRef.current); podReconnectTimerRef.current = null; }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
