@@ -452,11 +452,23 @@ async function buildContext(
 
 // ── Claude commentary ─────────────────────────────────────────────────────────
 
-const COMMENTARY_SYSTEM =
-  'You are a witty, opinionated radio host. Comment briefly (2–3 sentences max) on what was ' +
-  'just said in this podcast segment. Be engaging, add your own take, maybe a light joke. ' +
-  'Then casually tease that some music is coming up next. ' +
-  'No stage directions, no asterisks, no emojis. Just speak naturally as you would on air.';
+function buildCommentarySystem(): string {
+  const lang = getSegmenterLangCode();
+  const langName = lang === 'de' ? 'German' : lang === 'fr' ? 'French' : 'English';
+  const langRule = langName !== 'English'
+    ? `CRITICAL: You MUST respond ONLY in ${langName}. ` +
+      `Every single word of your response must be in ${langName}. ` +
+      `Never switch to English or any other language, even if the podcast transcript is in English. ` +
+      `The listener's radio is set to ${langName} — always speak ${langName} regardless of transcript language. `
+    : '';
+  return (
+    langRule +
+    'You are a witty, opinionated radio host. Comment briefly (2–3 sentences max) on what was ' +
+    'just said in this podcast segment. Be engaging, add your own take, maybe a light joke. ' +
+    'Then casually tease that some music is coming up next. ' +
+    'No stage directions, no asterisks, no emojis. Just speak naturally as you would on air.'
+  );
+}
 
 /**
  * Generate commentary using the best available context.
@@ -487,7 +499,7 @@ async function generateCommentary(
       body: JSON.stringify({
         model: CLAUDE_MODEL,
         max_tokens: 150,
-        system: COMMENTARY_SYSTEM,
+        system: buildCommentarySystem(),
         messages: [{ role: 'user', content: userContent }],
       }),
       signal: AbortSignal.timeout(20_000),
