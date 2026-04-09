@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import type { ValueTag, ValueRecipient } from '@/types/value4value';
 
 // ── RSS fetch via Netlify Function proxy ──────────────────────────────────────
 // All RSS fetching goes through /.netlify/functions/podcast-proxy?action=rss&url=...
@@ -49,6 +50,7 @@ export interface PodcastEpisode {
   pubDate: string;
   chapters?: PodcastChapter[];     // Podcast 2.0 chapter markers, if available
   transcriptUrl?: string;          // Podcast 2.0 transcript URL, if available
+  valueTag?: ValueTag;             // Podcast 2.0 <podcast:value> recipients, if present
 }
 
 export interface PodcastFeed {
@@ -218,6 +220,64 @@ function getPodcastTranscriptUrl(item: Element): string | null {
   return all[0].getAttribute('url');
 }
 
+/**
+ * Parse `<podcast:value>` from a feed item or channel element.
+ * Checks item-level first, falls back to channel-level (feed default).
+ * Returns null if no value tag or no valid recipients are found.
+ */
+function getPodcastValueTag(item: Element, channel: Element | null): ValueTag | null {
+  // Helper: find first <podcast:value> in an element
+  const findValueEl = (el: Element): Element | null => {
+    const byNS = el.getElementsByTagNameNS(PODCAST_NS, 'value');
+    if (byNS.length > 0) return byNS[0];
+    const byPrefixed = el.getElementsByTagName('podcast:value');
+    if (byPrefixed.length > 0) return byPrefixed[0];
+    return null;
+  };
+
+  const valueEl = findValueEl(item) ?? (channel ? findValueEl(channel) : null);
+  if (!valueEl) return null;
+
+  const type    = valueEl.getAttribute('type')   ?? 'lightning';
+  const method  = valueEl.getAttribute('method') ?? 'keysend';
+  const suggestedRaw = valueEl.getAttribute('suggested');
+  const suggested = suggestedRaw ? parseFloat(suggestedRaw) * 1e8 : undefined; // BTC → sats
+
+  // Parse <podcast:valueRecipient> children
+  const recipientEls = [
+    ...Array.from(valueEl.getElementsByTagNameNS(PODCAST_NS, 'valueRecipient')),
+    ...Array.from(valueEl.getElementsByTagName('podcast:valueRecipient')),
+  ];
+
+  const recipients: ValueRecipient[] = recipientEls
+    .map(el => {
+      const recipType = el.getAttribute('type') ?? '';
+      const address   = el.getAttribute('address') ?? el.getAttribute('node') ?? '';
+      const splitRaw  = el.getAttribute('split') ?? '0';
+      if (!address) return null;
+      return {
+        name:    el.getAttribute('name') ?? 'Unknown',
+        type:    (recipType === 'lnaddress' ? 'lnaddress' : 'node') as 'node' | 'lnaddress',
+        address,
+        split:   parseInt(splitRaw, 10) || 0,
+        fee:     el.getAttribute('fee') === 'true',
+        customRecords: el.getAttribute('customKey') && el.getAttribute('customValue')
+          ? { [el.getAttribute('customKey')!]: el.getAttribute('customValue')! }
+          : undefined,
+      } satisfies ValueRecipient;
+    })
+    .filter((r): r is ValueRecipient => r !== null && r.split > 0);
+
+  if (recipients.length === 0) return null;
+
+  return {
+    type:       type as 'lightning',
+    method:     method as 'keysend' | 'split' | 'paywall',
+    suggested,
+    recipients,
+  };
+}
+
 async function fetchChapters(chaptersUrl: string): Promise<PodcastChapter[]> {
   try {
     const proxyUrl = `${RSS_PROXY_URL}?action=json&url=${encodeURIComponent(chaptersUrl)}`;
@@ -260,6 +320,7 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
       '';
   })();
 
+  const channel = doc.querySelector('channel');
   const allItems = Array.from(doc.querySelectorAll('item'));
   console.log(`[Podcast] "${feedTitle}" — ${allItems.length} items found`);
 
@@ -320,7 +381,11 @@ async function fetchFeed(feedUrl: string): Promise<PodcastEpisode[]> {
     const transcriptUrl = getPodcastTranscriptUrl(item) ?? undefined;
     if (transcriptUrl) console.log(`[Podcast] "${title}" — transcript URL: ${transcriptUrl.slice(0, 80)}`);
 
-    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, author, pubDate, chapters, transcriptUrl });
+    // Podcast 2.0 value tag (<podcast:value> + <podcast:valueRecipient>)
+    const valueTag = getPodcastValueTag(item, channel) ?? undefined;
+    if (valueTag) console.log(`[Podcast] "${title}" — value tag: ${valueTag.recipients.length} recipients`);
+
+    episodes.push({ id: guid, feedTitle, title, audioUrl, duration, description, author, pubDate, chapters, transcriptUrl, valueTag });
   }
 
   console.log(`[Podcast] "${feedTitle}" — ${episodes.length} episodes parsed`);

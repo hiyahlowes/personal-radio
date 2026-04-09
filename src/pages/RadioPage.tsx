@@ -22,8 +22,10 @@ import { usePodcastHistory } from '@/hooks/usePodcastHistory';
 import { useMusicHistory } from '@/hooks/useMusicHistory';
 import { useListenerMemory } from '@/hooks/useListenerMemory';
 import { useRadioContext } from '@/contexts/RadioContext';
+import { useV4VContext } from '@/contexts/V4VContext';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getStoredName } from '@/pages/SetupPage';
+import type { ItemMeta } from '@/types/value4value';
 
 // ─── Play-count helpers ────────────────────────────────────────────────────────
 /** In-place Fisher-Yates shuffle; returns the same array. */
@@ -293,6 +295,14 @@ export function RadioPage() {
   const podcastHistory = usePodcastHistory();
   const musicHistory   = useMusicHistory();
   const listenerMemory = useListenerMemory(getStoredName() || 'Listener');
+  const v4v            = useV4VContext();
+  // Stable ref so memoised callbacks can call the latest v4v methods without
+  // being listed in dependency arrays.
+  const v4vRef         = useRef(v4v);
+  v4vRef.current       = v4v;
+  // Stores the V4V state for the currently playing item so handlePlay (resume)
+  // can restart streaming with the right recipients.
+  const v4vCurrentRef  = useRef<{ meta: ItemMeta } | null>(null);
 
   // ── UI state ──────────────────────────────────────────────────────────────
   const [idx, setIdx]         = useState(0);
@@ -992,6 +1002,11 @@ export function RadioPage() {
         setDur(episode.duration || 0);
         nowPlayingRef.current = { kind: 'podcast', episode };
         setNowPlaying({ kind: 'podcast', episode });
+        {
+          const meta: ItemMeta = { itemId: episode.id, itemTitle: episode.title, feedTitle: episode.feedTitle, isEpisode: true };
+          v4vCurrentRef.current = { meta };
+          v4vRef.current.onTrackChange(episode.valueTag, meta);
+        }
 
         let podStarted  = false;
         let skipEpisode = false;
@@ -1185,6 +1200,11 @@ export function RadioPage() {
             setNowPlaying({ kind: 'music', track: nextMusicTrack });
             setCT(0); setDur(nextMusicTrack.duration || 0); setIdx(idxRef.current);
             listenerMemoryRef.current.recordSongStart(nextMusicTrack);
+            {
+              const meta: ItemMeta = { itemId: nextMusicTrack.id, itemTitle: nextMusicTrack.name, feedTitle: nextMusicTrack.artist, isEpisode: false };
+              v4vCurrentRef.current = { meta };
+              v4vRef.current.onTrackChange(undefined, meta);
+            }
 
             if (!runningRef.current) { podcastTransitionRef.current = false; crossfadeActiveRef.current = true; return; }
 
@@ -1325,6 +1345,11 @@ export function RadioPage() {
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
         listenerMemoryRef.current.recordSongStart(t);
+        {
+          const meta: ItemMeta = { itemId: t.id, itemTitle: t.name, feedTitle: t.artist, isEpisode: false };
+          v4vCurrentRef.current = { meta };
+          v4vRef.current.onTrackChange(undefined, meta);
+        }
 
         // Pre-load the next track so it's buffered before the crossfade window.
         // Do this early — before speech — so the browser has time to buffer.
@@ -1676,6 +1701,12 @@ export function RadioPage() {
   const handlePlay = useCallback(() => {
     console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
 
+    // Guard: if the loop is already running and there is no paused podcast waiting
+    // to resume, this call is a duplicate (e.g. rapid multi-tap or a spurious pod
+    // 'pause' event that set playing=false while the loop kept going). Bail out
+    // immediately — even before the iOS unlock — to prevent duplicate advanceLoop calls.
+    if (runningRef.current && !resumePodcastEpisodeRef.current) return;
+
     // ── Pre-unlock the podcast element on EVERY play press (before any awaits) ──
     // pod.play() is called 10+ seconds after the gesture (bridge fade + TTS +
     // jingle). iOS revokes the gesture token after ~1 second of async work.
@@ -1697,13 +1728,20 @@ export function RadioPage() {
       console.log('[iOS] podcast pre-unlock with silent blob');
     }
 
-    // If the loop is already running (e.g. we navigated away and came back),
-    // there's nothing to do — audio is already playing in the background.
-    if (runningRef.current) return;
+    // Secondary guard after the iOS unlock: if running with no resume pending,
+    // nothing left to do. If a podcast resume IS pending, fall through even when
+    // runningRef is true (the loop may have exited but the ref wasn't reset yet).
+    if (runningRef.current && !resumePodcastEpisodeRef.current) return;
     if (!greetedRef.current) {
       startRadio();
     } else {
       runningRef.current = true;
+      // Resume V4V streaming with the current item's recipients
+      if (v4vCurrentRef.current) {
+        const np = nowPlayingRef.current;
+        const valueTag = np?.kind === 'podcast' ? np.episode.valueTag : undefined;
+        v4vRef.current.onPlay(valueTag, v4vCurrentRef.current.meta);
+      }
       if (resumePodcastEpisodeRef.current) {
         // Resuming mid-podcast — advanceLoop will handle pod.play(); don't touch audioRef.
         console.log('[PlayPause] resuming podcast:', resumePodcastEpisodeRef.current.title);
@@ -1729,14 +1767,13 @@ export function RadioPage() {
     runningRef.current = false;
     moderatorRef.current.stop();
 
-    // Set the resume ref synchronously here rather than relying on the async
-    // loop to set it (race: the loop sets it only after awaited promises resolve,
-    // but handlePlay can be called before that completes).
-    // Guard: only set if not already populated, so the loop's own assignment
-    // (which may run later) is a harmless no-op.
-    if (nowPlayingRef.current?.kind === 'podcast' && !resumePodcastEpisodeRef.current) {
+    // Capture the paused podcast synchronously so handlePlay can resume it
+    // immediately, without racing the async loop (which sets this only after
+    // awaited promises resolve). Always overwrite — a stale ref from a previous
+    // incomplete resume must never block capturing the correct current episode.
+    if (nowPlayingRef.current?.kind === 'podcast') {
       resumePodcastEpisodeRef.current = nowPlayingRef.current.episode;
-      console.log('[PlayPause] handlePause — set resumePodcastEpisodeRef:', nowPlayingRef.current.episode.title);
+      console.log('[PlayPause] handlePause — set resumePodcastEpisodeRef:', nowPlayingRef.current.episode.title, 'ct:', podAudioRef.current?.currentTime.toFixed(1) ?? '?');
     }
 
     if (howlRef.current) {
@@ -1745,6 +1782,7 @@ export function RadioPage() {
     }
     audioRef.current?.pause();
     podAudioRef.current?.pause(); // also pause podcast if one is playing
+    v4vRef.current.onPause();
   }, []);
 
   const jumpTo = useCallback((newIdx: number, userSkipped = false) => {
@@ -2292,6 +2330,20 @@ export function RadioPage() {
             </div>
           </div>
         </div>
+
+        {/* V4V session display — shown when NWC is connected */}
+        {v4v.isConnected && (
+          <div className="fade-in-up-delay-2 flex items-center gap-2 px-1">
+            <span className="text-yellow-400 text-xs">⚡</span>
+            <span className="text-xs text-white/40">
+              {v4v.totalSentThisSession > 0
+                ? `${v4v.totalSentThisSession} sats streamed this session`
+                : v4v.pendingTotal > 0
+                  ? `${v4v.pendingTotal} sats pending`
+                  : 'Streaming value to artists'}
+            </span>
+          </div>
+        )}
 
         {/* Mix ratio slider — controls music/podcast balance */}
         <div className="fade-in-up-delay-2 glass-card rounded-2xl px-5 py-4 space-y-3">

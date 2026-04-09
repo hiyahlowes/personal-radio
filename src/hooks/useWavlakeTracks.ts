@@ -10,9 +10,10 @@ export interface WavlakeTrack {
   artworkUrl: string;
   avatarUrl: string;
   liveUrl: string;
-  duration: number;    // seconds
-  isTopChart?: boolean; // true when fetched from the Top 40 chart
-  genreId?: string;     // genre used to fetch this track (e.g. 'ambient')
+  duration: number;          // seconds
+  isTopChart?: boolean;      // true when fetched from the Top 40 chart
+  genreId?: string;          // genre used to fetch this track (e.g. 'ambient')
+  lightningAddress?: string; // artist's lightning address for V4V sat-streaming
 }
 
 interface WavlakeSearchResult {

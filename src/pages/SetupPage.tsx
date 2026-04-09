@@ -14,6 +14,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useV4VContext } from '@/contexts/V4VContext';
 import { GENRES, ALL_GENRE_IDS, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import {
   getStoredFeeds,
@@ -48,7 +49,7 @@ export function setStoredName(name: string): void {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-const TOTAL_STEPS = 4;
+const TOTAL_STEPS = 5;
 
 export function SetupPage() {
   const navigate = useNavigate();
@@ -73,6 +74,10 @@ export function SetupPage() {
 
   // Step 4 — pre-populate feeds if re-entering
   const [addedFeeds, setAddedFeeds] = useState<PodcastFeed[]>(() => getStoredFeeds());
+
+  // Step 5 — NWC (optional)
+  const v4v = useV4VContext();
+  const [nwcInput, setNwcInput] = useState(() => v4v.connectionString ?? '');
   const [query, setQuery]           = useState('');
   const [trending, setTrending]     = useState<PodcastIndexFeed[]>([]);
   const [results, setResults]       = useState<PodcastIndexFeed[]>([]);
@@ -167,13 +172,14 @@ export function SetupPage() {
   const canNext1 = true; // language always has a default
   const canNext2 = name.trim().length > 0;
   const canNext3 = selectedGenres.length > 0;
-  const canFinish = addedFeeds.length > 0;
+  const canNext4 = addedFeeds.length > 0;
 
   const goNext = () => {
     if (step === 1) setStep(2);
     else if (step === 2 && canNext2) setStep(3);
     else if (step === 3 && canNext3) setStep(4);
-    else if (step === 4 && canFinish) finish();
+    else if (step === 4 && canNext4) setStep(5);
+    else if (step === 5) finish(); // NWC step is always skippable
   };
 
   const goBack = () => {
@@ -528,6 +534,53 @@ export function SetupPage() {
           </div>
         )}
 
+        {/* ── STEP 5: NWC Wallet (optional) ───────────────────────────────── */}
+        {step === 5 && (
+          <div className="fade-in-up space-y-6">
+            <div className="text-center space-y-2">
+              <h1 className="text-3xl font-black tracking-tight">Support Artists ⚡</h1>
+              <p className="text-white/50 text-sm leading-relaxed mt-3">
+                Connect a Bitcoin Lightning wallet to stream sats to the artists and podcasters you listen to.
+                This is optional — you can set it up later in Settings.
+              </p>
+            </div>
+
+            <div className="glass-card rounded-2xl p-6 space-y-4">
+              <p className="text-sm font-semibold text-white/70">NWC Connection String</p>
+              <input
+                type="text"
+                value={nwcInput}
+                onChange={e => setNwcInput(e.target.value)}
+                placeholder="nostr+walletconnect://..."
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white/80 placeholder-white/20 focus:outline-none focus:border-purple-500/50 font-mono"
+              />
+              <button
+                onClick={async () => {
+                  const trimmed = nwcInput.trim();
+                  if (trimmed) await v4v.connect(trimmed);
+                }}
+                disabled={v4v.isConnecting || !nwcInput.trim()}
+                className="w-full py-3 rounded-xl text-sm font-bold bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-500/30 text-yellow-300 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+              >
+                {v4v.isConnecting ? 'Connecting…' : '⚡ Connect Wallet'}
+              </button>
+
+              {v4v.isConnected && (
+                <p className="text-sm text-green-400 text-center">
+                  ✅ Connected{v4v.walletAlias ? ` — ${v4v.walletAlias}` : ''}
+                </p>
+              )}
+              {v4v.connectError && (
+                <p className="text-xs text-red-400 text-center">⚠ {v4v.connectError}</p>
+              )}
+            </div>
+
+            <p className="text-xs text-white/25 text-center">
+              Works with Alby Hub, Primal, and any NWC-compatible wallet.
+            </p>
+          </div>
+        )}
+
         {/* ── Navigation buttons ───────────────────────────────────────────── */}
         <div className="mt-8 flex items-center gap-3">
           {step > 1 && (
@@ -547,13 +600,14 @@ export function SetupPage() {
             disabled={
               (step === 2 && !canNext2) ||
               (step === 3 && !canNext3) ||
-              (step === 4 && !canFinish)
+              (step === 4 && !canNext4)
             }
             className={`flex-1 py-3.5 text-base font-bold rounded-2xl transition-all duration-300 ${
               step === 1 ||
               (step === 2 && canNext2) ||
               (step === 3 && canNext3) ||
-              (step === 4 && canFinish)
+              (step === 4 && canNext4) ||
+              step === 5
                 ? 'bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-500 hover:to-purple-500 glow-purple-sm hover:scale-[1.01] active:scale-[0.99]'
                 : 'bg-white/5 text-white/25 cursor-not-allowed border border-white/10'
             }`}
@@ -561,7 +615,8 @@ export function SetupPage() {
             {step === 1 && 'Continue →'}
             {step === 2 && (canNext2 ? `Continue, ${name.trim().split(' ')[0]} →` : 'Enter your name to continue')}
             {step === 3 && (canNext3 ? 'Continue →' : 'Select at least one genre')}
-            {step === 4 && (canFinish ? '🎙️ Start listening →' : 'Add at least one podcast')}
+            {step === 4 && (canNext4 ? 'Continue →' : 'Add at least one podcast')}
+            {step === 5 && (v4v.isConnected ? '🎙️ Start listening →' : 'Skip & Start listening →')}
           </button>
         </div>
 
