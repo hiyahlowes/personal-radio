@@ -90,8 +90,25 @@ function buildRecipients(
   prSplitPercent: number,
 ): ValueRecipient[] {
   if (!supportPR || prSplitPercent <= 0) return feedRecipients;
-  // Wavlake LNURL automatically credits PR via appId — no extra recipient needed
-  if (feedRecipients.some(r => r.type === 'wavlake')) return feedRecipients;
+
+  // Wavlake's LNURL (appId=personal-radio) already includes 5% PR + 5% Wavlake = 10%
+  // built-in. Only add a PR recipient for the portion the user requested ABOVE 10%.
+  if (feedRecipients.some(r => r.type === 'wavlake')) {
+    const WAVLAKE_BUILTIN_PR_PERCENT = 10; // 5% PR + 5% Wavlake fee baked in via appId
+    const extraPR = prSplitPercent - WAVLAKE_BUILTIN_PR_PERCENT;
+    if (extraPR <= 0) return feedRecipients; // user's split ≤ 10% — already covered
+
+    // Scale the wavlake recipient down by extraPR%, add PR for the remainder
+    const wavlakeShare = 100 - extraPR;
+    const scaled = feedRecipients.map(r => ({
+      ...r,
+      split: Math.round((r.split / 100) * wavlakeShare),
+    }));
+    return [
+      ...scaled,
+      { name: 'Personal Radio', type: 'lnaddress' as const, address: PR_LIGHTNING_ADDRESS, split: extraPR },
+    ];
+  }
 
   const artistsShare  = 100 - prSplitPercent;
   const totalShares   = feedRecipients.reduce((s, r) => s + r.split, 0);
