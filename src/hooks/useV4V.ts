@@ -21,6 +21,12 @@ const NWC_PENDING_KEY     = 'nwc_pending_buffer';
 
 const PR_LIGHTNING_ADDRESS = 'accoladecool329256@getalby.com';
 const MIN_FLUSH_SATS       = 10;    // don't send payments below this threshold
+
+// Wavlake keysend constants — used as fallback when the LNURL API is unavailable.
+// Verified from Wavlake RSS feeds: all tracks route through this node;
+// customValue (track UUID) tells Wavlake which artist to credit.
+const WAVLAKE_LN_NODE    = '02682b7c86f474d082fa9d274c3751291225448468691784c6f112187de975a8c2';
+const WAVLAKE_CUSTOM_KEY = '16180339';
 const MAX_BUFFER_AGE_MS    = 30 * 60 * 1000; // flush stale entries after 30 min
 const FLUSH_INTERVAL_MS    = 15 * 60 * 1000; // 15-minute periodic flush
 const PAUSE_FLUSH_MS       = 5  * 60 * 1000; // flush after 5-min pause
@@ -75,6 +81,8 @@ function saveBuffer(buf: Map<string, PendingPayment>) {
 
 /**
  * Scale feed recipients to leave room for the PR split, then append PR.
+ * Wavlake tracks are excluded — PR's 5% split is already included via the
+ * appId=personal-radio referrer in the LNURL call (handled server-side).
  */
 function buildRecipients(
   feedRecipients: ValueRecipient[],
@@ -82,6 +90,8 @@ function buildRecipients(
   prSplitPercent: number,
 ): ValueRecipient[] {
   if (!supportPR || prSplitPercent <= 0) return feedRecipients;
+  // Wavlake LNURL automatically credits PR via appId — no extra recipient needed
+  if (feedRecipients.some(r => r.type === 'wavlake')) return feedRecipients;
 
   const artistsShare  = 100 - prSplitPercent;
   const totalShares   = feedRecipients.reduce((s, r) => s + r.split, 0);
@@ -234,6 +244,7 @@ export function useV4V() {
 
     const keysendBatch: { address: string; entry: PendingPayment }[] = [];
     const invoiceBatch: { address: string; entry: PendingPayment }[] = [];
+    const wavlakeBatch: { address: string; entry: PendingPayment }[] = [];
 
     for (const [address, entry] of buf.entries()) {
       const overThreshold = entry.accumulatedSats >= MIN_FLUSH_SATS;
@@ -248,12 +259,15 @@ export function useV4V() {
 
       if (entry.recipientType === 'node') {
         keysendBatch.push({ address, entry });
+      } else if (entry.recipientType === 'wavlake') {
+        wavlakeBatch.push({ address, entry });
       } else {
         invoiceBatch.push({ address, entry });
       }
     }
 
-    console.log(`[V4V] flush — ${keysendBatch.length + invoiceBatch.length} recipients, total: ${[...keysendBatch, ...invoiceBatch].reduce((s, { entry }) => s + entry.accumulatedSats, 0)} sats`);
+    const allBatches = [...keysendBatch, ...invoiceBatch, ...wavlakeBatch];
+    console.log(`[V4V] flush — ${allBatches.length} recipients, total: ${allBatches.reduce((s, { entry }) => s + entry.accumulatedSats, 0)} sats`);
 
     // TLV stream metadata (bLIP-10, type 7629169)
     const streamMeta = currentMeta ? {
@@ -348,6 +362,65 @@ export function useV4V() {
         const msg = e instanceof Error ? e.message : String(e);
         console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
         result.errors.push(`lnaddress payment to ${entry.recipientName} failed: ${msg}`);
+      }
+    }
+
+    // ── Wavlake payments (LNURL primary → keysend fallback) ──────────────────
+    for (const { address: trackId, entry } of wavlakeBatch) {
+      console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via Wavlake`);
+      let paid = false;
+
+      // Primary: LNURL invoice via server-side proxy (includes appId=personal-radio split)
+      try {
+        const amountMsats = entry.accumulatedSats * 1000;
+        const proxyRes = await fetch(
+          `/.netlify/functions/wavlake-pay?contentId=${encodeURIComponent(trackId)}&amountMsats=${amountMsats}`,
+          { signal: AbortSignal.timeout(30_000) },
+        );
+        if (!proxyRes.ok) throw new Error(`wavlake-pay HTTP ${proxyRes.status}`);
+        const proxyData = await proxyRes.json() as { pr?: string; below_minimum?: boolean; minSendableSats?: number; error?: string };
+
+        if (proxyData.below_minimum) {
+          console.log(`[V4V] buffering ${entry.accumulatedSats} sats for "${entry.recipientName}" — below Wavlake minimum (${proxyData.minSendableSats} sats)`);
+          paid = true; // carry forward, no fallback needed
+        } else if (proxyData.pr) {
+          await client.sendPayment(proxyData.pr);
+          console.log(`[V4V] ✅ paid ${entry.accumulatedSats} sats for "${entry.recipientName}" via Wavlake LNURL`);
+          result.sent     += entry.accumulatedSats;
+          result.payments += 1;
+          buf.get(trackId)!.accumulatedSats = 0;
+          paid = true;
+        } else {
+          throw new Error(proxyData.error ?? 'No invoice from wavlake-pay');
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.log(`[Wavlake] LNURL failed for "${entry.recipientName}" — ${msg} — trying keysend fallback`);
+      }
+
+      // Fallback: direct keysend to Wavlake's Lightning node
+      if (!paid) {
+        const customValueHex = Array.from(new TextEncoder().encode(trackId))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join('');
+        try {
+          await withRetry(() => client.keysend({
+            destination: WAVLAKE_LN_NODE,
+            amount:      entry.accumulatedSats,
+            customRecords: {
+              [WAVLAKE_CUSTOM_KEY]: customValueHex,
+              ...(tlvHex ? { '7629169': tlvHex } : {}),
+            },
+          }), 2, entry.recipientName);
+          console.log(`[V4V] ✅ paid ${entry.accumulatedSats} sats for "${entry.recipientName}" via keysend fallback`);
+          result.sent     += entry.accumulatedSats;
+          result.payments += 1;
+          buf.get(trackId)!.accumulatedSats = 0;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
+          result.errors.push(`Wavlake payment to ${entry.recipientName} failed: ${msg}`);
+        }
       }
     }
 
