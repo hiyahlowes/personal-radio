@@ -2410,7 +2410,7 @@ export function RadioPage() {
         {/* V4V session display — shown when NWC is connected */}
         {v4v.isConnected && (
           <div className="fade-in-up-delay-2 flex items-center gap-2 px-1">
-            <span className="text-yellow-400 text-xs">⚡</span>
+            <span className={`text-xs ${v4v.hasPaymentErrors ? 'text-red-400' : 'text-yellow-400'}`} title={v4v.hasPaymentErrors ? 'Payment errors — check wallet connection' : undefined}>⚡</span>
             <span className="text-xs text-white/40">
               {v4v.totalSentThisSession > 0
                 ? nowPlaying?.kind === 'music'

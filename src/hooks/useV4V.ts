@@ -19,8 +19,10 @@ const NWC_PR_SPLIT_KEY    = 'nwc_pr_split';
 const NWC_SENDER_ID_KEY   = 'nwc_sender_id';
 const NWC_PENDING_KEY     = 'nwc_pending_buffer';
 
-const PR_LIGHTNING_ADDRESS = 'accoladecool329256@getalby.com';
-const MIN_FLUSH_SATS       = 10;    // don't send payments below this threshold
+const PR_LIGHTNING_ADDRESS  = 'accoladecool329256@getalby.com';
+const MIN_FLUSH_SATS        = 10;   // don't send payments below this threshold
+const MAX_PENDING_SATS      = 500;  // drop accumulated sats above this cap per recipient
+const MAX_CONSEC_FAILURES   = 3;    // disable a recipient after this many consecutive failures
 
 // Wavlake keysend constants — used as fallback when the LNURL API is unavailable.
 // Verified from Wavlake RSS feeds: all tracks route through this node;
@@ -43,6 +45,11 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts: number, label: st
     try {
       return await fn();
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Timeout errors: every retry wastes another 60 s — fail fast instead
+      if (msg.toLowerCase().includes('reply timeout') || msg.toLowerCase().includes('timed out')) {
+        throw e;
+      }
       if (attempt < maxAttempts) {
         const delay = 3000 * attempt;
         console.log(`[V4V] attempt ${attempt}/${maxAttempts} failed for "${label}" — retrying in ${delay / 1000}s`);
@@ -144,6 +151,10 @@ function accumulateToBuffer(
     const existing = buffer.get(r.address);
     if (existing) {
       existing.accumulatedSats += sats;
+      if (existing.accumulatedSats > MAX_PENDING_SATS) {
+        console.log(`[V4V] dropped ${existing.accumulatedSats} pending sats for "${r.name}" — payment cap exceeded`);
+        existing.accumulatedSats = 0;
+      }
     } else {
       buffer.set(r.address, {
         recipientName:     r.name,
@@ -224,6 +235,7 @@ export function useV4V() {
   const [totalSentThisSession, setTotalSent]        = useState(0);
   const [pendingTotal,       setPendingTotal]       = useState(0);
   const [lastFlushResult,    setLastFlushResult]    = useState<FlushResult | null>(null);
+  const [hasPaymentErrors,   setHasPaymentErrors]  = useState(false);
 
   // ── Refs (mutable, not reactive) ───────────────────────────────────────────
   const nwcClientRef       = useRef<import('@getalby/sdk').webln.NWC | null>(null);
@@ -238,6 +250,8 @@ export function useV4V() {
   const satRateRef         = useRef(satRatePerMinute);
   const supportPRRef       = useRef(supportPREnabled);
   const prSplitRef         = useRef(prSplitPercent);
+  const failureCountRef    = useRef<Map<string, number>>(new Map());
+  const disabledRef        = useRef<Set<string>>(new Set());
 
   // Keep refs in sync with state (so callbacks don't need to re-register)
   useEffect(() => { satRateRef.current   = satRatePerMinute; }, [satRatePerMinute]);
@@ -255,6 +269,19 @@ export function useV4V() {
 
     if (reason) console.log(`[V4V] flush triggered — reason: "${reason}"`);
 
+    // Health check — if the wallet is unreachable, skip the entire flush
+    try {
+      await (client as unknown as { getBalance: () => Promise<unknown> }).getBalance();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.toLowerCase().includes('reply timeout') || msg.toLowerCase().includes('timed out')) {
+        console.warn('[V4V] NWC wallet unreachable — skipping flush');
+        setHasPaymentErrors(true);
+        return result;
+      }
+      // Non-timeout errors from getBalance are non-fatal (wallet may not support it)
+    }
+
     const now          = Date.now();
     const senderId     = senderIdRef.current;
     const currentMeta  = currentMetaRef.current;
@@ -264,6 +291,10 @@ export function useV4V() {
     const wavlakeBatch: { address: string; entry: PendingPayment }[] = [];
 
     for (const [address, entry] of buf.entries()) {
+      if (disabledRef.current.has(address)) {
+        console.log(`[V4V] skipping disabled recipient "${entry.recipientName}"`);
+        continue;
+      }
       const overThreshold = entry.accumulatedSats >= MIN_FLUSH_SATS;
       const isStale       = (now - entry.firstAccumulatedAt) >= MAX_BUFFER_AGE_MS;
       if (!overThreshold && !isStale) {
@@ -353,10 +384,17 @@ export function useV4V() {
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
             buf.get(address)!.accumulatedSats = 0;
+            failureCountRef.current.delete(address);
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
             result.errors.push(`keysend to ${entry.recipientName} failed: ${msg}`);
+            const count = (failureCountRef.current.get(address) ?? 0) + 1;
+            failureCountRef.current.set(address, count);
+            if (count >= MAX_CONSEC_FAILURES) {
+              disabledRef.current.add(address);
+              console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
+            }
           }
         }
       }
@@ -375,10 +413,17 @@ export function useV4V() {
         result.sent     += entry.accumulatedSats;
         result.payments += 1;
         buf.get(address)!.accumulatedSats = 0;
+        failureCountRef.current.delete(address);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
         result.errors.push(`lnaddress payment to ${entry.recipientName} failed: ${msg}`);
+        const count = (failureCountRef.current.get(address) ?? 0) + 1;
+        failureCountRef.current.set(address, count);
+        if (count >= MAX_CONSEC_FAILURES) {
+          disabledRef.current.add(address);
+          console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
+        }
       }
     }
 
@@ -406,6 +451,7 @@ export function useV4V() {
           result.sent     += entry.accumulatedSats;
           result.payments += 1;
           buf.get(trackId)!.accumulatedSats = 0;
+          failureCountRef.current.delete(trackId);
           paid = true;
         } else {
           throw new Error(proxyData.error ?? 'No invoice from wavlake-pay');
@@ -433,10 +479,17 @@ export function useV4V() {
           result.sent     += entry.accumulatedSats;
           result.payments += 1;
           buf.get(trackId)!.accumulatedSats = 0;
+          failureCountRef.current.delete(trackId);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
           result.errors.push(`Wavlake payment to ${entry.recipientName} failed: ${msg}`);
+          const count = (failureCountRef.current.get(trackId) ?? 0) + 1;
+          failureCountRef.current.set(trackId, count);
+          if (count >= MAX_CONSEC_FAILURES) {
+            disabledRef.current.add(trackId);
+            console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
+          }
         }
       }
     }
@@ -453,6 +506,9 @@ export function useV4V() {
     }
     if (result.errors.length > 0) {
       console.warn('[V4V] flush errors:', result.errors);
+      setHasPaymentErrors(true);
+    } else if (result.payments > 0) {
+      setHasPaymentErrors(false);
     }
 
     // Recompute pending total
@@ -676,6 +732,7 @@ export function useV4V() {
     pendingTotal,
     totalSentThisSession,
     lastFlushResult,
+    hasPaymentErrors,
     flushPendingPayments,
   };
 }
