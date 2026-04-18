@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import type { ValueTag } from '@/types/value4value';
 
 export interface WavlakeTrack {
   id: string;
@@ -193,6 +194,35 @@ function dedupeAndShuffle(tracks: WavlakeTrack[]): WavlakeTrack[] {
     [unique[i], unique[j]] = [unique[j], unique[i]];
   }
   return unique;
+}
+
+// ── Wavlake V4V keysend constants ─────────────────────────────────────────────
+// Verified from Wavlake RSS feeds (https://wavlake.com/feed/music/{albumId}).
+// All tracks route through the same Wavlake Lightning node; the customValue
+// (track UUID) tells Wavlake which artist to credit internally.
+const WAVLAKE_LN_NODE  = '02682b7c86f474d082fa9d274c3751291225448468691784c6f112187de975a8c2';
+const WAVLAKE_CUSTOM_KEY = '16180339';
+
+/**
+ * Build a Podcast 2.0 ValueTag for a Wavlake music track.
+ * Uses a direct keysend to the Wavlake Lightning node with the track UUID
+ * as the custom TLV record so Wavlake can credit the correct artist.
+ */
+export function buildWavlakeValueTag(track: WavlakeTrack): ValueTag {
+  const customValueHex = Array.from(new TextEncoder().encode(track.id))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+  return {
+    type: 'lightning',
+    method: 'keysend',
+    recipients: [{
+      name: `${track.artist} via Wavlake`,
+      type: 'node',
+      address: WAVLAKE_LN_NODE,
+      split: 100,
+      customRecords: { [WAVLAKE_CUSTOM_KEY]: customValueHex },
+    }],
+  };
 }
 
 /**

@@ -11,7 +11,7 @@ import {
   type DraggableProvided,
 } from '@hello-pangea/dnd';
 
-import { useWavlakeTracks, fetchAmbientBridgePool, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
+import { useWavlakeTracks, fetchAmbientBridgePool, buildWavlakeValueTag, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, useSingleFeedEpisodes, getStoredFeeds, type PodcastEpisode, type PodcastFeed } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator, type ResumeContext } from '@/hooks/useRadioModerator';
 import { unlockTTSAudio } from '@/hooks/useElevenLabs';
@@ -1275,7 +1275,7 @@ export function RadioPage() {
             {
               const meta: ItemMeta = { itemId: nextMusicTrack.id, itemTitle: nextMusicTrack.name, feedTitle: nextMusicTrack.artist, isEpisode: false };
               v4vCurrentRef.current = { meta };
-              v4vRef.current.onTrackChange(undefined, meta);
+              v4vRef.current.onTrackChange(buildWavlakeValueTag(nextMusicTrack), meta);
             }
 
             if (!runningRef.current) { podcastTransitionRef.current = false; crossfadeActiveRef.current = true; return; }
@@ -1420,7 +1420,7 @@ export function RadioPage() {
         {
           const meta: ItemMeta = { itemId: t.id, itemTitle: t.name, feedTitle: t.artist, isEpisode: false };
           v4vCurrentRef.current = { meta };
-          v4vRef.current.onTrackChange(undefined, meta);
+          v4vRef.current.onTrackChange(buildWavlakeValueTag(t), meta);
         }
 
         // Pre-load the next track so it's buffered before the crossfade window.
@@ -1811,7 +1811,11 @@ export function RadioPage() {
       // Resume V4V streaming with the current item's recipients
       if (v4vCurrentRef.current) {
         const np = nowPlayingRef.current;
-        const valueTag = np?.kind === 'podcast' ? np.episode.valueTag : undefined;
+        const valueTag = np?.kind === 'podcast'
+          ? np.episode.valueTag
+          : np?.kind === 'music'
+            ? buildWavlakeValueTag(np.track)
+            : undefined;
         v4vRef.current.onPlay(valueTag, v4vCurrentRef.current.meta);
       }
       if (resumePodcastEpisodeRef.current) {
@@ -2409,9 +2413,13 @@ export function RadioPage() {
             <span className="text-yellow-400 text-xs">⚡</span>
             <span className="text-xs text-white/40">
               {v4v.totalSentThisSession > 0
-                ? `${v4v.totalSentThisSession} sats streamed this session`
+                ? nowPlaying?.kind === 'music'
+                  ? `${v4v.totalSentThisSession} sats → ${nowPlaying.track.artist} (via Wavlake)`
+                  : `${v4v.totalSentThisSession} sats streamed this session`
                 : v4v.pendingTotal > 0
-                  ? `${v4v.pendingTotal} sats pending`
+                  ? nowPlaying?.kind === 'music'
+                    ? `${v4v.pendingTotal} sats pending → ${nowPlaying.track.artist} (via Wavlake)`
+                    : `${v4v.pendingTotal} sats pending`
                   : 'Streaming value to artists'}
             </span>
           </div>
