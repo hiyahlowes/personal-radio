@@ -328,6 +328,7 @@ export function useV4V() {
   const prSplitRef         = useRef(prSplitPercent);
   const failureCountRef    = useRef<Map<string, number>>(new Map());
   const disabledRef        = useRef<Set<string>>(new Set());
+  const connectAttemptRef  = useRef(0);
 
   // Keep refs in sync with state (so callbacks don't need to re-register)
   useEffect(() => { satRateRef.current   = satRatePerMinute; }, [satRatePerMinute]);
@@ -602,6 +603,10 @@ export function useV4V() {
   // ── Connection ─────────────────────────────────────────────────────────────
 
   const connect = useCallback(async (connString: string): Promise<boolean> => {
+    const attemptId = connectAttemptRef.current + 1;
+    connectAttemptRef.current = attemptId;
+    const isLatestAttempt = () => connectAttemptRef.current === attemptId;
+
     setIsConnecting(true);
     setConnectError(null);
     try {
@@ -640,6 +645,11 @@ export function useV4V() {
             }
           }
 
+          if (!isLatestAttempt()) {
+            client.close();
+            return false;
+          }
+
           nwcClientRef.current?.close();
           nwcClientRef.current = client;
           setWalletAlias(alias);
@@ -653,12 +663,15 @@ export function useV4V() {
         } catch (e) {
           lastError = e;
           client.close();
+          if (!isLatestAttempt()) return false;
           console.warn('[V4V] NWC candidate failed:', describeNwcConnectError(e, target));
         }
       }
 
       throw lastError ?? new Error('Unable to connect to NWC wallet');
     } catch (e) {
+      if (!isLatestAttempt()) return false;
+
       const target = (() => {
         try {
           return getNwcConnectionTarget(connString.trim());
@@ -680,6 +693,7 @@ export function useV4V() {
   }, []);
 
   const disconnect = useCallback(() => {
+    connectAttemptRef.current += 1;
     nwcClientRef.current?.close();
     nwcClientRef.current = null;
     setIsConnected(false);
