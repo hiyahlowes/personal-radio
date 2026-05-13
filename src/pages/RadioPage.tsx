@@ -2430,7 +2430,7 @@ export function RadioPage() {
           >
             <span className={`text-base leading-none ${superSaiyan ? 'ss-toggle-icon' : 'opacity-60'}`}>⚡</span>
             <span className="text-[11px] font-semibold tracking-[0.18em] uppercase">
-              {superSaiyan ? 'Super Saiyan · ON' : 'Activate Super Saiyan'}
+              {superSaiyan ? 'Streaming value over Lightning' : 'Stream value over Lightning'}
             </span>
             <span className={`relative inline-block w-9 h-5 rounded-full transition-colors ${superSaiyan ? 'bg-fuchsia-500/80' : 'bg-white/15'}`}>
               <span

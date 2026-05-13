@@ -370,76 +370,76 @@ input[type="range"]::-moz-range-thumb {
   overflow: hidden;
 }
 
-/* Cloud / fog layer — each .ss-cloud is a soft purple blob with heavy blur.
-   Multiple stacked clouds at different positions and drift rates give the
-   billowing-fog look. mix-blend-mode: screen brightens the underlying sky
-   without darkening the page. */
+/* Cloud / fog layer — desaturated dark-purple clouds, heavily blurred for
+   a diffuse storm-fog look. No mix-blend so the clouds read as actual
+   shadows against the dark sky rather than neon blobs. Drift cycles are
+   long (40-60s) so motion is barely perceptible. */
 .ss-cloud {
   position: absolute;
   border-radius: 50%;
-  filter: blur(50px);
-  mix-blend-mode: screen;
+  filter: blur(70px);
   will-change: transform;
 }
 
-/* Bottom-spanning fog bank — the main "cloud floor" the strikes hit */
+/* Bottom-spanning fog bank — the "cloud floor" the strikes hit */
 .ss-cloud-1 {
-  bottom: -22vh;
-  left: -15vw;
-  width: 95vw;
-  height: 70vh;
+  bottom: -25vh;
+  left: -20vw;
+  width: 140vw;
+  height: 75vh;
   background:
-    radial-gradient(ellipse 60% 55% at 35% 60%, rgba(232, 121, 249, 0.55), transparent 65%),
-    radial-gradient(ellipse 50% 50% at 70% 50%, rgba(217, 70, 239, 0.50), transparent 65%),
-    radial-gradient(ellipse 45% 40% at 50% 40%, rgba(168, 85, 247, 0.50), transparent 70%);
-  animation: ss-cloud-drift-a 26s ease-in-out infinite;
+    radial-gradient(ellipse 45% 50% at 28% 60%, rgba(110, 70, 150, 0.55), transparent 70%),
+    radial-gradient(ellipse 40% 45% at 65% 55%, rgba(95, 60, 135, 0.50), transparent 72%),
+    radial-gradient(ellipse 35% 40% at 50% 45%, rgba(140, 100, 180, 0.32), transparent 75%);
+  animation: ss-cloud-drift-a 48s ease-in-out infinite;
+  opacity: 0.85;
 }
 .ss-cloud-2 {
-  bottom: -18vh;
-  right: -20vw;
-  width: 90vw;
-  height: 60vh;
+  bottom: -20vh;
+  right: -25vw;
+  width: 120vw;
+  height: 65vh;
   background:
-    radial-gradient(ellipse 60% 55% at 60% 50%, rgba(216, 180, 254, 0.45), transparent 65%),
-    radial-gradient(ellipse 50% 45% at 30% 60%, rgba(192, 132, 252, 0.48), transparent 70%);
-  animation: ss-cloud-drift-b 32s ease-in-out infinite 4s;
+    radial-gradient(ellipse 45% 50% at 60% 55%, rgba(125, 85, 165, 0.42), transparent 72%),
+    radial-gradient(ellipse 40% 45% at 25% 65%, rgba(100, 65, 140, 0.40), transparent 72%);
+  animation: ss-cloud-drift-b 56s ease-in-out infinite 6s;
+  opacity: 0.7;
 }
-/* Upper haze framing the page */
+/* Upper haze framing the page — keeps the top from looking empty */
 .ss-cloud-3 {
-  top: -20vh;
-  left: -10vw;
-  width: 70vw;
-  height: 50vh;
+  top: -25vh;
+  left: -15vw;
+  width: 110vw;
+  height: 55vh;
   background:
-    radial-gradient(ellipse 55% 60% at 50% 70%, rgba(168, 85, 247, 0.45), transparent 70%),
-    radial-gradient(ellipse 40% 50% at 70% 50%, rgba(124, 58, 237, 0.40), transparent 70%);
-  animation: ss-cloud-drift-c 38s ease-in-out infinite 2s;
-  opacity: 0.85;
+    radial-gradient(ellipse 45% 55% at 45% 70%, rgba(95, 60, 135, 0.42), transparent 75%),
+    radial-gradient(ellipse 35% 45% at 75% 55%, rgba(80, 50, 120, 0.38), transparent 75%);
+  animation: ss-cloud-drift-c 60s ease-in-out infinite 3s;
+  opacity: 0.65;
 }
 .ss-cloud-4 {
-  top: -10vh;
-  right: -15vw;
-  width: 60vw;
-  height: 40vh;
+  top: -12vh;
+  right: -20vw;
+  width: 90vw;
+  height: 42vh;
   background:
-    radial-gradient(ellipse 60% 55% at 40% 65%, rgba(192, 132, 252, 0.42), transparent 70%),
-    radial-gradient(ellipse 50% 45% at 70% 50%, rgba(217, 70, 239, 0.35), transparent 70%);
-  animation: ss-cloud-drift-a 30s ease-in-out infinite 8s;
-  opacity: 0.85;
+    radial-gradient(ellipse 50% 55% at 40% 65%, rgba(115, 75, 155, 0.35), transparent 75%),
+    radial-gradient(ellipse 40% 45% at 70% 50%, rgba(95, 60, 135, 0.32), transparent 75%);
+  animation: ss-cloud-drift-a 52s ease-in-out infinite 10s;
+  opacity: 0.6;
 }
-/* Mid-screen wisp drifting across */
+/* Mid-screen wisp drifting across — adds depth without obscuring content */
 .ss-cloud-5 {
-  top: 35vh;
-  left: -25vw;
-  width: 140vw;
-  height: 35vh;
+  top: 38vh;
+  left: -30vw;
+  width: 160vw;
+  height: 32vh;
   background:
-    radial-gradient(ellipse 30% 60% at 25% 50%, rgba(216, 180, 254, 0.20), transparent 75%),
-    radial-gradient(ellipse 25% 50% at 60% 50%, rgba(232, 121, 249, 0.18), transparent 75%),
-    radial-gradient(ellipse 28% 55% at 85% 50%, rgba(168, 85, 247, 0.22), transparent 75%);
-  animation: ss-cloud-drift-b 44s ease-in-out infinite 6s;
-  opacity: 0.55;
-  mix-blend-mode: screen;
+    radial-gradient(ellipse 25% 60% at 22% 50%, rgba(120, 85, 165, 0.18), transparent 78%),
+    radial-gradient(ellipse 22% 55% at 55% 50%, rgba(100, 70, 145, 0.16), transparent 78%),
+    radial-gradient(ellipse 26% 60% at 82% 50%, rgba(115, 80, 160, 0.18), transparent 78%);
+  animation: ss-cloud-drift-b 70s ease-in-out infinite 8s;
+  opacity: 0.45;
 }
 
 /* Sky-flash: full-viewport tints synced with strikes */
@@ -451,15 +451,15 @@ input[type="range"]::-moz-range-thumb {
   mix-blend-mode: screen;
 }
 .ss-skyflash-1 {
-  background: radial-gradient(circle at 50% 30%, rgba(253, 244, 255, 0.75), rgba(217, 70, 239, 0.30) 35%, transparent 65%);
+  background: radial-gradient(circle at 50% 28%, rgba(240, 220, 255, 0.45), rgba(168, 130, 220, 0.18) 40%, transparent 70%);
   animation: ss-skyflash 6.3s steps(60, end) infinite;
 }
 .ss-skyflash-2 {
-  background: radial-gradient(circle at 28% 25%, rgba(253, 244, 255, 0.65), rgba(168, 85, 247, 0.28) 35%, transparent 65%);
+  background: radial-gradient(circle at 28% 22%, rgba(240, 220, 255, 0.38), rgba(155, 115, 210, 0.16) 40%, transparent 70%);
   animation: ss-skyflash-fast 8.1s steps(60, end) infinite 1.4s;
 }
 .ss-skyflash-3 {
-  background: radial-gradient(circle at 74% 25%, rgba(253, 244, 255, 0.55), rgba(217, 70, 239, 0.25) 35%, transparent 65%);
+  background: radial-gradient(circle at 74% 22%, rgba(240, 220, 255, 0.32), rgba(168, 130, 220, 0.14) 40%, transparent 70%);
   animation: ss-skyflash 10.5s steps(60, end) infinite 3.6s;
 }
 
@@ -473,12 +473,13 @@ input[type="range"]::-moz-range-thumb {
 
 .ss-strike {
   opacity: 0;
-  /* Bright white core + layered purple halo */
+  /* Realistic bolt: tight white core, softer & cooler purple halo that
+     spreads into the clouds — less neon, more diffuse afterglow. */
   filter:
-    drop-shadow(0 0 2px #ffffff)
-    drop-shadow(0 0 8px #fdf4ff)
-    drop-shadow(0 0 18px #d946ef)
-    drop-shadow(0 0 38px #a855f7);
+    drop-shadow(0 0 1.5px #ffffff)
+    drop-shadow(0 0 6px rgba(253, 244, 255, 0.85))
+    drop-shadow(0 0 22px rgba(168, 130, 220, 0.55))
+    drop-shadow(0 0 50px rgba(124, 80, 180, 0.35));
 }
 /* Each strike uses its own duration & delay so the storm feels random */
 .ss-strike-1 { animation: ss-strike-flash      6.3s  steps(60, end) infinite; }
@@ -549,25 +550,39 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* Whole-UI upgrades when .super-saiyan is on the root.
-   NOTE: do NOT set `animation:` on .glass-card itself — many cards already
-   carry `fade-in-up*` which would be overridden, leaving them at opacity:0.
-   The pulsing aurora behind the page already supplies the energy. */
+   Forcing `opacity: 1` is essential — adding `animation: ss-card-breathe`
+   replaces the card's `fade-in-up*` animation, which would otherwise leave
+   `fade-in-up-delay-*` cards stuck at their static opacity:0 base. */
 .super-saiyan .glass-card {
-  background: rgba(76, 29, 149, 0.18);
-  border-color: rgba(217, 70, 239, 0.45);
-  box-shadow:
-    0 0 30px rgba(217, 70, 239, 0.45),
-    0 0 70px rgba(168, 85, 247, 0.28),
-    inset 0 0 20px rgba(168, 85, 247, 0.12);
+  opacity: 1;
+  background: rgba(60, 30, 110, 0.22);
+  border-color: rgba(180, 130, 220, 0.30);
+  animation: ss-card-breathe 8s ease-in-out infinite;
 }
 
+@keyframes ss-card-breathe {
+  0%, 100% {
+    box-shadow:
+      0 0 22px rgba(168, 85, 247, 0.28),
+      0 0 50px rgba(124, 58, 237, 0.16),
+      inset 0 0 14px rgba(168, 85, 247, 0.08);
+  }
+  50% {
+    box-shadow:
+      0 0 34px rgba(217, 70, 239, 0.40),
+      0 0 75px rgba(168, 85, 247, 0.24),
+      inset 0 0 20px rgba(168, 85, 247, 0.14);
+  }
+}
+
+/* Slow, breathing rhythm — way less twitchy than before */
 .super-saiyan .glow-purple {
-  animation: ss-button-zap 1.8s ease-in-out infinite;
+  animation: ss-button-zap 6s ease-in-out infinite;
 }
 
 .super-saiyan h2,
 .super-saiyan h3 {
-  animation: ss-text-flicker 2.4s ease-in-out infinite;
+  animation: ss-text-flicker 7s ease-in-out infinite;
 }
 
 .super-saiyan .progress-bar-inner {
@@ -580,14 +595,14 @@ input[type="range"]::-moz-range-thumb {
   filter: drop-shadow(0 0 4px rgba(240, 171, 252, 0.8));
 }
 
-/* Toggle when ON: it glows like a fuse */
+/* Toggle when ON: slow steady breathe instead of nervous flicker */
 .ss-toggle-on {
-  animation: ss-toggle-pulse 1.8s ease-in-out infinite;
+  animation: ss-toggle-pulse 5s ease-in-out infinite;
 }
 
 .ss-toggle-icon {
   filter: drop-shadow(0 0 6px rgba(240, 171, 252, 0.95)) drop-shadow(0 0 12px rgba(217, 70, 239, 0.7));
-  animation: ss-text-flicker 1.6s ease-in-out infinite;
+  animation: ss-text-flicker 5s ease-in-out infinite;
 }
 
 /* Respect users who prefer reduced motion: keep the look, kill the flicker */
