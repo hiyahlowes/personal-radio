@@ -33,7 +33,72 @@ const MAX_BUFFER_AGE_MS    = 30 * 60 * 1000; // flush stale entries after 30 min
 const FLUSH_INTERVAL_MS    = 15 * 60 * 1000; // 15-minute periodic flush
 const PAUSE_FLUSH_MS       = 5  * 60 * 1000; // flush after 5-min pause
 
+type NWCWalletServiceInfo = {
+  capabilities: string[];
+  encryptions: string[];
+  notifications: string[];
+};
+
+type NWCWebLNClient = import('@getalby/sdk').webln.NostrWebLNProvider & {
+  client: {
+    getWalletServiceInfo: () => Promise<NWCWalletServiceInfo>;
+    close: () => void;
+  };
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function parseNwcUrl(connString: string): URL {
+  const normalized = connString
+    .replace(/^nostrwalletconnect:\/\//, 'http://')
+    .replace(/^nostr\+walletconnect:\/\//, 'http://')
+    .replace(/^nostrwalletconnect:/, 'http://')
+    .replace(/^nostr\+walletconnect:/, 'http://');
+  return new URL(normalized);
+}
+
+function assertValidNwcConnectionString(connString: string): void {
+  if (!/^nostr(\+)?walletconnect:\/\//.test(connString) && !/^nostr(\+)?walletconnect:/.test(connString)) {
+    throw new Error('Invalid NWC URI protocol. Expected nostr+walletconnect://...');
+  }
+
+  const url = parseNwcUrl(connString);
+  if (!url.host) throw new Error('NWC URI is missing the wallet service pubkey');
+  if (!url.searchParams.get('secret')) throw new Error('NWC URI is missing the secret parameter');
+  if (url.searchParams.getAll('relay').length === 0) throw new Error('NWC URI is missing at least one relay parameter');
+}
+
+function nwcCandidates(connString: string): string[] {
+  const trimmed = connString.trim();
+  assertValidNwcConnectionString(trimmed);
+
+  const url = parseNwcUrl(trimmed);
+  const relays = [...new Set(url.searchParams.getAll('relay').filter(Boolean))];
+  if (relays.length <= 1) return [trimmed];
+
+  const candidates = [trimmed];
+  for (const relay of relays) {
+    const params = new URLSearchParams(url.searchParams);
+    params.delete('relay');
+    params.append('relay', relay);
+    candidates.push(`nostr+walletconnect://${url.host}${url.pathname === '/' ? '' : url.pathname}?${params.toString()}`);
+  }
+
+  return [...new Set(candidates)];
+}
+
+function isTimeoutLike(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.toLowerCase().includes('reply timeout') || msg.toLowerCase().includes('timed out') || msg.toLowerCase().includes('timeout');
+}
+
+function describeNwcConnectError(error: unknown): string {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (msg.includes('no info event (kind 13194)')) {
+    return 'No NWC info event (kind 13194) was found on the relay in this connection string. Recreate the NWC connection in your wallet or use the relay shown by the wallet.';
+  }
+  return msg;
+}
 
 /**
  * Retry a payment call up to `maxAttempts` times with linear backoff.
@@ -47,7 +112,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts: number, label: st
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // Timeout errors: every retry wastes another 60 s — fail fast instead
-      if (msg.toLowerCase().includes('reply timeout') || msg.toLowerCase().includes('timed out')) {
+      if (isTimeoutLike(e)) {
         throw e;
       }
       if (attempt < maxAttempts) {
@@ -238,7 +303,7 @@ export function useV4V() {
   const [hasPaymentErrors,   setHasPaymentErrors]  = useState(false);
 
   // ── Refs (mutable, not reactive) ───────────────────────────────────────────
-  const nwcClientRef       = useRef<import('@getalby/sdk').webln.NWC | null>(null);
+  const nwcClientRef       = useRef<NWCWebLNClient | null>(null);
   const bufferRef          = useRef<Map<string, PendingPayment>>(loadBuffer());
   const currentRecipientsRef = useRef<ValueRecipient[]>([]);
   const currentMetaRef     = useRef<ItemMeta | null>(null);
@@ -269,17 +334,19 @@ export function useV4V() {
 
     if (reason) console.log(`[V4V] flush triggered — reason: "${reason}"`);
 
-    // Health check — if the wallet is unreachable, skip the entire flush
-    try {
-      await (client as unknown as { getBalance: () => Promise<unknown> }).getBalance();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.toLowerCase().includes('reply timeout') || msg.toLowerCase().includes('timed out')) {
-        console.warn('[V4V] NWC wallet unreachable — skipping flush');
-        setHasPaymentErrors(true);
-        return result;
+    // Health check — only use get_balance when the wallet explicitly advertises it.
+    // Otherwise this creates noisy, non-actionable failures before every flush.
+    if (capabilities.includes('get_balance')) {
+      try {
+        await client.getBalance();
+      } catch (e) {
+        if (isTimeoutLike(e)) {
+          console.warn('[V4V] NWC wallet unreachable — skipping flush');
+          setHasPaymentErrors(true);
+          return result;
+        }
+        // Non-timeout errors from getBalance are non-fatal even when advertised.
       }
-      // Non-timeout errors from getBalance are non-fatal (wallet may not support it)
     }
 
     const now          = Date.now();
@@ -345,15 +412,17 @@ export function useV4V() {
         // Batch all keysends into one NWC request
         try {
           const keysends = keysendBatch.map(({ address, entry }) => ({
-            pubkey:     address,
-            amount:     entry.accumulatedSats,
-            tlv_records: tlvHex ? [{ type: 7629169, value: tlvHex }] : [],
+            destination:   address,
+            amount:        entry.accumulatedSats,
+            customRecords: {
+              ...(tlvHex ? { '7629169': tlvHex } : {}),
+              ...(entry.customRecords ?? {}),
+            },
           }));
           for (const { entry } of keysendBatch) {
             console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via keysend`);
           }
-          await (client as unknown as { multiKeysend: (p: unknown) => Promise<void> })
-            .multiKeysend({ keysends });
+          await client.multiKeysend(keysends);
           for (const { address, entry } of keysendBatch) {
             console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
@@ -526,33 +595,61 @@ export function useV4V() {
     setConnectError(null);
     try {
       const { webln } = await import('@getalby/sdk');
-      // Default replyTimeout is 10 s — far too short for Lightning routing plus
-      // LNURL resolution (which itself takes up to 20 s). Use 120 s.
-      const client = new webln.NWC({ nostrWalletConnectUrl: connString, replyTimeout: 120_000 });
-      await client.enable();
 
-      // Fetch wallet info / capabilities
-      let detectedMethods: string[] = [];
-      try {
-        const info = await client.getInfo();
-        setWalletAlias(info.node?.alias ?? null);
-        detectedMethods = (info as unknown as { methods?: string[] }).methods ?? [];
-        setCapabilities(detectedMethods);
-      } catch {
-        // Non-fatal — not all wallets support get_info
-        detectedMethods = ['pay_invoice', 'pay_keysend'];
-        setCapabilities(detectedMethods);
+      let lastError: unknown = null;
+      const candidates = nwcCandidates(connString);
+
+      for (const candidate of candidates) {
+        const client = new webln.NWC({
+          nostrWalletConnectUrl: candidate,
+        }) as NWCWebLNClient;
+
+        try {
+          await client.enable();
+
+          // NIP-47 requires the wallet service info event (kind 13194). Without it
+          // the SDK cannot reliably select NIP-44/NIP-04 encryption for requests.
+          const serviceInfo = await client.client.getWalletServiceInfo();
+          const detectedMethods = [...new Set(serviceInfo.capabilities.filter(Boolean))];
+
+          if (!detectedMethods.includes('pay_invoice')) {
+            throw new Error(`NWC wallet does not advertise pay_invoice. Capabilities: ${detectedMethods.join(', ') || 'none'}`);
+          }
+
+          let alias: string | null = null;
+          if (detectedMethods.includes('get_info')) {
+            try {
+              const info = await client.getInfo();
+              alias = info.node?.alias ?? null;
+            } catch (e) {
+              console.warn('[V4V] get_info request failed after service-info discovery:', e);
+            }
+          }
+
+          nwcClientRef.current?.close();
+          nwcClientRef.current = client;
+          setWalletAlias(alias);
+          setCapabilities(detectedMethods);
+          setConnectionString(candidate);
+          localStorage.setItem(NWC_CONN_KEY, candidate);
+          setIsConnected(true);
+          setIsConnecting(false);
+          console.log(`[V4V] connected — relay OK, wallet capabilities: ${detectedMethods.join(', ')}`);
+          return true;
+        } catch (e) {
+          lastError = e;
+          client.close();
+          console.warn('[V4V] NWC candidate failed:', describeNwcConnectError(e));
+        }
       }
 
-      nwcClientRef.current = client;
-      setConnectionString(connString);
-      localStorage.setItem(NWC_CONN_KEY, connString);
-      setIsConnected(true);
-      setIsConnecting(false);
-      console.log(`[V4V] connected — wallet capabilities: ${detectedMethods.join(', ')}`);
-      return true;
+      throw lastError ?? new Error('Unable to connect to NWC wallet');
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = describeNwcConnectError(e);
+      nwcClientRef.current?.close();
+      nwcClientRef.current = null;
+      setWalletAlias(null);
+      setCapabilities([]);
       setConnectError(msg);
       setIsConnected(false);
       setIsConnecting(false);
@@ -562,6 +659,7 @@ export function useV4V() {
   }, []);
 
   const disconnect = useCallback(() => {
+    nwcClientRef.current?.close();
     nwcClientRef.current = null;
     setIsConnected(false);
     setConnectionString(null);
