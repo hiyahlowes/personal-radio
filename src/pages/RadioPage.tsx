@@ -413,6 +413,48 @@ export function RadioPage() {
   // fired on audioRef while no listener was registered (e.g. during TTS playback).
   const howlerEndedRef = useRef(false);
 
+  const stopMusicHowls = useCallback((reason: string) => {
+    if (crossfadeTimerRef.current !== null) {
+      clearTimeout(crossfadeTimerRef.current);
+      crossfadeTimerRef.current = null;
+      console.log(`[Howler] crossfade cancelled — ${reason}`);
+    }
+    crossfadeActiveRef.current = false;
+    howlerEndedRef.current = false;
+    if (howlRef.current) {
+      howlRef.current.stop();
+      howlRef.current.unload();
+      howlRef.current = null;
+    }
+    if (nextHowlRef.current) {
+      nextHowlRef.current.stop();
+      nextHowlRef.current.unload();
+      nextHowlRef.current = null;
+    }
+  }, []);
+
+  const startMusicV4V = useCallback((track: WavlakeTrack) => {
+    const meta: ItemMeta = {
+      itemId: track.id,
+      itemTitle: track.name,
+      feedTitle: track.artist,
+      isEpisode: false,
+    };
+    v4vCurrentRef.current = { meta };
+    v4vRef.current.onPlay(buildWavlakeValueTag(track), meta);
+  }, []);
+
+  const startPodcastV4V = useCallback((episode: PodcastEpisode) => {
+    const meta: ItemMeta = {
+      itemId: episode.id,
+      itemTitle: episode.title,
+      feedTitle: episode.feedTitle,
+      isEpisode: true,
+    };
+    v4vCurrentRef.current = { meta };
+    v4vRef.current.onPlay(episode.valueTag, meta);
+  }, []);
+
   // Sync refs to latest state/props
   useEffect(() => { moderatorRef.current      = moderator;      }, [moderator]);
   useEffect(() => { listenerMemoryRef.current = listenerMemory; }, [listenerMemory]);
@@ -929,15 +971,9 @@ export function RadioPage() {
       // ── Transition: ambient bridge → moderator → fade → jingle → podcast ────
       podcastTransitionRef.current = true;
 
-      if (crossfadeTimerRef.current !== null) {
-        clearTimeout(crossfadeTimerRef.current);
-        crossfadeTimerRef.current = null;
-        console.log('[Howler] crossfade cancelled — podcast slot');
-      }
-
       // 1. Stop current music and find ambient bridge.
-      if (howlRef.current) { howlRef.current.stop(); console.log('[Howler] stopped for podcast transition'); }
-      if (nextHowlRef.current) { nextHowlRef.current.stop(); nextHowlRef.current = null; }
+      stopMusicHowls('podcast slot');
+      console.log('[Howler] stopped for podcast transition');
       audio.pause();
 
       const bridgePool  = ambientBridgeRef.current.length > 0
@@ -1077,7 +1113,6 @@ export function RadioPage() {
         {
           const meta: ItemMeta = { itemId: episode.id, itemTitle: episode.title, feedTitle: episode.feedTitle, isEpisode: true };
           v4vCurrentRef.current = { meta };
-          v4vRef.current.onTrackChange(episode.valueTag, meta);
         }
 
         let podStarted  = false;
@@ -1099,6 +1134,7 @@ export function RadioPage() {
           await pod.play();
           if (isIOS) console.log('[Podcast] iOS: play() resolved successfully');
           podStarted = true;
+          startPodcastV4V(episode);
           console.log(`[Podcast] volume after play: ${pod.volume}`);
           (Howler as any).ctx?.resume();
           console.log('[Loop] podcast play() resolved — podcast playing');
@@ -1272,11 +1308,7 @@ export function RadioPage() {
             setNowPlaying({ kind: 'music', track: nextMusicTrack });
             setCT(0); setDur(nextMusicTrack.duration || 0); setIdx(idxRef.current);
             listenerMemoryRef.current.recordSongStart(nextMusicTrack);
-            {
-              const meta: ItemMeta = { itemId: nextMusicTrack.id, itemTitle: nextMusicTrack.name, feedTitle: nextMusicTrack.artist, isEpisode: false };
-              v4vCurrentRef.current = { meta };
-              v4vRef.current.onTrackChange(buildWavlakeValueTag(nextMusicTrack), meta);
-            }
+            startMusicV4V(nextMusicTrack);
 
             if (!runningRef.current) { podcastTransitionRef.current = false; crossfadeActiveRef.current = true; return; }
 
@@ -1377,6 +1409,7 @@ export function RadioPage() {
         setIdx(currentIdx);
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
+        startMusicV4V(t);
         // Volume guard: promotion sets full volume, but the duck effect may have
         // fired during the async load. Correct immediately rather than waiting
         // for the speech/no-speech branch to ramp up from 0.08.
@@ -1399,6 +1432,7 @@ export function RadioPage() {
         try {
           await audio.play();
           console.log('[Loop] resume play() resolved');
+          startMusicV4V(t);
         } catch (e) {
           console.warn('[Loop] resume play() failed:', e);
         }
@@ -1417,11 +1451,6 @@ export function RadioPage() {
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
         listenerMemoryRef.current.recordSongStart(t);
-        {
-          const meta: ItemMeta = { itemId: t.id, itemTitle: t.name, feedTitle: t.artist, isEpisode: false };
-          v4vCurrentRef.current = { meta };
-          v4vRef.current.onTrackChange(buildWavlakeValueTag(t), meta);
-        }
 
         // Pre-load the next track so it's buffered before the crossfade window.
         // Do this early — before speech — so the browser has time to buffer.
@@ -1497,10 +1526,12 @@ export function RadioPage() {
           musicVolumeRef.current = DUCK_LEVEL;
           howl.play();
           console.log(`[Howler] playing: ${t.name}`);
+          startMusicV4V(t);
         } else {
           try {
             await audio.play();
             console.log('[Loop] audio.play() resolved at duck level');
+            startMusicV4V(t);
           } catch (e) {
             console.error('[Loop] audio.play() failed — skipping to next track:', e);
             // Skip to next track rather than freezing the loop.
@@ -1875,11 +1906,13 @@ export function RadioPage() {
     // speakXxx() promises resolve right away rather than after the full clip.
     runningRef.current = false;
     moderatorRef.current.stop();
+    stopMusicHowls('manual jump');
 
     // Stop both audio elements so no stale 'pause' event lingers on the wrong
     // element (e.g. podcast playing while we skip music).
     audioRef.current?.pause();
     podAudioRef.current?.pause();
+    v4vRef.current.onPause();
     // removeAttribute rather than .src = '' so that getAttribute('src') reliably
     // returns null/'' — the IDL property .src would otherwise return the document
     // base URL for an empty content attribute, breaking guards that check .src.
@@ -1980,15 +2013,10 @@ export function RadioPage() {
     }
 
     // Stop everything in flight
-    if (crossfadeTimerRef.current !== null) {
-      clearTimeout(crossfadeTimerRef.current);
-      crossfadeTimerRef.current = null;
-    }
-    howlRef.current?.stop();
-    nextHowlRef.current?.unload();
-    nextHowlRef.current = null;
+    stopMusicHowls('manual podcast start');
     audioRef.current?.pause();
     moderatorRef.current.stop();
+    v4vRef.current.onPause();
 
     // Discard any stale pre-generated blobs for the previous context
     if (nextIntroUrlRef.current)      { URL.revokeObjectURL(nextIntroUrlRef.current);      nextIntroUrlRef.current      = null; }
