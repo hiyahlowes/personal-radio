@@ -259,15 +259,24 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Super Saiyan mode — UI upgrade unlocked when V4V sat streaming is active
-   and the user has flipped the toggle. Default OFF, opt-in per session.
+   Super Saiyan mode — visual upgrade triggered by the toggle. Sits BEHIND
+   page content (FX layer at z-1, content wrapper is z-10) so the player
+   stays visible. Default OFF, opt-in per session.
    ──────────────────────────────────────────────────────────────────────── */
 
-@keyframes ss-haze-pulse {
-  0%, 100% { opacity: 0.55; transform: scale(1); }
-  50%      { opacity: 0.9;  transform: scale(1.05); }
+/* Slow drifting aurora gives the page a living purple glow */
+@keyframes ss-aurora-drift {
+  0%   { transform: translate(0%, 0%) scale(1); }
+  33%  { transform: translate(3%, -2%) scale(1.05); }
+  66%  { transform: translate(-2%, 2%) scale(1.02); }
+  100% { transform: translate(0%, 0%) scale(1); }
+}
+@keyframes ss-aurora-hue {
+  0%, 100% { filter: blur(70px) hue-rotate(0deg); }
+  50%      { filter: blur(70px) hue-rotate(-18deg); }
 }
 
+/* Card / button glow */
 @keyframes ss-glow-pulse {
   0%, 100% {
     box-shadow:
@@ -293,17 +302,55 @@ input[type="range"]::-moz-range-thumb {
   50%      { text-shadow: 0 0 12px rgba(240, 171, 252, 1),   0 0 24px rgba(217, 70, 239, 0.7); }
 }
 
-@keyframes ss-bolt-flicker {
-  0%, 24%, 28%, 64%, 68%, 100% { opacity: 0; }
-  25%, 27%                     { opacity: 1; }
-  65%, 67%                     { opacity: 0.85; }
+/* Real lightning is dark→bright→dark in ~80–200ms with a flicker.
+   Each strike runs on its own cycle so they fire at different cadences. */
+@keyframes ss-strike-flash {
+  0%, 100%               { opacity: 0; }
+  /* main strike */
+  88%                    { opacity: 0; }
+  89.0%                  { opacity: 1; }
+  89.6%                  { opacity: 0.25; }    /* mid flicker */
+  90.2%                  { opacity: 0.95; }
+  91.5%                  { opacity: 0.6; }     /* afterglow */
+  94%                    { opacity: 0.15; }
+  96%                    { opacity: 0; }
+}
+
+/* Each strike has its own offset & duration so the storm looks organic */
+@keyframes ss-strike-flash-fast {
+  0%, 100%   { opacity: 0; }
+  72%        { opacity: 0; }
+  72.4%      { opacity: 1; }
+  72.8%      { opacity: 0.3; }
+  73.4%      { opacity: 0.9; }
+  74.5%      { opacity: 0.4; }
+  76%        { opacity: 0; }
+}
+
+/* Sky-flash: full-screen tint that fires when a bolt strikes */
+@keyframes ss-skyflash {
+  0%, 100% { opacity: 0; }
+  88%      { opacity: 0; }
+  89%      { opacity: 0.45; }
+  90.5%    { opacity: 0.15; }
+  91.5%    { opacity: 0.35; }
+  93%      { opacity: 0.08; }
+  96%      { opacity: 0; }
+}
+@keyframes ss-skyflash-fast {
+  0%, 100% { opacity: 0; }
+  72%      { opacity: 0; }
+  72.5%    { opacity: 0.35; }
+  73.5%    { opacity: 0.08; }
+  74.5%    { opacity: 0.22; }
+  76%      { opacity: 0; }
 }
 
 @keyframes ss-burst {
-  0%   { opacity: 0;   transform: scale(0.4); }
-  12%  { opacity: 1;   transform: scale(1); }
-  35%  { opacity: 0.9; }
-  100% { opacity: 0;   transform: scale(2.4); }
+  0%   { opacity: 0;    transform: scale(0.3); }
+  10%  { opacity: 0.95; transform: scale(1); }
+  35%  { opacity: 0.6; }
+  100% { opacity: 0;    transform: scale(2.6); }
 }
 
 @keyframes ss-toggle-pulse {
@@ -311,49 +358,81 @@ input[type="range"]::-moz-range-thumb {
   50%      { box-shadow: 0 0 24px rgba(240, 171, 252, 0.9),  0 0 50px rgba(217, 70, 239, 0.55); }
 }
 
-/* FX overlay layer */
+/* FX overlay layer — sits BEHIND page content (z-1 < z-10 wrapper) */
 .ss-fx-layer {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: 5;
+  z-index: 1;
   overflow: hidden;
 }
 
-.ss-haze {
+/* Aurora — soft purple cloud drifting in the background */
+.ss-aurora {
   position: absolute;
-  inset: -10%;
+  inset: -15%;
   background:
-    radial-gradient(ellipse at 25% 20%, rgba(168, 85, 247, 0.35), transparent 55%),
-    radial-gradient(ellipse at 75% 80%, rgba(217, 70, 239, 0.28), transparent 60%),
-    radial-gradient(ellipse at 50% 50%, rgba(124, 58, 237, 0.18), transparent 70%);
-  filter: blur(40px);
-  animation: ss-haze-pulse 3.2s ease-in-out infinite;
-  mix-blend-mode: screen;
+    radial-gradient(ellipse 55% 45% at 20% 25%, rgba(168, 85, 247, 0.55), transparent 65%),
+    radial-gradient(ellipse 65% 50% at 80% 75%, rgba(217, 70, 239, 0.45), transparent 65%),
+    radial-gradient(ellipse 40% 35% at 50% 55%, rgba(124, 58, 237, 0.40), transparent 70%),
+    radial-gradient(ellipse 30% 25% at 70% 20%, rgba(192, 132, 252, 0.35), transparent 70%);
+  filter: blur(70px);
+  opacity: 0.85;
+  animation:
+    ss-aurora-drift 18s ease-in-out infinite,
+    ss-aurora-hue 8s ease-in-out infinite;
 }
 
-.ss-bolt {
+/* Sky-flash: full-viewport tints synced with strikes */
+.ss-skyflash {
   position: absolute;
-  width: auto;
-  filter: drop-shadow(0 0 6px #f0abfc) drop-shadow(0 0 14px #a855f7);
+  inset: 0;
+  pointer-events: none;
   opacity: 0;
 }
+.ss-skyflash-1 {
+  background: radial-gradient(circle at 18% 30%, rgba(253, 244, 255, 0.55), rgba(217, 70, 239, 0.25) 35%, transparent 65%);
+  animation: ss-skyflash 6.3s steps(60, end) infinite;
+}
+.ss-skyflash-2 {
+  background: radial-gradient(circle at 84% 28%, rgba(253, 244, 255, 0.55), rgba(168, 85, 247, 0.25) 35%, transparent 65%);
+  animation: ss-skyflash-fast 8.1s steps(60, end) infinite 1.4s;
+}
+.ss-skyflash-3 {
+  background: radial-gradient(circle at 50% 18%, rgba(253, 244, 255, 0.4), rgba(217, 70, 239, 0.2) 35%, transparent 65%);
+  animation: ss-skyflash 10.5s steps(60, end) infinite 3.6s;
+}
 
-.ss-bolt-1 { top: -2vh; left: 12%;  height: 48vh; animation: ss-bolt-flicker 5.5s ease-in-out infinite; }
-.ss-bolt-2 { top: -2vh; right: 16%; height: 62vh; animation: ss-bolt-flicker 7.1s ease-in-out infinite 1.7s; }
-.ss-bolt-3 { top: -2vh; left: 62%;  height: 38vh; animation: ss-bolt-flicker 6.3s ease-in-out infinite 3.4s; }
+/* Lightning canvas — single SVG spanning the viewport */
+.ss-bolts {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ss-strike {
+  opacity: 0;
+  /* Halo behind each strike — drop-shadow on the group adds layered glow */
+  filter: drop-shadow(0 0 4px #fdf4ff) drop-shadow(0 0 14px #d946ef) drop-shadow(0 0 30px #a855f7);
+}
+/* Each strike uses its own duration & delay so the storm feels random */
+.ss-strike-1 { animation: ss-strike-flash      6.3s  steps(60, end) infinite; }
+.ss-strike-2 { animation: ss-strike-flash      8.1s  steps(60, end) infinite 1.4s; }
+.ss-strike-3 { animation: ss-strike-flash      10.5s steps(60, end) infinite 3.6s; }
+.ss-strike-4 { animation: ss-strike-flash-fast 5.4s  steps(60, end) infinite 2.1s; }
+.ss-strike-5 { animation: ss-strike-flash-fast 7.7s  steps(60, end) infinite 4.8s; }
 
 .ss-burst {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 50% 40%,
-      rgba(253, 244, 255, 0.9) 0%,
-      rgba(240, 171, 252, 0.6) 18%,
-      rgba(168, 85, 247, 0.35) 38%,
-      transparent 65%);
-  animation: ss-burst 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  mix-blend-mode: screen;
+    radial-gradient(circle at 50% 12%,
+      rgba(253, 244, 255, 0.85) 0%,
+      rgba(240, 171, 252, 0.55) 12%,
+      rgba(168, 85, 247, 0.30) 30%,
+      transparent 55%);
+  animation: ss-burst 0.95s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 /* Whole-UI upgrades when .super-saiyan is on the root */
@@ -398,11 +477,14 @@ input[type="range"]::-moz-range-thumb {
   .super-saiyan .glow-purple,
   .super-saiyan h2,
   .super-saiyan h3,
-  .ss-haze,
-  .ss-bolt,
+  .ss-aurora,
+  .ss-skyflash,
+  .ss-strike,
   .ss-toggle-on,
   .ss-toggle-icon {
     animation: none !important;
   }
+  .ss-strike { opacity: 0.25; }
+  .ss-skyflash { opacity: 0.1; }
   .ss-burst { animation-duration: 0.4s; }
 }

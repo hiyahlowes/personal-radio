@@ -2213,30 +2213,86 @@ export function RadioPage() {
         <div className="absolute bottom-0 right-1/3 w-80 h-80 bg-violet-900/20 rounded-full blur-3xl" />
       </div>
 
-      {/* Super Saiyan FX layer — only rendered while the toggle is ON */}
+      {/* Super Saiyan FX layer — only rendered while the toggle is ON.
+          Sits BEHIND the page content (z-1) so it never covers the player. */}
       {superSaiyan && (
         <div className="ss-fx-layer" aria-hidden="true">
-          {/* Pulsing purple haze */}
-          <div className="ss-haze" />
-          {/* Lightning bolts */}
-          <svg className="ss-bolt ss-bolt-1" viewBox="0 0 20 200">
-            <polyline points="10,0 6,40 12,60 4,110 14,140 8,200" fill="none" stroke="url(#ssGrad)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          {/* Drifting purple aurora behind everything */}
+          <div className="ss-aurora" />
+          {/* Sky-flash overlay that pulses in sync with strikes */}
+          <div className="ss-skyflash ss-skyflash-1" />
+          <div className="ss-skyflash ss-skyflash-2" />
+          <div className="ss-skyflash ss-skyflash-3" />
+
+          {/* Lightning bolts — realistic jagged paths with branching forks.
+              Single SVG canvas spanning viewport so coords line up. */}
+          <svg className="ss-bolts" viewBox="0 0 1000 1000" preserveAspectRatio="none">
             <defs>
-              <linearGradient id="ssGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%"  stopColor="#fdf4ff" stopOpacity="0" />
-                <stop offset="40%" stopColor="#f0abfc" stopOpacity="1" />
-                <stop offset="80%" stopColor="#c084fc" stopOpacity="1" />
-                <stop offset="100%" stopColor="#7c3aed" stopOpacity="0" />
-              </linearGradient>
+              <filter id="ssGlowFilter" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="4" result="b1" />
+                <feGaussianBlur stdDeviation="10" in="SourceGraphic" result="b2" />
+                <feMerge>
+                  <feMergeNode in="b2" />
+                  <feMergeNode in="b1" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
             </defs>
+
+            {/* Strike 1 — left side, two forks */}
+            <g className="ss-strike ss-strike-1" filter="url(#ssGlowFilter)">
+              <path d="M160 -20 L148 70 L172 130 L142 200 L178 270 L148 340 L182 410 L150 490 L188 560 L152 640 L184 720 L150 810 L180 900 L150 1020"
+                stroke="#fdf4ff" strokeWidth="2.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              {/* fork off upper */}
+              <path d="M172 130 L210 180 L196 230 L240 285 L222 330"
+                stroke="#f0abfc" strokeWidth="1.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.85" />
+              {/* fork off lower */}
+              <path d="M150 490 L108 540 L130 590 L92 650"
+                stroke="#f0abfc" strokeWidth="1.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.8" />
+              {/* tiny fork */}
+              <path d="M184 720 L218 760 L204 800"
+                stroke="#e9d5ff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.7" />
+            </g>
+
+            {/* Strike 2 — right side */}
+            <g className="ss-strike ss-strike-2" filter="url(#ssGlowFilter)">
+              <path d="M870 -20 L854 60 L884 130 L840 210 L876 280 L844 360 L884 430 L848 510 L882 590 L846 670 L878 750 L848 840 L880 920 L848 1020"
+                stroke="#fdf4ff" strokeWidth="2.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              <path d="M876 280 L920 330 L900 380 L944 440"
+                stroke="#f0abfc" strokeWidth="1.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.85" />
+              <path d="M848 510 L808 560 L824 620 L788 690"
+                stroke="#f0abfc" strokeWidth="1.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.8" />
+            </g>
+
+            {/* Strike 3 — center, narrower */}
+            <g className="ss-strike ss-strike-3" filter="url(#ssGlowFilter)">
+              <path d="M510 -20 L494 60 L522 120 L486 190 L520 250 L488 320 L520 390 L488 460 L522 530 L490 610 L520 690 L488 780 L518 870 L490 1020"
+                stroke="#fdf4ff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              <path d="M520 250 L560 290 L548 340 L588 390"
+                stroke="#e9d5ff" strokeWidth="1.3" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.8" />
+              <path d="M520 690 L478 740 L490 790"
+                stroke="#e9d5ff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.75" />
+            </g>
+
+            {/* Strike 4 — quick flicker between the others */}
+            <g className="ss-strike ss-strike-4" filter="url(#ssGlowFilter)">
+              <path d="M340 -20 L324 50 L356 120 L322 200 L358 270 L324 350 L356 430 L322 510 L356 590 L324 670 L356 750 L322 840 L350 1020"
+                stroke="#fdf4ff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              <path d="M358 270 L396 320 L378 370"
+                stroke="#f0abfc" strokeWidth="1.3" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.75" />
+            </g>
+
+            {/* Strike 5 — short bolt near top right */}
+            <g className="ss-strike ss-strike-5" filter="url(#ssGlowFilter)">
+              <path d="M720 -20 L706 60 L732 110 L698 180 L732 240 L702 310 L728 380"
+                stroke="#fdf4ff" strokeWidth="1.8" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              <path d="M732 240 L770 280 L756 320"
+                stroke="#e9d5ff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.7" />
+            </g>
           </svg>
-          <svg className="ss-bolt ss-bolt-2" viewBox="0 0 20 200">
-            <polyline points="10,0 14,30 6,70 16,100 8,140 12,200" fill="none" stroke="#f0abfc" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-          </svg>
-          <svg className="ss-bolt ss-bolt-3" viewBox="0 0 20 200">
-            <polyline points="10,0 8,50 14,90 4,130 12,180 8,200" fill="none" stroke="#e879f9" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-          </svg>
-          {/* Activation burst — re-mounts on every OFF→ON via key */}
+
+          {/* Activation burst — re-mounts on every OFF→ON via key.
+              Radiates from the top center where the toggle sits. */}
           <div key={ssBurstKey} className="ss-burst" />
         </div>
       )}
@@ -2283,29 +2339,29 @@ export function RadioPage() {
           </div>
         )}
 
-        {/* Super Saiyan toggle — only when V4V wallet is connected. Sat streaming earns the visual upgrade. */}
-        {v4v.isConnected && (
-          <div className="fade-in-up-delay-1 flex justify-center">
-            <button
-              onClick={toggleSuperSaiyan}
-              aria-pressed={superSaiyan}
-              className={`ss-toggle group relative flex items-center gap-3 px-4 py-2 rounded-full border transition-all
-                ${superSaiyan
-                  ? 'ss-toggle-on bg-gradient-to-r from-fuchsia-600/30 via-purple-600/30 to-violet-600/30 border-fuchsia-400/60 text-fuchsia-100'
-                  : 'bg-white/5 border-white/10 text-white/60 hover:border-purple-400/40 hover:text-white/80'}`}
-            >
-              <span className={`text-base leading-none ${superSaiyan ? 'ss-toggle-icon' : 'opacity-60'}`}>⚡</span>
-              <span className="text-[11px] font-semibold tracking-[0.18em] uppercase">
-                {superSaiyan ? 'Super Saiyan · ON' : 'Activate Super Saiyan'}
-              </span>
-              <span className={`relative inline-block w-9 h-5 rounded-full transition-colors ${superSaiyan ? 'bg-fuchsia-500/80' : 'bg-white/15'}`}>
-                <span
-                  className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${superSaiyan ? 'left-[18px] shadow-[0_0_10px_rgba(255,255,255,0.9)]' : 'left-0.5'}`}
-                />
-              </span>
-            </button>
-          </div>
-        )}
+        {/* Super Saiyan toggle — always available from page load so the user can
+            arm the visual upgrade before any song starts. The actual sat streaming
+            still requires a connected NWC wallet, but the toggle itself doesn't gate on that. */}
+        <div className="fade-in-up-delay-1 flex justify-center">
+          <button
+            onClick={toggleSuperSaiyan}
+            aria-pressed={superSaiyan}
+            className={`ss-toggle group relative flex items-center gap-3 px-4 py-2 rounded-full border transition-all
+              ${superSaiyan
+                ? 'ss-toggle-on bg-gradient-to-r from-fuchsia-600/30 via-purple-600/30 to-violet-600/30 border-fuchsia-400/60 text-fuchsia-100'
+                : 'bg-white/5 border-white/10 text-white/60 hover:border-purple-400/40 hover:text-white/80'}`}
+          >
+            <span className={`text-base leading-none ${superSaiyan ? 'ss-toggle-icon' : 'opacity-60'}`}>⚡</span>
+            <span className="text-[11px] font-semibold tracking-[0.18em] uppercase">
+              {superSaiyan ? 'Super Saiyan · ON' : 'Activate Super Saiyan'}
+            </span>
+            <span className={`relative inline-block w-9 h-5 rounded-full transition-colors ${superSaiyan ? 'bg-fuchsia-500/80' : 'bg-white/15'}`}>
+              <span
+                className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${superSaiyan ? 'left-[18px] shadow-[0_0_10px_rgba(255,255,255,0.9)]' : 'left-0.5'}`}
+              />
+            </span>
+          </button>
+        </div>
 
         {/* Player card */}
         <div className="fade-in-up-delay-2 glass-card rounded-3xl p-6">
