@@ -435,11 +435,17 @@ input[type="range"]::-moz-range-thumb {
   animation: ss-burst 0.95s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* Whole-UI upgrades when .super-saiyan is on the root */
+/* Whole-UI upgrades when .super-saiyan is on the root.
+   NOTE: do NOT set `animation:` on .glass-card itself — many cards already
+   carry `fade-in-up*` which would be overridden, leaving them at opacity:0.
+   The pulsing aurora behind the page already supplies the energy. */
 .super-saiyan .glass-card {
   background: rgba(76, 29, 149, 0.18);
   border-color: rgba(217, 70, 239, 0.45);
-  animation: ss-glow-pulse 2.6s ease-in-out infinite;
+  box-shadow:
+    0 0 30px rgba(217, 70, 239, 0.45),
+    0 0 70px rgba(168, 85, 247, 0.28),
+    inset 0 0 20px rgba(168, 85, 247, 0.12);
 }
 
 .super-saiyan .glow-purple {
