@@ -955,7 +955,7 @@ export function SettingsPage() {
                 </div>
               )}
               {v4v.connectError && (
-                <p className="text-xs text-red-400">⚠ {v4v.connectError}</p>
+                <p className="text-xs text-red-400 break-words">⚠ {v4v.connectError}</p>
               )}
             </div>
 

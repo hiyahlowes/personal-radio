@@ -68,6 +68,18 @@ function assertValidNwcConnectionString(connString: string): void {
   if (url.searchParams.getAll('relay').length === 0) throw new Error('NWC URI is missing at least one relay parameter');
 }
 
+function getNwcConnectionTarget(connString: string): { walletPubkey: string; relays: string[] } {
+  const url = parseNwcUrl(connString);
+  return {
+    walletPubkey: url.host,
+    relays: [...new Set(url.searchParams.getAll('relay').filter(Boolean))],
+  };
+}
+
+function shortNwcPubkey(pubkey: string): string {
+  return pubkey.length > 16 ? `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}` : pubkey;
+}
+
 function nwcCandidates(connString: string): string[] {
   const trimmed = connString.trim();
   assertValidNwcConnectionString(trimmed);
@@ -76,15 +88,12 @@ function nwcCandidates(connString: string): string[] {
   const relays = [...new Set(url.searchParams.getAll('relay').filter(Boolean))];
   if (relays.length <= 1) return [trimmed];
 
-  const candidates = [trimmed];
-  for (const relay of relays) {
+  return relays.map((relay) => {
     const params = new URLSearchParams(url.searchParams);
     params.delete('relay');
     params.append('relay', relay);
-    candidates.push(`nostr+walletconnect://${url.host}${url.pathname === '/' ? '' : url.pathname}?${params.toString()}`);
-  }
-
-  return [...new Set(candidates)];
+    return `nostr+walletconnect://${url.host}${url.pathname === '/' ? '' : url.pathname}?${params.toString()}`;
+  });
 }
 
 function isTimeoutLike(error: unknown): boolean {
@@ -92,10 +101,12 @@ function isTimeoutLike(error: unknown): boolean {
   return msg.toLowerCase().includes('reply timeout') || msg.toLowerCase().includes('timed out') || msg.toLowerCase().includes('timeout');
 }
 
-function describeNwcConnectError(error: unknown): string {
+function describeNwcConnectError(error: unknown, target?: { walletPubkey: string; relays: string[] }): string {
   const msg = error instanceof Error ? error.message : String(error);
   if (msg.includes('no info event (kind 13194)')) {
-    return 'No NWC info event (kind 13194) was found on the relay in this connection string. Recreate the NWC connection in your wallet or use the relay shown by the wallet.';
+    const relayList = target?.relays.length ? ` Checked: ${target.relays.join(', ')}.` : '';
+    const wallet = target?.walletPubkey ? ` for wallet ${shortNwcPubkey(target.walletPubkey)}` : '';
+    return `No NWC info event (kind 13194) was found${wallet}.${relayList} Recreate the NWC connection in your wallet and paste the exact connection string, including the relay URL shown by the wallet.`;
   }
   return msg;
 }
@@ -600,6 +611,9 @@ export function useV4V() {
       const candidates = nwcCandidates(connString);
 
       for (const candidate of candidates) {
+        const target = getNwcConnectionTarget(candidate);
+        console.log(`[V4V] trying NWC relay ${target.relays[0] ?? 'unknown'} for wallet ${shortNwcPubkey(target.walletPubkey)}`);
+
         const client = new webln.NWC({
           nostrWalletConnectUrl: candidate,
         }) as NWCWebLNClient;
@@ -639,13 +653,20 @@ export function useV4V() {
         } catch (e) {
           lastError = e;
           client.close();
-          console.warn('[V4V] NWC candidate failed:', describeNwcConnectError(e));
+          console.warn('[V4V] NWC candidate failed:', describeNwcConnectError(e, target));
         }
       }
 
       throw lastError ?? new Error('Unable to connect to NWC wallet');
     } catch (e) {
-      const msg = describeNwcConnectError(e);
+      const target = (() => {
+        try {
+          return getNwcConnectionTarget(connString.trim());
+        } catch {
+          return undefined;
+        }
+      })();
+      const msg = describeNwcConnectError(e, target);
       nwcClientRef.current?.close();
       nwcClientRef.current = null;
       setWalletAlias(null);

@@ -571,7 +571,7 @@ export function SetupPage() {
                 </p>
               )}
               {v4v.connectError && (
-                <p className="text-xs text-red-400 text-center">⚠ {v4v.connectError}</p>
+                <p className="text-xs text-red-400 text-center break-words">⚠ {v4v.connectError}</p>
               )}
             </div>
 
