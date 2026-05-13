@@ -2214,24 +2214,35 @@ export function RadioPage() {
       </div>
 
       {/* Super Saiyan FX layer — only rendered while the toggle is ON.
-          Sits BEHIND the page content (z-1) so it never covers the player. */}
+          Sits BEHIND the page content (z-1) so it never covers the player.
+          Visual recipe: dark purple sky, billowing fog/clouds, dramatic
+          forking lightning, sparkle bursts where bolts hit the clouds,
+          whole-sky flashes synced with each strike. */}
       {superSaiyan && (
         <div className="ss-fx-layer" aria-hidden="true">
-          {/* Drifting purple aurora behind everything */}
-          <div className="ss-aurora" />
-          {/* Sky-flash overlay that pulses in sync with strikes */}
+          {/* Cloud / fog layer — multiple soft purple blobs that drift slowly */}
+          <div className="ss-cloud ss-cloud-1" />
+          <div className="ss-cloud ss-cloud-2" />
+          <div className="ss-cloud ss-cloud-3" />
+          <div className="ss-cloud ss-cloud-4" />
+          <div className="ss-cloud ss-cloud-5" />
+
+          {/* Whole-sky illumination — fires in sync with each strike */}
           <div className="ss-skyflash ss-skyflash-1" />
           <div className="ss-skyflash ss-skyflash-2" />
           <div className="ss-skyflash ss-skyflash-3" />
 
-          {/* Lightning bolts — realistic jagged paths with branching forks.
-              Single SVG canvas spanning viewport so coords line up. */}
+          {/* Lightning — dramatic forks. preserveAspectRatio="none" stretches
+              the SVG to fill any viewport; jagged paths take the distortion
+              well and side-strikes never get cropped on narrow phones. */}
           <svg className="ss-bolts" viewBox="0 0 1000 1000" preserveAspectRatio="none">
             <defs>
               <filter id="ssGlowFilter" x="-50%" y="-50%" width="200%" height="200%">
-                <feGaussianBlur stdDeviation="4" result="b1" />
-                <feGaussianBlur stdDeviation="10" in="SourceGraphic" result="b2" />
+                <feGaussianBlur stdDeviation="3" result="b1" />
+                <feGaussianBlur stdDeviation="9" in="SourceGraphic" result="b2" />
+                <feGaussianBlur stdDeviation="20" in="SourceGraphic" result="b3" />
                 <feMerge>
+                  <feMergeNode in="b3" />
                   <feMergeNode in="b2" />
                   <feMergeNode in="b1" />
                   <feMergeNode in="SourceGraphic" />
@@ -2239,60 +2250,126 @@ export function RadioPage() {
               </filter>
             </defs>
 
-            {/* Strike 1 — left side, two forks */}
+            {/* Strike 1 — center, biggest bolt with many forks */}
             <g className="ss-strike ss-strike-1" filter="url(#ssGlowFilter)">
-              <path d="M160 -20 L148 70 L172 130 L142 200 L178 270 L148 340 L182 410 L150 490 L188 560 L152 640 L184 720 L150 810 L180 900 L150 1020"
-                stroke="#fdf4ff" strokeWidth="2.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              {/* fork off upper */}
-              <path d="M172 130 L210 180 L196 230 L240 285 L222 330"
-                stroke="#f0abfc" strokeWidth="1.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.85" />
-              {/* fork off lower */}
-              <path d="M150 490 L108 540 L130 590 L92 650"
-                stroke="#f0abfc" strokeWidth="1.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.8" />
-              {/* tiny fork */}
-              <path d="M184 720 L218 760 L204 800"
-                stroke="#e9d5ff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.7" />
+              {/* main bolt, top to clouds */}
+              <path d="M 500 0 L 488 60 L 514 120 L 478 180 L 522 240 L 484 310 L 528 380 L 488 450 L 532 520 L 500 600"
+                stroke="#ffffff" strokeWidth="3" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              {/* major fork — upper left */}
+              <path d="M 488 60 L 430 100 L 452 140 L 390 180 L 416 220 L 360 260"
+                stroke="#ffffff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              {/* major fork — upper right */}
+              <path d="M 514 120 L 580 160 L 552 200 L 620 240 L 588 280 L 660 320"
+                stroke="#ffffff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              {/* mid twigs */}
+              <path d="M 478 180 L 444 220 L 460 250" stroke="#ffffff" strokeWidth="1.3" fill="none" />
+              <path d="M 522 240 L 568 280 L 548 310" stroke="#ffffff" strokeWidth="1.4" fill="none" />
+              <path d="M 484 310 L 430 350 L 452 390" stroke="#ffffff" strokeWidth="1.3" fill="none" />
+              <path d="M 528 380 L 580 420 L 555 460 L 600 500" stroke="#ffffff" strokeWidth="1.6" fill="none" />
+              <path d="M 488 450 L 440 490 L 460 530 L 410 570" stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              {/* impact splash near clouds */}
+              <path d="M 500 600 L 560 640 L 530 670 L 590 700" stroke="#ffffff" strokeWidth="1.6" fill="none" />
+              <path d="M 500 600 L 440 640 L 470 670 L 420 700" stroke="#ffffff" strokeWidth="1.6" fill="none" />
+              <path d="M 500 600 L 500 680 L 480 710" stroke="#ffffff" strokeWidth="1.3" fill="none" />
+              <path d="M 500 600 L 520 660 L 540 690" stroke="#ffffff" strokeWidth="1.2" fill="none" />
             </g>
 
-            {/* Strike 2 — right side */}
+            {/* Strike 2 — left side */}
             <g className="ss-strike ss-strike-2" filter="url(#ssGlowFilter)">
-              <path d="M870 -20 L854 60 L884 130 L840 210 L876 280 L844 360 L884 430 L848 510 L882 590 L846 670 L878 750 L848 840 L880 920 L848 1020"
-                stroke="#fdf4ff" strokeWidth="2.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              <path d="M876 280 L920 330 L900 380 L944 440"
-                stroke="#f0abfc" strokeWidth="1.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.85" />
-              <path d="M848 510 L808 560 L824 620 L788 690"
-                stroke="#f0abfc" strokeWidth="1.4" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.8" />
+              <path d="M 280 0 L 270 60 L 295 110 L 265 170 L 305 230 L 270 290 L 315 360 L 275 430 L 320 510 L 290 600"
+                stroke="#ffffff" strokeWidth="2.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              <path d="M 295 110 L 240 150 L 260 190 L 200 230 L 220 270"
+                stroke="#ffffff" strokeWidth="1.7" fill="none" />
+              <path d="M 265 170 L 320 200 L 295 240 L 350 270"
+                stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              <path d="M 305 230 L 240 270 L 268 310 L 220 350"
+                stroke="#ffffff" strokeWidth="1.4" fill="none" />
+              <path d="M 270 290 L 330 320 L 300 360" stroke="#ffffff" strokeWidth="1.3" fill="none" />
+              <path d="M 315 360 L 250 400 L 270 440 L 220 480"
+                stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              <path d="M 275 430 L 350 470 L 320 510 L 380 550" stroke="#ffffff" strokeWidth="1.6" fill="none" />
+              {/* impact */}
+              <path d="M 290 600 L 360 650 L 330 680 L 400 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              <path d="M 290 600 L 230 650 L 260 680 L 210 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              <path d="M 290 600 L 290 700 L 270 730" stroke="#ffffff" strokeWidth="1.3" fill="none" />
             </g>
 
-            {/* Strike 3 — center, narrower */}
+            {/* Strike 3 — right side */}
             <g className="ss-strike ss-strike-3" filter="url(#ssGlowFilter)">
-              <path d="M510 -20 L494 60 L522 120 L486 190 L520 250 L488 320 L520 390 L488 460 L522 530 L490 610 L520 690 L488 780 L518 870 L490 1020"
-                stroke="#fdf4ff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              <path d="M520 250 L560 290 L548 340 L588 390"
-                stroke="#e9d5ff" strokeWidth="1.3" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.8" />
-              <path d="M520 690 L478 740 L490 790"
-                stroke="#e9d5ff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.75" />
-            </g>
-
-            {/* Strike 4 — quick flicker between the others */}
-            <g className="ss-strike ss-strike-4" filter="url(#ssGlowFilter)">
-              <path d="M340 -20 L324 50 L356 120 L322 200 L358 270 L324 350 L356 430 L322 510 L356 590 L324 670 L356 750 L322 840 L350 1020"
-                stroke="#fdf4ff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              <path d="M358 270 L396 320 L378 370"
-                stroke="#f0abfc" strokeWidth="1.3" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.75" />
-            </g>
-
-            {/* Strike 5 — short bolt near top right */}
-            <g className="ss-strike ss-strike-5" filter="url(#ssGlowFilter)">
-              <path d="M720 -20 L706 60 L732 110 L698 180 L732 240 L702 310 L728 380"
-                stroke="#fdf4ff" strokeWidth="1.8" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              <path d="M732 240 L770 280 L756 320"
-                stroke="#e9d5ff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.7" />
+              <path d="M 740 0 L 752 60 L 720 130 L 760 200 L 720 280 L 765 350 L 720 430 L 770 510 L 730 600"
+                stroke="#ffffff" strokeWidth="2.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              <path d="M 720 130 L 670 170 L 690 210 L 640 250 L 660 290"
+                stroke="#ffffff" strokeWidth="1.6" fill="none" />
+              <path d="M 760 200 L 820 240 L 790 280 L 860 320"
+                stroke="#ffffff" strokeWidth="1.6" fill="none" />
+              <path d="M 720 280 L 660 320 L 685 360 L 630 400"
+                stroke="#ffffff" strokeWidth="1.4" fill="none" />
+              <path d="M 765 350 L 830 390 L 800 430 L 870 470"
+                stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              <path d="M 720 430 L 660 470 L 690 510" stroke="#ffffff" strokeWidth="1.4" fill="none" />
+              <path d="M 770 510 L 830 550 L 800 590" stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              {/* impact */}
+              <path d="M 730 600 L 800 650 L 770 680 L 830 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              <path d="M 730 600 L 670 650 L 700 680 L 650 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
+              <path d="M 730 600 L 730 700 L 750 730" stroke="#ffffff" strokeWidth="1.3" fill="none" />
             </g>
           </svg>
 
-          {/* Activation burst — re-mounts on every OFF→ON via key.
-              Radiates from the top center where the toggle sits. */}
+          {/* Sparkle bursts — fire at each strike's impact point inside the clouds */}
+          <div className="ss-sparks ss-sparks-1">
+            {Array.from({ length: 18 }).map((_, i) => {
+              const angle = (Math.PI * 2 * i) / 18 + (i % 2 === 0 ? 0.2 : -0.1);
+              const dist = 28 + (i % 4) * 14;
+              return (
+                <span
+                  key={i}
+                  className="ss-spark"
+                  style={{
+                    // CSS custom props drive the burst direction & timing
+                    ['--dx' as string]: `${Math.cos(angle) * dist}px`,
+                    ['--dy' as string]: `${Math.sin(angle) * dist - 12}px`,
+                    ['--d' as string]: `${(i * 13) % 220}ms`,
+                  } as React.CSSProperties}
+                />
+              );
+            })}
+          </div>
+          <div className="ss-sparks ss-sparks-2">
+            {Array.from({ length: 14 }).map((_, i) => {
+              const angle = (Math.PI * 2 * i) / 14 + 0.4;
+              const dist = 22 + (i % 3) * 12;
+              return (
+                <span
+                  key={i}
+                  className="ss-spark"
+                  style={{
+                    ['--dx' as string]: `${Math.cos(angle) * dist}px`,
+                    ['--dy' as string]: `${Math.sin(angle) * dist - 8}px`,
+                    ['--d' as string]: `${(i * 19) % 200}ms`,
+                  } as React.CSSProperties}
+                />
+              );
+            })}
+          </div>
+          <div className="ss-sparks ss-sparks-3">
+            {Array.from({ length: 14 }).map((_, i) => {
+              const angle = (Math.PI * 2 * i) / 14 - 0.3;
+              const dist = 24 + (i % 3) * 12;
+              return (
+                <span
+                  key={i}
+                  className="ss-spark"
+                  style={{
+                    ['--dx' as string]: `${Math.cos(angle) * dist}px`,
+                    ['--dy' as string]: `${Math.sin(angle) * dist - 8}px`,
+                    ['--d' as string]: `${(i * 23) % 200}ms`,
+                  } as React.CSSProperties}
+                />
+              );
+            })}
+          </div>
+
+          {/* Activation burst — re-mounts on every OFF→ON via key */}
           <div key={ssBurstKey} className="ss-burst" />
         </div>
       )}

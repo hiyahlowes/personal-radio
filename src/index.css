@@ -264,16 +264,19 @@ input[type="range"]::-moz-range-thumb {
    stays visible. Default OFF, opt-in per session.
    ──────────────────────────────────────────────────────────────────────── */
 
-/* Slow drifting aurora gives the page a living purple glow */
-@keyframes ss-aurora-drift {
-  0%   { transform: translate(0%, 0%) scale(1); }
-  33%  { transform: translate(3%, -2%) scale(1.05); }
-  66%  { transform: translate(-2%, 2%) scale(1.02); }
-  100% { transform: translate(0%, 0%) scale(1); }
+/* Slow drifting clouds — each cloud has its own keyframe so the storm
+   never looks like it's marching in formation. */
+@keyframes ss-cloud-drift-a {
+  0%, 100% { transform: translate(0%, 0%) scale(1); }
+  50%      { transform: translate(6%, -3%) scale(1.08); }
 }
-@keyframes ss-aurora-hue {
-  0%, 100% { filter: blur(70px) hue-rotate(0deg); }
-  50%      { filter: blur(70px) hue-rotate(-18deg); }
+@keyframes ss-cloud-drift-b {
+  0%, 100% { transform: translate(0%, 0%) scale(1); }
+  50%      { transform: translate(-5%, 2%) scale(1.06); }
+}
+@keyframes ss-cloud-drift-c {
+  0%, 100% { transform: translate(0%, 0%) scale(1.02); }
+  50%      { transform: translate(3%, 3%) scale(1.10); }
 }
 
 /* Card / button glow */
@@ -367,20 +370,76 @@ input[type="range"]::-moz-range-thumb {
   overflow: hidden;
 }
 
-/* Aurora — soft purple cloud drifting in the background */
-.ss-aurora {
+/* Cloud / fog layer — each .ss-cloud is a soft purple blob with heavy blur.
+   Multiple stacked clouds at different positions and drift rates give the
+   billowing-fog look. mix-blend-mode: screen brightens the underlying sky
+   without darkening the page. */
+.ss-cloud {
   position: absolute;
-  inset: -15%;
+  border-radius: 50%;
+  filter: blur(50px);
+  mix-blend-mode: screen;
+  will-change: transform;
+}
+
+/* Bottom-spanning fog bank — the main "cloud floor" the strikes hit */
+.ss-cloud-1 {
+  bottom: -22vh;
+  left: -15vw;
+  width: 95vw;
+  height: 70vh;
   background:
-    radial-gradient(ellipse 55% 45% at 20% 25%, rgba(168, 85, 247, 0.55), transparent 65%),
-    radial-gradient(ellipse 65% 50% at 80% 75%, rgba(217, 70, 239, 0.45), transparent 65%),
-    radial-gradient(ellipse 40% 35% at 50% 55%, rgba(124, 58, 237, 0.40), transparent 70%),
-    radial-gradient(ellipse 30% 25% at 70% 20%, rgba(192, 132, 252, 0.35), transparent 70%);
-  filter: blur(70px);
+    radial-gradient(ellipse 60% 55% at 35% 60%, rgba(232, 121, 249, 0.55), transparent 65%),
+    radial-gradient(ellipse 50% 50% at 70% 50%, rgba(217, 70, 239, 0.50), transparent 65%),
+    radial-gradient(ellipse 45% 40% at 50% 40%, rgba(168, 85, 247, 0.50), transparent 70%);
+  animation: ss-cloud-drift-a 26s ease-in-out infinite;
+}
+.ss-cloud-2 {
+  bottom: -18vh;
+  right: -20vw;
+  width: 90vw;
+  height: 60vh;
+  background:
+    radial-gradient(ellipse 60% 55% at 60% 50%, rgba(216, 180, 254, 0.45), transparent 65%),
+    radial-gradient(ellipse 50% 45% at 30% 60%, rgba(192, 132, 252, 0.48), transparent 70%);
+  animation: ss-cloud-drift-b 32s ease-in-out infinite 4s;
+}
+/* Upper haze framing the page */
+.ss-cloud-3 {
+  top: -20vh;
+  left: -10vw;
+  width: 70vw;
+  height: 50vh;
+  background:
+    radial-gradient(ellipse 55% 60% at 50% 70%, rgba(168, 85, 247, 0.45), transparent 70%),
+    radial-gradient(ellipse 40% 50% at 70% 50%, rgba(124, 58, 237, 0.40), transparent 70%);
+  animation: ss-cloud-drift-c 38s ease-in-out infinite 2s;
   opacity: 0.85;
-  animation:
-    ss-aurora-drift 18s ease-in-out infinite,
-    ss-aurora-hue 8s ease-in-out infinite;
+}
+.ss-cloud-4 {
+  top: -10vh;
+  right: -15vw;
+  width: 60vw;
+  height: 40vh;
+  background:
+    radial-gradient(ellipse 60% 55% at 40% 65%, rgba(192, 132, 252, 0.42), transparent 70%),
+    radial-gradient(ellipse 50% 45% at 70% 50%, rgba(217, 70, 239, 0.35), transparent 70%);
+  animation: ss-cloud-drift-a 30s ease-in-out infinite 8s;
+  opacity: 0.85;
+}
+/* Mid-screen wisp drifting across */
+.ss-cloud-5 {
+  top: 35vh;
+  left: -25vw;
+  width: 140vw;
+  height: 35vh;
+  background:
+    radial-gradient(ellipse 30% 60% at 25% 50%, rgba(216, 180, 254, 0.20), transparent 75%),
+    radial-gradient(ellipse 25% 50% at 60% 50%, rgba(232, 121, 249, 0.18), transparent 75%),
+    radial-gradient(ellipse 28% 55% at 85% 50%, rgba(168, 85, 247, 0.22), transparent 75%);
+  animation: ss-cloud-drift-b 44s ease-in-out infinite 6s;
+  opacity: 0.55;
+  mix-blend-mode: screen;
 }
 
 /* Sky-flash: full-viewport tints synced with strikes */
@@ -389,17 +448,18 @@ input[type="range"]::-moz-range-thumb {
   inset: 0;
   pointer-events: none;
   opacity: 0;
+  mix-blend-mode: screen;
 }
 .ss-skyflash-1 {
-  background: radial-gradient(circle at 18% 30%, rgba(253, 244, 255, 0.55), rgba(217, 70, 239, 0.25) 35%, transparent 65%);
+  background: radial-gradient(circle at 50% 30%, rgba(253, 244, 255, 0.75), rgba(217, 70, 239, 0.30) 35%, transparent 65%);
   animation: ss-skyflash 6.3s steps(60, end) infinite;
 }
 .ss-skyflash-2 {
-  background: radial-gradient(circle at 84% 28%, rgba(253, 244, 255, 0.55), rgba(168, 85, 247, 0.25) 35%, transparent 65%);
+  background: radial-gradient(circle at 28% 25%, rgba(253, 244, 255, 0.65), rgba(168, 85, 247, 0.28) 35%, transparent 65%);
   animation: ss-skyflash-fast 8.1s steps(60, end) infinite 1.4s;
 }
 .ss-skyflash-3 {
-  background: radial-gradient(circle at 50% 18%, rgba(253, 244, 255, 0.4), rgba(217, 70, 239, 0.2) 35%, transparent 65%);
+  background: radial-gradient(circle at 74% 25%, rgba(253, 244, 255, 0.55), rgba(217, 70, 239, 0.25) 35%, transparent 65%);
   animation: ss-skyflash 10.5s steps(60, end) infinite 3.6s;
 }
 
@@ -413,15 +473,68 @@ input[type="range"]::-moz-range-thumb {
 
 .ss-strike {
   opacity: 0;
-  /* Halo behind each strike — drop-shadow on the group adds layered glow */
-  filter: drop-shadow(0 0 4px #fdf4ff) drop-shadow(0 0 14px #d946ef) drop-shadow(0 0 30px #a855f7);
+  /* Bright white core + layered purple halo */
+  filter:
+    drop-shadow(0 0 2px #ffffff)
+    drop-shadow(0 0 8px #fdf4ff)
+    drop-shadow(0 0 18px #d946ef)
+    drop-shadow(0 0 38px #a855f7);
 }
 /* Each strike uses its own duration & delay so the storm feels random */
 .ss-strike-1 { animation: ss-strike-flash      6.3s  steps(60, end) infinite; }
-.ss-strike-2 { animation: ss-strike-flash      8.1s  steps(60, end) infinite 1.4s; }
+.ss-strike-2 { animation: ss-strike-flash-fast 8.1s  steps(60, end) infinite 1.4s; }
 .ss-strike-3 { animation: ss-strike-flash      10.5s steps(60, end) infinite 3.6s; }
-.ss-strike-4 { animation: ss-strike-flash-fast 5.4s  steps(60, end) infinite 2.1s; }
-.ss-strike-5 { animation: ss-strike-flash-fast 7.7s  steps(60, end) infinite 4.8s; }
+
+/* ── Sparkle bursts at impact points ─────────────────────────────────────
+   .ss-sparks is positioned where a strike hits the cloud floor.
+   Each child .ss-spark uses CSS variables --dx, --dy, --d to drive a
+   directional outburst on each storm cycle. */
+.ss-sparks {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+/* Impact zones — placed in the cloud area below where the player card sits,
+   so the sparkle bursts are visible (the FX layer is z-1, behind the player). */
+.ss-sparks-1 { top: 82%; left: 50%; }
+.ss-sparks-2 { top: 84%; left: 22%; }
+.ss-sparks-3 { top: 84%; left: 78%; }
+
+.ss-spark {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffffff 0%, rgba(253, 244, 255, 0.9) 30%, rgba(240, 171, 252, 0.6) 60%, transparent 100%);
+  box-shadow:
+    0 0 4px #ffffff,
+    0 0 10px #f0abfc,
+    0 0 18px #d946ef;
+  opacity: 0;
+  transform: translate(0, 0) scale(0);
+}
+.ss-sparks-1 .ss-spark { animation: ss-spark-burst 6.3s  steps(60, end) infinite calc(var(--d) + 0ms); }
+.ss-sparks-2 .ss-spark { animation: ss-spark-burst-fast 8.1s steps(60, end) infinite calc(var(--d) + 1.4s); }
+.ss-sparks-3 .ss-spark { animation: ss-spark-burst 10.5s steps(60, end) infinite calc(var(--d) + 3.6s); }
+
+/* Sparks fly outward and fade, sized to match the strike timing */
+@keyframes ss-spark-burst {
+  0%, 88%, 100%       { opacity: 0; transform: translate(0, 0) scale(0); }
+  89%                 { opacity: 1; transform: translate(calc(var(--dx) * 0.3), calc(var(--dy) * 0.3)) scale(1); }
+  91%                 { opacity: 0.95; transform: translate(var(--dx), var(--dy)) scale(1); }
+  94%                 { opacity: 0.4; transform: translate(calc(var(--dx) * 1.4), calc(var(--dy) * 1.4)) scale(0.6); }
+  96%                 { opacity: 0; transform: translate(calc(var(--dx) * 1.6), calc(var(--dy) * 1.6)) scale(0); }
+}
+@keyframes ss-spark-burst-fast {
+  0%, 72%, 100%       { opacity: 0; transform: translate(0, 0) scale(0); }
+  72.5%               { opacity: 1; transform: translate(calc(var(--dx) * 0.3), calc(var(--dy) * 0.3)) scale(1); }
+  74%                 { opacity: 0.9; transform: translate(var(--dx), var(--dy)) scale(1); }
+  75.5%               { opacity: 0.3; transform: translate(calc(var(--dx) * 1.4), calc(var(--dy) * 1.4)) scale(0.5); }
+  76%                 { opacity: 0; transform: translate(calc(var(--dx) * 1.6), calc(var(--dy) * 1.6)) scale(0); }
+}
 
 .ss-burst {
   position: absolute;
@@ -483,14 +596,16 @@ input[type="range"]::-moz-range-thumb {
   .super-saiyan .glow-purple,
   .super-saiyan h2,
   .super-saiyan h3,
-  .ss-aurora,
+  .ss-cloud,
   .ss-skyflash,
   .ss-strike,
+  .ss-spark,
   .ss-toggle-on,
   .ss-toggle-icon {
     animation: none !important;
   }
   .ss-strike { opacity: 0.25; }
   .ss-skyflash { opacity: 0.1; }
+  .ss-spark { opacity: 0; }
   .ss-burst { animation-duration: 0.4s; }
 }
