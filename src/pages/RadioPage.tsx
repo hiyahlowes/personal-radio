@@ -316,6 +316,18 @@ export function RadioPage() {
   const [mixRatio, setMixRatio] = useState<number>(loadMixRatio);
   const mixRatioRef = useRef<number>(loadMixRatio());
 
+  // Super Saiyan mode — visual upgrade when sat streaming is active.
+  // Always starts OFF so each session is a deliberate opt-in.
+  const [superSaiyan, setSuperSaiyan] = useState(false);
+  // Bumped on every OFF→ON transition to retrigger the activation burst animation.
+  const [ssBurstKey, setSsBurstKey]   = useState(0);
+  const toggleSuperSaiyan = useCallback(() => {
+    setSuperSaiyan(prev => {
+      if (!prev) setSsBurstKey(k => k + 1);
+      return !prev;
+    });
+  }, []);
+
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
   // Initialise from persisted queue so content appears instantly on page return,
   // before the Wavlake / RSS queries resolve. API data overwrites these on load.
@@ -2195,11 +2207,39 @@ export function RadioPage() {
   const statusColor  = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
 
   return (
-    <div className="min-h-screen gradient-bg text-white relative overflow-x-hidden">
+    <div className={`min-h-screen gradient-bg text-white relative overflow-x-hidden ${superSaiyan ? 'super-saiyan' : ''}`}>
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-0 left-1/3 w-96 h-96 bg-purple-900/20 rounded-full blur-3xl" />
         <div className="absolute bottom-0 right-1/3 w-80 h-80 bg-violet-900/20 rounded-full blur-3xl" />
       </div>
+
+      {/* Super Saiyan FX layer — only rendered while the toggle is ON */}
+      {superSaiyan && (
+        <div className="ss-fx-layer" aria-hidden="true">
+          {/* Pulsing purple haze */}
+          <div className="ss-haze" />
+          {/* Lightning bolts */}
+          <svg className="ss-bolt ss-bolt-1" viewBox="0 0 20 200">
+            <polyline points="10,0 6,40 12,60 4,110 14,140 8,200" fill="none" stroke="url(#ssGrad)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+            <defs>
+              <linearGradient id="ssGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"  stopColor="#fdf4ff" stopOpacity="0" />
+                <stop offset="40%" stopColor="#f0abfc" stopOpacity="1" />
+                <stop offset="80%" stopColor="#c084fc" stopOpacity="1" />
+                <stop offset="100%" stopColor="#7c3aed" stopOpacity="0" />
+              </linearGradient>
+            </defs>
+          </svg>
+          <svg className="ss-bolt ss-bolt-2" viewBox="0 0 20 200">
+            <polyline points="10,0 14,30 6,70 16,100 8,140 12,200" fill="none" stroke="#f0abfc" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          </svg>
+          <svg className="ss-bolt ss-bolt-3" viewBox="0 0 20 200">
+            <polyline points="10,0 8,50 14,90 4,130 12,180 8,200" fill="none" stroke="#e879f9" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          </svg>
+          {/* Activation burst — re-mounts on every OFF→ON via key */}
+          <div key={ssBurstKey} className="ss-burst" />
+        </div>
+      )}
 
       <div className="relative z-10 max-w-2xl mx-auto px-4 py-8 space-y-6">
 
@@ -2240,6 +2280,30 @@ export function RadioPage() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Super Saiyan toggle — only when V4V wallet is connected. Sat streaming earns the visual upgrade. */}
+        {v4v.isConnected && (
+          <div className="fade-in-up-delay-1 flex justify-center">
+            <button
+              onClick={toggleSuperSaiyan}
+              aria-pressed={superSaiyan}
+              className={`ss-toggle group relative flex items-center gap-3 px-4 py-2 rounded-full border transition-all
+                ${superSaiyan
+                  ? 'ss-toggle-on bg-gradient-to-r from-fuchsia-600/30 via-purple-600/30 to-violet-600/30 border-fuchsia-400/60 text-fuchsia-100'
+                  : 'bg-white/5 border-white/10 text-white/60 hover:border-purple-400/40 hover:text-white/80'}`}
+            >
+              <span className={`text-base leading-none ${superSaiyan ? 'ss-toggle-icon' : 'opacity-60'}`}>⚡</span>
+              <span className="text-[11px] font-semibold tracking-[0.18em] uppercase">
+                {superSaiyan ? 'Super Saiyan · ON' : 'Activate Super Saiyan'}
+              </span>
+              <span className={`relative inline-block w-9 h-5 rounded-full transition-colors ${superSaiyan ? 'bg-fuchsia-500/80' : 'bg-white/15'}`}>
+                <span
+                  className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${superSaiyan ? 'left-[18px] shadow-[0_0_10px_rgba(255,255,255,0.9)]' : 'left-0.5'}`}
+                />
+              </span>
+            </button>
           </div>
         )}
 
@@ -2438,8 +2502,17 @@ export function RadioPage() {
         {/* V4V session display — shown when NWC is connected */}
         {v4v.isConnected && (
           <div className="fade-in-up-delay-2 flex items-center gap-2 px-1">
-            <span className={`text-xs ${v4v.hasPaymentErrors ? 'text-red-400' : 'text-yellow-400'}`} title={v4v.hasPaymentErrors ? 'Payment errors — check wallet connection' : undefined}>⚡</span>
-            <span className="text-xs text-white/40">
+            <span
+              className={`text-xs ${
+                v4v.hasPaymentErrors
+                  ? 'text-red-400'
+                  : superSaiyan
+                    ? 'text-fuchsia-300 ss-toggle-icon'
+                    : 'text-yellow-400'
+              }`}
+              title={v4v.hasPaymentErrors ? 'Payment errors — check wallet connection' : undefined}
+            >⚡</span>
+            <span className={`text-xs ${superSaiyan ? 'text-fuchsia-100/80 font-medium tracking-wide' : 'text-white/40'}`}>
               {v4v.totalSentThisSession > 0
                 ? nowPlaying?.kind === 'music'
                   ? `${v4v.totalSentThisSession} sats → ${nowPlaying.track.artist} (via Wavlake)`
