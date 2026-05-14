@@ -316,17 +316,8 @@ export function RadioPage() {
   const [mixRatio, setMixRatio] = useState<number>(loadMixRatio);
   const mixRatioRef = useRef<number>(loadMixRatio());
 
-  // Super Saiyan mode — visual upgrade when sat streaming is active.
-  // Always starts OFF so each session is a deliberate opt-in.
-  const [superSaiyan, setSuperSaiyan] = useState(false);
-  // Bumped on every OFF→ON transition to retrigger the activation burst animation.
-  const [ssBurstKey, setSsBurstKey]   = useState(0);
-  const toggleSuperSaiyan = useCallback(() => {
-    setSuperSaiyan(prev => {
-      if (!prev) setSsBurstKey(k => k + 1);
-      return !prev;
-    });
-  }, []);
+  // Super Saiyan mode lives in RadioContext so the storm doesn't reset when the
+  // user navigates to Settings and back. Always starts OFF per browser session.
 
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
   // Initialise from persisted queue so content appears instantly on page return,
@@ -348,16 +339,36 @@ export function RadioPage() {
   // route changes (e.g. navigating to Settings and back).
   const audioRef    = radioCtx.audioRef;
   const podAudioRef = radioCtx.podAudioRef;
-  const howlRef        = useRef<Howl | null>(null);
+  // Howl + its poll interval live in context so they survive Settings → back.
+  // Without this, the old Howl keeps playing as an orphan and the UI loses
+  // its handle (the player shows "paused" while music continues).
+  const howlRef        = radioCtx.howlRef;
+  const howlPollRef    = radioCtx.howlPollRef;
   const nextHowlRef    = useRef<Howl | null>(null);
   // Tracks the last-set Howler music volume independently of howl.volume(),
   // which is unreliable in html5:true mode on iOS.
   const musicVolumeRef = useRef<number>(0.9);
-  const howlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runningRef  = radioCtx.runningRef;
   const greetedRef  = radioCtx.greetedRef;
   const idxRef      = radioCtx.idxRef;
   const loopGenRef  = radioCtx.loopGenRef;
+
+  // Super Saiyan visual mode — toggled on/off, persists across nav.
+  const superSaiyan       = radioCtx.superSaiyan;
+  const setSuperSaiyan    = radioCtx.setSuperSaiyan;
+  const ssBurstKey        = radioCtx.ssBurstKey;
+  const toggleSuperSaiyan = useCallback(() => {
+    setSuperSaiyan(prev => {
+      if (!prev) radioCtx.bumpSsBurst();
+      return !prev;
+    });
+  }, [setSuperSaiyan, radioCtx]);
+
+  // Monster flash celebration — bumped on every successful V4V flush; the
+  // FX layer reacts by re-mounting the key'd element (one-shot animation),
+  // and `.ss-mega` is applied to the root for a 10s extra-bright glow.
+  const [megaFlashKey, setMegaFlashKey] = useState(0);
+  const [megaActive, setMegaActive]     = useState(false);
 
   // nowPlaying lives in RadioContext so it survives navigation to Settings and back.
   const nowPlaying    = radioCtx.nowPlaying;
@@ -776,6 +787,26 @@ export function RadioPage() {
       setPlaying(true);
       setCT(audio.currentTime);
       if (isFinite(audio.duration)) setDur(audio.duration);
+    } else if (howlRef.current?.playing()) {
+      // Music is being played via Howler (audio + pod elements are paused).
+      // Howl's onplay/onpause callbacks reference setState closures that are
+      // stale after a remount — restart the seek poll here with fresh setters
+      // so the seek bar updates, and reflect the playing state in the UI.
+      setPlaying(true);
+      const h = howlRef.current;
+      const ct = h.seek() as number;
+      if (isFinite(ct)) setCT(ct);
+      const d = h.duration() ?? 0;
+      if (d > 0 && isFinite(d)) setDur(d);
+      if (howlPollRef.current) clearInterval(howlPollRef.current);
+      howlPollRef.current = setInterval(() => {
+        const hh = howlRef.current;
+        if (!hh) return;
+        const t = hh.seek() as number;
+        if (isFinite(t)) setCT(t);
+        const dd = hh.duration() ?? 0;
+        if (dd > 0 && isFinite(dd)) setDur(dd);
+      }, 250);
     }
 
     return () => {
@@ -888,6 +919,23 @@ export function RadioPage() {
     }
     return () => cancelRampRef.current?.();
   }, [moderator.isSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── V4V flush celebration ─────────────────────────────────────────────────
+  // On every successful flush (sats actually paid), fire a "monster lightning"
+  // strike and keep the UI in heavy-glow mode for 10 s. Re-triggers correctly
+  // even if two flushes land back-to-back.
+  const lastFlushTsRef = useRef<number>(0);
+  useEffect(() => {
+    const r = v4v.lastFlushResult;
+    if (!r) return;
+    if (r.sent <= 0) return;
+    if (r.timestamp === lastFlushTsRef.current) return;
+    lastFlushTsRef.current = r.timestamp;
+    setMegaFlashKey(k => k + 1);
+    setMegaActive(true);
+    const t = setTimeout(() => setMegaActive(false), 10000);
+    return () => clearTimeout(t);
+  }, [v4v.lastFlushResult]);
 
   // ── Volume/mute slider (when not ducked) ─────────────────────────────────
   // Only fires on user volume/mute changes — NOT on isSpeaking changes, so the
@@ -2207,25 +2255,23 @@ export function RadioPage() {
   const statusColor  = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
 
   return (
-    <div className={`min-h-screen gradient-bg text-white relative overflow-x-hidden ${superSaiyan ? 'super-saiyan' : ''}`}>
+    <div className={`min-h-screen gradient-bg text-white relative overflow-x-hidden ${superSaiyan ? 'super-saiyan' : ''} ${megaActive ? 'ss-mega' : ''}`}>
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-0 left-1/3 w-96 h-96 bg-purple-900/20 rounded-full blur-3xl" />
         <div className="absolute bottom-0 right-1/3 w-80 h-80 bg-violet-900/20 rounded-full blur-3xl" />
       </div>
 
-      {/* Super Saiyan FX layer — only rendered while the toggle is ON.
-          Sits BEHIND the page content (z-1) so it never covers the player.
-          Visual recipe: dark purple sky, billowing fog/clouds, dramatic
-          forking lightning, sparkle bursts where bolts hit the clouds,
-          whole-sky flashes synced with each strike. */}
-      {superSaiyan && (
-        <div className="ss-fx-layer" aria-hidden="true">
-          {/* Cloud / fog layer — multiple soft purple blobs that drift slowly */}
+      {/* Super Saiyan FX layer — rendered whenever the user has armed the
+          mode in this session. The clouds and lightning fade in/out via the
+          `ss-on` modifier so toggling doesn't feel abrupt — they slowly
+          appear when streaming starts and slowly disappear when it stops.
+          Sits BEHIND the page content (z-1) so it never covers the player. */}
+      <div className={`ss-fx-layer ${superSaiyan ? 'ss-on' : ''}`} aria-hidden="true">
+          {/* Back clouds — sit BEHIND the lightning SVG so the bolts cut
+              cleanly across the sky. */}
           <div className="ss-cloud ss-cloud-1" />
           <div className="ss-cloud ss-cloud-2" />
           <div className="ss-cloud ss-cloud-3" />
-          <div className="ss-cloud ss-cloud-4" />
-          <div className="ss-cloud ss-cloud-5" />
 
           {/* Whole-sky illumination — fires in sync with each strike */}
           <div className="ss-skyflash ss-skyflash-1" />
@@ -2297,6 +2343,12 @@ export function RadioPage() {
             </g>
           </svg>
 
+          {/* Front clouds — drawn AFTER the bolts so they partly obscure
+              the strikes where they overlap. This is what gives the
+              "lightning is partly inside / behind the clouds" feel. */}
+          <div className="ss-cloud ss-cloud-4 ss-cloud-front" />
+          <div className="ss-cloud ss-cloud-5 ss-cloud-front" />
+
           {/* Sparkle bursts — fire at each strike's impact point inside the clouds */}
           <div className="ss-sparks ss-sparks-1">
             {Array.from({ length: 18 }).map((_, i) => {
@@ -2353,8 +2405,40 @@ export function RadioPage() {
 
           {/* Activation burst — re-mounts on every OFF→ON via key */}
           <div key={ssBurstKey} className="ss-burst" />
+
+          {/* Floating PR-logo plaques — round, 3D-feel discs that drift through
+              the fog on either side of the player. Each carries its own pulse
+              keyframe that briefly coincides with a lightning strike, giving
+              the impression of being hit by the bolt: a 3 s glow that fades. */}
+          <div className="ss-plaque ss-plaque-left">
+            <div className="ss-plaque-disc">
+              <img src="/PR_logo.png" alt="" className="ss-plaque-logo" />
+            </div>
+          </div>
+          <div className="ss-plaque ss-plaque-right">
+            <div className="ss-plaque-disc">
+              <img src="/PR_logo.png" alt="" className="ss-plaque-logo" />
+            </div>
+          </div>
+
+          {/* Monster strike — re-mounts (and so re-plays the one-shot
+              animation) every time a V4V flush successfully pays out.
+              Sits on top of the regular bolt SVG. */}
+          <div key={`mega-${megaFlashKey}`} className={`ss-monster ${megaActive ? 'ss-monster-on' : ''}`}>
+            <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" className="ss-monster-svg">
+              <g filter="url(#ssGlowFilter)">
+                <path d="M 500 -20 L 478 60 L 522 130 L 470 210 L 540 290 L 466 380 L 552 470 L 460 560 L 558 660 L 444 770 L 570 880 L 460 990"
+                  stroke="#ffffff" strokeWidth="5" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+                <path d="M 522 130 L 600 180 L 580 240 L 660 290 L 640 360 L 720 410" stroke="#ffffff" strokeWidth="3" fill="none" opacity="0.95" />
+                <path d="M 470 210 L 400 260 L 420 330 L 340 380 L 360 460 L 280 510" stroke="#ffffff" strokeWidth="3" fill="none" opacity="0.95" />
+                <path d="M 540 290 L 620 340 L 600 410" stroke="#ffffff" strokeWidth="2.4" fill="none" opacity="0.85" />
+                <path d="M 466 380 L 390 430 L 410 500" stroke="#ffffff" strokeWidth="2.4" fill="none" opacity="0.85" />
+                <path d="M 460 560 L 380 620 L 400 690 L 320 740" stroke="#ffffff" strokeWidth="2.6" fill="none" opacity="0.9" />
+                <path d="M 558 660 L 640 720 L 620 790 L 700 840" stroke="#ffffff" strokeWidth="2.6" fill="none" opacity="0.9" />
+              </g>
+            </svg>
+          </div>
         </div>
-      )}
 
       <div className="relative z-10 max-w-2xl mx-auto px-4 py-8 space-y-6">
 
@@ -2614,11 +2698,13 @@ export function RadioPage() {
           </div>
         </div>
 
-        {/* V4V session display — shown when NWC is connected */}
+        {/* V4V session display — shown when NWC is connected.
+            Slightly larger type and a ⚡ on both sides so the running sat
+            counter is legible at a glance. */}
         {v4v.isConnected && (
-          <div className="fade-in-up-delay-2 flex items-center gap-2 px-1">
+          <div className="fade-in-up-delay-2 flex items-center justify-center gap-2 px-1">
             <span
-              className={`text-xs ${
+              className={`text-sm ${
                 v4v.hasPaymentErrors
                   ? 'text-red-400'
                   : superSaiyan
@@ -2627,7 +2713,7 @@ export function RadioPage() {
               }`}
               title={v4v.hasPaymentErrors ? 'Payment errors — check wallet connection' : undefined}
             >⚡</span>
-            <span className={`text-xs ${superSaiyan ? 'text-fuchsia-100/80 font-medium tracking-wide' : 'text-white/40'}`}>
+            <span className={`text-sm ${superSaiyan ? 'text-fuchsia-100/90 font-medium tracking-wide' : 'text-white/60'}`}>
               {v4v.totalSentThisSession > 0
                 ? nowPlaying?.kind === 'music'
                   ? `${v4v.totalSentThisSession} sats → ${nowPlaying.track.artist} (via Wavlake)`
@@ -2638,6 +2724,16 @@ export function RadioPage() {
                     : `${v4v.pendingTotal} sats pending`
                   : 'Streaming value to artists'}
             </span>
+            <span
+              className={`text-sm ${
+                v4v.hasPaymentErrors
+                  ? 'text-red-400'
+                  : superSaiyan
+                    ? 'text-fuchsia-300 ss-toggle-icon'
+                    : 'text-yellow-400'
+              }`}
+              aria-hidden="true"
+            >⚡</span>
           </div>
         )}
 
@@ -2906,11 +3002,14 @@ export function RadioPage() {
               </div>
               <Droppable droppableId="podcast-queue">
                 {(provided, snapshot) => (
+                  // No inner overflow — the Super Saiyan card glow extends
+                  // ~80px outside each card. With overflow:auto here the glow
+                  // got clipped at the wrapper edges and the list read as a
+                  // hard rectangle frame. Let the page scroll naturally.
                   <div
                     ref={provided.innerRef}
                     {...provided.droppableProps}
                     className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
-                    style={{ maxHeight: 400, overflowY: 'auto' }}
                   >
                      {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
                        <div className="glass-card rounded-2xl px-5 py-6 text-center">

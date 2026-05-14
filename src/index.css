@@ -391,24 +391,44 @@ input[type="range"]::-moz-range-thumb {
   }
 }
 
-/* FX overlay layer — sits BEHIND page content (z-1 < z-10 wrapper) */
+/* FX overlay layer — sits BEHIND page content (z-1 < z-10 wrapper).
+   Always mounted while the user has armed the mode; visibility is driven
+   by `.ss-on` so the storm can slowly fade in/out instead of popping. */
 .ss-fx-layer {
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: 1;
   overflow: hidden;
+  opacity: 0;
+  transition: opacity 2.6s ease-in-out;
 }
+.ss-fx-layer.ss-on { opacity: 1; }
 
 /* Cloud / fog layer — desaturated dark-purple clouds, heavily blurred for
-   a diffuse storm-fog look. No mix-blend so the clouds read as actual
-   shadows against the dark sky rather than neon blobs. Drift cycles are
-   long (40-60s) so motion is barely perceptible. */
+   a diffuse storm-fog look. Drift cycles are long (40-60s) so motion is
+   barely perceptible. Each cloud carries a faint inner glow that matches
+   the UI's purple/gold palette so it reads as backlit fog rather than a
+   flat shadow.
+
+   The lightning SVG layer sits ABOVE clouds in DOM order; the bolts'
+   impact splashes dive INTO the cloud floor and the upper forks descend
+   THROUGH the upper-haze clouds — so individual strikes are sometimes
+   partly inside / behind the billow rather than always in front. */
 .ss-cloud {
   position: absolute;
   border-radius: 50%;
-  filter: blur(70px);
+  filter: blur(70px) drop-shadow(0 0 32px rgba(168, 85, 247, 0.24)) drop-shadow(0 0 70px rgba(240, 180, 70, 0.10));
   will-change: transform;
+}
+
+/* Front clouds — drawn over the lightning SVG. Slightly less blur so the
+   cloud edge reads as a soft mask over the bolt; reduced opacity so the
+   bolt still bleeds through enough to look like it's piercing the cloud
+   rather than being hidden entirely. */
+.ss-cloud-front {
+  filter: blur(58px) drop-shadow(0 0 36px rgba(168, 85, 247, 0.28)) drop-shadow(0 0 70px rgba(240, 180, 70, 0.12));
+  mix-blend-mode: normal;
 }
 
 /* Bottom-spanning fog bank — the "cloud floor" the strikes hit */
@@ -680,4 +700,222 @@ input[type="range"]::-moz-range-thumb {
   .ss-skyflash { opacity: 0.1; }
   .ss-spark { opacity: 0; }
   .ss-burst { animation-duration: 0.4s; }
+  .ss-plaque,
+  .ss-plaque-disc,
+  .ss-monster-svg { animation: none !important; }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   PR-logo plaques — round 3D-feel discs that drift through the fog on
+   either side of the player. Each plaque rotates slowly in 3D; a separate
+   pulse keyframe lines up with a lightning strike, briefly lighting the
+   plaque from within for ~3 s before fading. The pulse cycle matches the
+   bolt cycle so the plaque appears to be "hit" by the strike.
+   ──────────────────────────────────────────────────────────────────────── */
+
+.ss-plaque {
+  position: absolute;
+  width: 96px;
+  height: 96px;
+  pointer-events: none;
+  perspective: 600px;
+  /* Float the plaque gently through the fog. The drift is small — these
+     are anchors in the storm, not orbiting moons. */
+  animation: ss-plaque-drift 26s ease-in-out infinite;
+  will-change: transform;
+}
+.ss-plaque-left  { top: 22vh; left: max(2vw, calc(50vw - 360px)); animation-delay: -3s; }
+.ss-plaque-right { top: 58vh; right: max(2vw, calc(50vw - 360px)); animation-delay: -15s; animation-duration: 32s; }
+
+@keyframes ss-plaque-drift {
+  0%, 100% { transform: translate(0, 0); }
+  25%      { transform: translate(-8px, -12px); }
+  50%      { transform: translate(4px, -20px); }
+  75%      { transform: translate(10px, -6px); }
+}
+
+/* Inner disc — spins on its Y-axis (3D) so it reads as a coin face. The
+   spin cycle is long enough to feel architectural, not toy-like.
+   Pulse animation rides on top via filter to brighten the disc on hits. */
+.ss-plaque-disc {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 230, 180, 0.18), transparent 55%),
+    radial-gradient(circle at 50% 50%, rgba(60, 30, 110, 0.92), rgba(20, 8, 45, 0.95) 80%);
+  border: 1px solid rgba(216, 180, 254, 0.35);
+  box-shadow:
+    inset 0 0 18px rgba(168, 85, 247, 0.25),
+    inset 0 0 6px rgba(255, 235, 200, 0.10),
+    0 0 12px rgba(168, 85, 247, 0.20);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-style: preserve-3d;
+  /* Two animations stacked: a slow 3D spin (continuous) and a
+     synchronized-with-strike pulse that lights the disc up for ~3s. */
+  animation:
+    ss-plaque-spin 12s linear infinite,
+    ss-plaque-hit-1 14s steps(120, end) infinite;
+}
+.ss-plaque-right .ss-plaque-disc {
+  animation:
+    ss-plaque-spin 14s linear infinite reverse,
+    ss-plaque-hit-2 22s steps(120, end) infinite 7s;
+}
+
+.ss-plaque-logo {
+  width: 60%;
+  height: 60%;
+  object-fit: contain;
+  /* Drop-shadow gives the logo a faint embossed lift on the disc. */
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,0.6));
+  opacity: 0.92;
+}
+
+@keyframes ss-plaque-spin {
+  0%   { transform: rotateY(0deg); }
+  100% { transform: rotateY(360deg); }
+}
+
+/* Hit pulse — quiet for most of the cycle, then a fast brighten coincident
+   with a strike, followed by a ~3 s decay back to baseline.
+   The cycle duration matches the matching strike animation so the visual
+   "hit moment" lines up. */
+@keyframes ss-plaque-hit-1 {
+  0%, 100%, 86%   {
+    box-shadow:
+      inset 0 0 18px rgba(168, 85, 247, 0.25),
+      inset 0 0 6px rgba(255, 235, 200, 0.10),
+      0 0 12px rgba(168, 85, 247, 0.20);
+    background:
+      radial-gradient(circle at 35% 30%, rgba(255, 230, 180, 0.18), transparent 55%),
+      radial-gradient(circle at 50% 50%, rgba(60, 30, 110, 0.92), rgba(20, 8, 45, 0.95) 80%);
+  }
+  89%   {
+    box-shadow:
+      inset 0 0 30px rgba(255, 235, 200, 0.65),
+      inset 0 0 14px rgba(245, 195, 90, 0.55),
+      0 0 38px rgba(255, 235, 200, 0.85),
+      0 0 72px rgba(217, 70, 239, 0.6);
+    background:
+      radial-gradient(circle at 35% 30%, rgba(255, 245, 210, 0.55), transparent 55%),
+      radial-gradient(circle at 50% 50%, rgba(150, 100, 200, 0.95), rgba(60, 30, 110, 0.95) 80%);
+  }
+  /* ~3s glow tail — 14s cycle, so 3s ≈ 21% of cycle */
+  95%   {
+    box-shadow:
+      inset 0 0 24px rgba(216, 180, 254, 0.45),
+      inset 0 0 10px rgba(255, 230, 180, 0.30),
+      0 0 24px rgba(168, 85, 247, 0.55),
+      0 0 48px rgba(245, 195, 90, 0.30);
+  }
+}
+@keyframes ss-plaque-hit-2 {
+  0%, 100%, 70%   {
+    box-shadow:
+      inset 0 0 18px rgba(168, 85, 247, 0.25),
+      inset 0 0 6px rgba(255, 235, 200, 0.10),
+      0 0 12px rgba(168, 85, 247, 0.20);
+    background:
+      radial-gradient(circle at 35% 30%, rgba(255, 230, 180, 0.18), transparent 55%),
+      radial-gradient(circle at 50% 50%, rgba(60, 30, 110, 0.92), rgba(20, 8, 45, 0.95) 80%);
+  }
+  72.5% {
+    box-shadow:
+      inset 0 0 30px rgba(255, 235, 200, 0.65),
+      inset 0 0 14px rgba(245, 195, 90, 0.55),
+      0 0 38px rgba(255, 235, 200, 0.85),
+      0 0 72px rgba(217, 70, 239, 0.6);
+    background:
+      radial-gradient(circle at 35% 30%, rgba(255, 245, 210, 0.55), transparent 55%),
+      radial-gradient(circle at 50% 50%, rgba(150, 100, 200, 0.95), rgba(60, 30, 110, 0.95) 80%);
+  }
+  86%   {
+    box-shadow:
+      inset 0 0 24px rgba(216, 180, 254, 0.45),
+      inset 0 0 10px rgba(255, 230, 180, 0.30),
+      0 0 24px rgba(168, 85, 247, 0.55),
+      0 0 48px rgba(245, 195, 90, 0.30);
+  }
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Monster strike — fires once per V4V flush success. The SVG re-mounts via
+   React key so the keyframe always replays from 0; the cloud-floor glow and
+   the wider UI glow are driven by `.ss-mega` on the root.
+   ──────────────────────────────────────────────────────────────────────── */
+
+.ss-monster {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+}
+.ss-monster.ss-monster-on { opacity: 1; }
+.ss-monster-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  filter:
+    drop-shadow(0 0 2px #ffffff)
+    drop-shadow(0 0 8px rgba(255, 245, 210, 1))
+    drop-shadow(0 0 24px rgba(255, 195, 90, 0.85))
+    drop-shadow(0 0 60px rgba(220, 200, 235, 0.75))
+    drop-shadow(0 0 120px rgba(160, 140, 210, 0.6));
+  opacity: 0;
+}
+.ss-monster.ss-monster-on .ss-monster-svg {
+  animation: ss-monster-flash 10s ease-out forwards;
+}
+
+@keyframes ss-monster-flash {
+  0%   { opacity: 0; }
+  1%   { opacity: 1; }
+  2%   { opacity: 0.4; }
+  3%   { opacity: 1; }
+  5%   { opacity: 0.6; }
+  8%   { opacity: 0.95; }
+  14%  { opacity: 0.55; }
+  22%  { opacity: 0.35; }
+  40%  { opacity: 0.18; }
+  70%  { opacity: 0.08; }
+  100% { opacity: 0; }
+}
+
+/* When .ss-mega is on the root for 10s after a flush, push the entire UI
+   into a louder glow — the cards breathe harder and the toggle pulses
+   faster. Returns to normal SS levels once the class is removed. */
+.ss-mega .glass-card {
+  animation: ss-card-mega 10s ease-out forwards !important;
+}
+
+@keyframes ss-card-mega {
+  0% {
+    box-shadow:
+      0 0 60px rgba(255, 240, 210, 0.7),
+      0 0 110px rgba(255, 195, 90, 0.55),
+      0 0 160px rgba(217, 70, 239, 0.5),
+      inset 0 0 36px rgba(255, 235, 200, 0.35),
+      inset 0 0 70px rgba(245, 195, 90, 0.22);
+  }
+  20% {
+    box-shadow:
+      0 0 48px rgba(240, 200, 130, 0.55),
+      0 0 90px rgba(217, 70, 239, 0.45),
+      0 0 140px rgba(168, 85, 247, 0.40),
+      inset 0 0 28px rgba(240, 180, 70, 0.22),
+      inset 0 0 56px rgba(217, 70, 239, 0.14);
+  }
+  100% {
+    /* Lands back on the standard breathe baseline */
+    box-shadow:
+      0 0 22px rgba(168, 85, 247, 0.28),
+      0 0 38px rgba(240, 180, 70, 0.12),
+      0 0 55px rgba(124, 58, 237, 0.16),
+      inset 0 0 14px rgba(168, 85, 247, 0.08),
+      inset 0 0 26px rgba(240, 180, 70, 0.05);
+  }
 }
