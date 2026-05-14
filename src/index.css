@@ -450,18 +450,16 @@ input[type="range"]::-moz-range-thumb {
   opacity: 0;
   mix-blend-mode: screen;
 }
+/* Sky-flash synced with the 2 active strikes only */
 .ss-skyflash-1 {
-  background: radial-gradient(circle at 50% 28%, rgba(240, 220, 255, 0.45), rgba(168, 130, 220, 0.18) 40%, transparent 70%);
-  animation: ss-skyflash 6.3s steps(60, end) infinite;
+  background: radial-gradient(circle at 50% 28%, rgba(240, 230, 255, 0.38), rgba(180, 160, 220, 0.14) 40%, transparent 70%);
+  animation: ss-skyflash 14s steps(60, end) infinite;
 }
 .ss-skyflash-2 {
-  background: radial-gradient(circle at 28% 22%, rgba(240, 220, 255, 0.38), rgba(155, 115, 210, 0.16) 40%, transparent 70%);
-  animation: ss-skyflash-fast 8.1s steps(60, end) infinite 1.4s;
+  background: radial-gradient(circle at 32% 24%, rgba(240, 230, 255, 0.32), rgba(170, 150, 215, 0.13) 40%, transparent 70%);
+  animation: ss-skyflash-fast 22s steps(60, end) infinite 7s;
 }
-.ss-skyflash-3 {
-  background: radial-gradient(circle at 74% 22%, rgba(240, 220, 255, 0.32), rgba(168, 130, 220, 0.14) 40%, transparent 70%);
-  animation: ss-skyflash 10.5s steps(60, end) infinite 3.6s;
-}
+.ss-skyflash-3 { display: none; }
 
 /* Lightning canvas — single SVG spanning the viewport */
 .ss-bolts {
@@ -473,18 +471,20 @@ input[type="range"]::-moz-range-thumb {
 
 .ss-strike {
   opacity: 0;
-  /* Realistic bolt: tight white core, softer & cooler purple halo that
-     spreads into the clouds — less neon, more diffuse afterglow. */
+  /* Photographic look: hot white core, brief blue-white inner halo,
+     soft cool afterglow. No saturated purple = less cartoon. */
   filter:
-    drop-shadow(0 0 1.5px #ffffff)
-    drop-shadow(0 0 6px rgba(253, 244, 255, 0.85))
-    drop-shadow(0 0 22px rgba(168, 130, 220, 0.55))
-    drop-shadow(0 0 50px rgba(124, 80, 180, 0.35));
+    drop-shadow(0 0 1px #ffffff)
+    drop-shadow(0 0 4px rgba(255, 255, 255, 0.95))
+    drop-shadow(0 0 14px rgba(220, 220, 255, 0.55))
+    drop-shadow(0 0 40px rgba(160, 140, 210, 0.28));
 }
-/* Each strike uses its own duration & delay so the storm feels random */
-.ss-strike-1 { animation: ss-strike-flash      6.3s  steps(60, end) infinite; }
-.ss-strike-2 { animation: ss-strike-flash-fast 8.1s  steps(60, end) infinite 1.4s; }
-.ss-strike-3 { animation: ss-strike-flash      10.5s steps(60, end) infinite 3.6s; }
+/* Strike cadence — only 2 strikes total, long cycles, so the storm is
+   sparse rather than constant. Lightning visible ~10% of each cycle. */
+.ss-strike-1 { animation: ss-strike-flash      14s  steps(60, end) infinite; }
+.ss-strike-2 { animation: ss-strike-flash-fast 22s  steps(60, end) infinite 7s; }
+/* Strike 3 disabled — fewer flashes, less distracting */
+.ss-strike-3 { display: none; }
 
 /* ── Sparkle bursts at impact points ─────────────────────────────────────
    .ss-sparks is positioned where a strike hits the cloud floor.
@@ -497,10 +497,10 @@ input[type="range"]::-moz-range-thumb {
   pointer-events: none;
 }
 /* Impact zones — placed in the cloud area below where the player card sits,
-   so the sparkle bursts are visible (the FX layer is z-1, behind the player). */
+   so the sparkle bursts are visible (the FX layer is z-1, behind the player).
+   Strike-1 lands center, strike-2 lands right (matches the new SVG paths). */
 .ss-sparks-1 { top: 82%; left: 50%; }
-.ss-sparks-2 { top: 84%; left: 22%; }
-.ss-sparks-3 { top: 84%; left: 78%; }
+.ss-sparks-2 { top: 84%; left: 78%; }
 
 .ss-spark {
   position: absolute;
@@ -517,9 +517,9 @@ input[type="range"]::-moz-range-thumb {
   opacity: 0;
   transform: translate(0, 0) scale(0);
 }
-.ss-sparks-1 .ss-spark { animation: ss-spark-burst 6.3s  steps(60, end) infinite calc(var(--d) + 0ms); }
-.ss-sparks-2 .ss-spark { animation: ss-spark-burst-fast 8.1s steps(60, end) infinite calc(var(--d) + 1.4s); }
-.ss-sparks-3 .ss-spark { animation: ss-spark-burst 10.5s steps(60, end) infinite calc(var(--d) + 3.6s); }
+.ss-sparks-1 .ss-spark { animation: ss-spark-burst       14s steps(60, end) infinite calc(var(--d) + 0ms); }
+.ss-sparks-2 .ss-spark { animation: ss-spark-burst-fast  22s steps(60, end) infinite calc(var(--d) + 7s); }
+.ss-sparks-3 { display: none; }
 
 /* Sparks fly outward and fade, sized to match the strike timing */
 @keyframes ss-spark-burst {
@@ -553,10 +553,15 @@ input[type="range"]::-moz-range-thumb {
    Forcing `opacity: 1` is essential — adding `animation: ss-card-breathe`
    replaces the card's `fade-in-up*` animation, which would otherwise leave
    `fade-in-up-delay-*` cards stuck at their static opacity:0 base. */
+/* Card bg is fully opaque so the storm reads as strictly BEHIND the cards.
+   Even faint bleed-through made the bolts look like they were crossing
+   over the playlist tracks. The breathing glow comes from box-shadow,
+   which extends OUTSIDE the card and is unaffected by bg opacity. */
 .super-saiyan .glass-card {
   opacity: 1;
-  background: rgba(60, 30, 110, 0.22);
-  border-color: rgba(180, 130, 220, 0.30);
+  background: rgb(34, 16, 64);
+  border-color: rgba(180, 130, 220, 0.28);
+  backdrop-filter: none;
   animation: ss-card-breathe 8s ease-in-out infinite;
 }
 

@@ -2250,68 +2250,50 @@ export function RadioPage() {
               </filter>
             </defs>
 
-            {/* Strike 1 — center, biggest bolt with many forks */}
+            {/* Strike 1 — center. Many small zig-zags + a few asymmetric forks
+                give a more photographic feel than uniform straight segments. */}
             <g className="ss-strike ss-strike-1" filter="url(#ssGlowFilter)">
-              {/* main bolt, top to clouds */}
-              <path d="M 500 0 L 488 60 L 514 120 L 478 180 L 522 240 L 484 310 L 528 380 L 488 450 L 532 520 L 500 600"
-                stroke="#ffffff" strokeWidth="3" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              {/* major fork — upper left */}
-              <path d="M 488 60 L 430 100 L 452 140 L 390 180 L 416 220 L 360 260"
+              <path d="M 500 0 L 494 28 L 506 52 L 488 78 L 510 102 L 492 128 L 514 154 L 486 182 L 510 210 L 482 240 L 514 268 L 488 298 L 522 326 L 494 358 L 518 388 L 484 420 L 516 450 L 488 482 L 522 514 L 494 548 L 510 580 L 488 612"
                 stroke="#ffffff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              {/* major fork — upper right */}
-              <path d="M 514 120 L 580 160 L 552 200 L 620 240 L 588 280 L 660 320"
-                stroke="#ffffff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              {/* mid twigs */}
-              <path d="M 478 180 L 444 220 L 460 250" stroke="#ffffff" strokeWidth="1.3" fill="none" />
-              <path d="M 522 240 L 568 280 L 548 310" stroke="#ffffff" strokeWidth="1.4" fill="none" />
-              <path d="M 484 310 L 430 350 L 452 390" stroke="#ffffff" strokeWidth="1.3" fill="none" />
-              <path d="M 528 380 L 580 420 L 555 460 L 600 500" stroke="#ffffff" strokeWidth="1.6" fill="none" />
-              <path d="M 488 450 L 440 490 L 460 530 L 410 570" stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              {/* impact splash near clouds */}
-              <path d="M 500 600 L 560 640 L 530 670 L 590 700" stroke="#ffffff" strokeWidth="1.6" fill="none" />
-              <path d="M 500 600 L 440 640 L 470 670 L 420 700" stroke="#ffffff" strokeWidth="1.6" fill="none" />
-              <path d="M 500 600 L 500 680 L 480 710" stroke="#ffffff" strokeWidth="1.3" fill="none" />
-              <path d="M 500 600 L 520 660 L 540 690" stroke="#ffffff" strokeWidth="1.2" fill="none" />
+              {/* upper-left fork (jagged) */}
+              <path d="M 510 102 L 480 124 L 470 148 L 442 168 L 432 196 L 408 220 L 396 248"
+                stroke="#ffffff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.9" />
+              {/* upper-right fork */}
+              <path d="M 492 128 L 528 150 L 538 178 L 568 198 L 580 226 L 612 248"
+                stroke="#ffffff" strokeWidth="1.3" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.9" />
+              {/* small twig — left mid */}
+              <path d="M 486 182 L 466 200 L 472 218" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.75" />
+              {/* small twig — right mid */}
+              <path d="M 514 268 L 540 286 L 532 304 L 552 322" stroke="#ffffff" strokeWidth="1" fill="none" opacity="0.8" />
+              {/* asymmetric lower fork */}
+              <path d="M 484 420 L 452 444 L 462 472 L 432 498 L 442 522"
+                stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              {/* micro hairs */}
+              <path d="M 522 326 L 538 340" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.7" />
+              <path d="M 518 388 L 504 400" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.6" />
+              <path d="M 522 514 L 540 528 L 534 542" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.7" />
+              {/* impact splash into clouds */}
+              <path d="M 488 612 L 528 638 L 514 658 L 548 682" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              <path d="M 488 612 L 458 640 L 472 662 L 446 686" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              <path d="M 488 612 L 488 660 L 478 686" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.75" />
             </g>
 
-            {/* Strike 2 — left side */}
+            {/* Strike 2 — off to the right side, narrower, fewer forks */}
             <g className="ss-strike ss-strike-2" filter="url(#ssGlowFilter)">
-              <path d="M 280 0 L 270 60 L 295 110 L 265 170 L 305 230 L 270 290 L 315 360 L 275 430 L 320 510 L 290 600"
-                stroke="#ffffff" strokeWidth="2.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              <path d="M 295 110 L 240 150 L 260 190 L 200 230 L 220 270"
-                stroke="#ffffff" strokeWidth="1.7" fill="none" />
-              <path d="M 265 170 L 320 200 L 295 240 L 350 270"
-                stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              <path d="M 305 230 L 240 270 L 268 310 L 220 350"
-                stroke="#ffffff" strokeWidth="1.4" fill="none" />
-              <path d="M 270 290 L 330 320 L 300 360" stroke="#ffffff" strokeWidth="1.3" fill="none" />
-              <path d="M 315 360 L 250 400 L 270 440 L 220 480"
-                stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              <path d="M 275 430 L 350 470 L 320 510 L 380 550" stroke="#ffffff" strokeWidth="1.6" fill="none" />
-              {/* impact */}
-              <path d="M 290 600 L 360 650 L 330 680 L 400 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              <path d="M 290 600 L 230 650 L 260 680 L 210 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              <path d="M 290 600 L 290 700 L 270 730" stroke="#ffffff" strokeWidth="1.3" fill="none" />
-            </g>
-
-            {/* Strike 3 — right side */}
-            <g className="ss-strike ss-strike-3" filter="url(#ssGlowFilter)">
-              <path d="M 740 0 L 752 60 L 720 130 L 760 200 L 720 280 L 765 350 L 720 430 L 770 510 L 730 600"
-                stroke="#ffffff" strokeWidth="2.6" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
-              <path d="M 720 130 L 670 170 L 690 210 L 640 250 L 660 290"
-                stroke="#ffffff" strokeWidth="1.6" fill="none" />
-              <path d="M 760 200 L 820 240 L 790 280 L 860 320"
-                stroke="#ffffff" strokeWidth="1.6" fill="none" />
-              <path d="M 720 280 L 660 320 L 685 360 L 630 400"
-                stroke="#ffffff" strokeWidth="1.4" fill="none" />
-              <path d="M 765 350 L 830 390 L 800 430 L 870 470"
-                stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              <path d="M 720 430 L 660 470 L 690 510" stroke="#ffffff" strokeWidth="1.4" fill="none" />
-              <path d="M 770 510 L 830 550 L 800 590" stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              {/* impact */}
-              <path d="M 730 600 L 800 650 L 770 680 L 830 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              <path d="M 730 600 L 670 650 L 700 680 L 650 720" stroke="#ffffff" strokeWidth="1.5" fill="none" />
-              <path d="M 730 600 L 730 700 L 750 730" stroke="#ffffff" strokeWidth="1.3" fill="none" />
+              <path d="M 760 0 L 766 30 L 754 60 L 770 92 L 748 124 L 768 154 L 750 186 L 772 218 L 752 252 L 772 286 L 750 320 L 766 354 L 748 390 L 770 422 L 750 458 L 768 492 L 754 528 L 770 562 L 752 600 L 768 636"
+                stroke="#ffffff" strokeWidth="1.8" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              {/* one major fork */}
+              <path d="M 770 92 L 800 116 L 792 144 L 822 166 L 814 198 L 842 220"
+                stroke="#ffffff" strokeWidth="1.2" fill="none" opacity="0.85" />
+              {/* secondary fork — left-leaning */}
+              <path d="M 752 252 L 722 276 L 732 304 L 706 330" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              {/* micro hairs */}
+              <path d="M 766 354 L 782 366" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.6" />
+              <path d="M 770 422 L 754 434" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.6" />
+              <path d="M 770 562 L 788 576 L 782 590" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.7" />
+              {/* impact splash */}
+              <path d="M 768 636 L 800 666 L 786 688 L 814 712" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              <path d="M 768 636 L 740 668 L 754 690 L 730 712" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
             </g>
           </svg>
 
