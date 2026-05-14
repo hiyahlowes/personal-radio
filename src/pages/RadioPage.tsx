@@ -2407,7 +2407,7 @@ export function RadioPage() {
             aria-pressed={superSaiyan}
             className={`ss-toggle group relative flex items-center gap-3 px-4 py-2 rounded-full border transition-all
               ${superSaiyan
-                ? 'ss-toggle-on bg-gradient-to-r from-fuchsia-600/30 via-purple-600/30 to-violet-600/30 border-fuchsia-400/60 text-fuchsia-100'
+                ? 'ss-toggle-on bg-gradient-to-r from-fuchsia-600/30 via-amber-500/20 to-violet-600/30 border-amber-300/50 text-amber-50'
                 : 'bg-white/5 border-white/10 text-white/60 hover:border-purple-400/40 hover:text-white/80'}`}
           >
             <span className={`text-base leading-none ${superSaiyan ? 'ss-toggle-icon' : 'opacity-60'}`}>⚡</span>

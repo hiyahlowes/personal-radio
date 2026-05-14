@@ -296,13 +296,33 @@ input[type="range"]::-moz-range-thumb {
 }
 
 @keyframes ss-button-zap {
-  0%, 100% { box-shadow: 0 0 18px rgba(168, 85, 247, 0.55), 0 0 40px rgba(168, 85, 247, 0.25); }
-  50%      { box-shadow: 0 0 28px rgba(240, 171, 252, 0.85), 0 0 60px rgba(217, 70, 239, 0.5); }
+  0%, 100% {
+    box-shadow:
+      0 0 16px rgba(168, 85, 247, 0.55),
+      0 0 28px rgba(240, 180, 70, 0.20),
+      0 0 42px rgba(168, 85, 247, 0.22);
+  }
+  50% {
+    box-shadow:
+      0 0 24px rgba(240, 171, 252, 0.85),
+      0 0 38px rgba(245, 190, 80, 0.45),
+      0 0 60px rgba(217, 70, 239, 0.48);
+  }
 }
 
 @keyframes ss-text-flicker {
-  0%, 100% { text-shadow: 0 0 6px rgba(216, 180, 254, 0.7), 0 0 14px rgba(168, 85, 247, 0.4); }
-  50%      { text-shadow: 0 0 12px rgba(240, 171, 252, 1),   0 0 24px rgba(217, 70, 239, 0.7); }
+  0%, 100% {
+    text-shadow:
+      0 0 6px rgba(216, 180, 254, 0.7),
+      0 0 14px rgba(245, 190, 80, 0.18),
+      0 0 20px rgba(168, 85, 247, 0.35);
+  }
+  50% {
+    text-shadow:
+      0 0 10px rgba(240, 171, 252, 1),
+      0 0 18px rgba(250, 200, 90, 0.55),
+      0 0 28px rgba(217, 70, 239, 0.6);
+  }
 }
 
 /* Real lightning is dark→bright→dark in ~80–200ms with a flicker.
@@ -357,8 +377,18 @@ input[type="range"]::-moz-range-thumb {
 }
 
 @keyframes ss-toggle-pulse {
-  0%, 100% { box-shadow: 0 0 14px rgba(217, 70, 239, 0.55), 0 0 30px rgba(168, 85, 247, 0.35); }
-  50%      { box-shadow: 0 0 24px rgba(240, 171, 252, 0.9),  0 0 50px rgba(217, 70, 239, 0.55); }
+  0%, 100% {
+    box-shadow:
+      0 0 14px rgba(217, 70, 239, 0.55),
+      0 0 22px rgba(240, 180, 70, 0.22),
+      0 0 34px rgba(168, 85, 247, 0.32);
+  }
+  50% {
+    box-shadow:
+      0 0 22px rgba(240, 171, 252, 0.9),
+      0 0 34px rgba(250, 195, 85, 0.55),
+      0 0 52px rgba(217, 70, 239, 0.55);
+  }
 }
 
 /* FX overlay layer — sits BEHIND page content (z-1 < z-10 wrapper) */
@@ -450,13 +480,20 @@ input[type="range"]::-moz-range-thumb {
   opacity: 0;
   mix-blend-mode: screen;
 }
-/* Sky-flash synced with the 2 active strikes only */
+/* Sky-flash synced with the 2 active strikes only. Slight warm tint so
+   the bolt's gold halo bleeds into the whole-sky illumination. */
 .ss-skyflash-1 {
-  background: radial-gradient(circle at 50% 28%, rgba(240, 230, 255, 0.38), rgba(180, 160, 220, 0.14) 40%, transparent 70%);
+  background: radial-gradient(circle at 50% 28%,
+    rgba(255, 240, 210, 0.38),
+    rgba(220, 180, 150, 0.14) 40%,
+    transparent 70%);
   animation: ss-skyflash 14s steps(60, end) infinite;
 }
 .ss-skyflash-2 {
-  background: radial-gradient(circle at 32% 24%, rgba(240, 230, 255, 0.32), rgba(170, 150, 215, 0.13) 40%, transparent 70%);
+  background: radial-gradient(circle at 72% 24%,
+    rgba(255, 235, 205, 0.32),
+    rgba(210, 170, 145, 0.13) 40%,
+    transparent 70%);
   animation: ss-skyflash-fast 22s steps(60, end) infinite 7s;
 }
 .ss-skyflash-3 { display: none; }
@@ -471,13 +508,15 @@ input[type="range"]::-moz-range-thumb {
 
 .ss-strike {
   opacity: 0;
-  /* Photographic look: hot white core, brief blue-white inner halo,
-     soft cool afterglow. No saturated purple = less cartoon. */
+  /* Sayajin bolt: white core wrapped in a warm gold inner aura, then
+     cool violet afterglow that bleeds into the clouds. The gold layer
+     reads like hot plasma without going neon. */
   filter:
     drop-shadow(0 0 1px #ffffff)
-    drop-shadow(0 0 4px rgba(255, 255, 255, 0.95))
-    drop-shadow(0 0 14px rgba(220, 220, 255, 0.55))
-    drop-shadow(0 0 40px rgba(160, 140, 210, 0.28));
+    drop-shadow(0 0 4px rgba(255, 245, 210, 0.95))
+    drop-shadow(0 0 12px rgba(255, 195, 90, 0.55))
+    drop-shadow(0 0 26px rgba(220, 200, 235, 0.45))
+    drop-shadow(0 0 48px rgba(160, 140, 210, 0.28));
 }
 /* Strike cadence — only 2 strikes total, long cycles, so the storm is
    sparse rather than constant. Lightning visible ~10% of each cycle. */
@@ -509,11 +548,18 @@ input[type="range"]::-moz-range-thumb {
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: radial-gradient(circle, #ffffff 0%, rgba(253, 244, 255, 0.9) 30%, rgba(240, 171, 252, 0.6) 60%, transparent 100%);
+  /* Warm white-gold core, fading through honey into violet — matches
+     the Sayajin gold-on-purple palette. */
+  background: radial-gradient(circle,
+    #ffffff 0%,
+    rgba(255, 235, 180, 0.95) 28%,
+    rgba(245, 195, 90, 0.7) 55%,
+    rgba(217, 130, 230, 0.45) 80%,
+    transparent 100%);
   box-shadow:
     0 0 4px #ffffff,
-    0 0 10px #f0abfc,
-    0 0 18px #d946ef;
+    0 0 9px rgba(250, 200, 90, 0.9),
+    0 0 16px rgba(217, 130, 230, 0.7);
   opacity: 0;
   transform: translate(0, 0) scale(0);
 }
@@ -565,18 +611,24 @@ input[type="range"]::-moz-range-thumb {
   animation: ss-card-breathe 8s ease-in-out infinite;
 }
 
+/* Sayajin glow: violet base, gold ring threaded in between layers,
+   subtle cool outer wash. */
 @keyframes ss-card-breathe {
   0%, 100% {
     box-shadow:
       0 0 22px rgba(168, 85, 247, 0.28),
-      0 0 50px rgba(124, 58, 237, 0.16),
-      inset 0 0 14px rgba(168, 85, 247, 0.08);
+      0 0 38px rgba(240, 180, 70, 0.12),
+      0 0 55px rgba(124, 58, 237, 0.16),
+      inset 0 0 14px rgba(168, 85, 247, 0.08),
+      inset 0 0 26px rgba(240, 180, 70, 0.05);
   }
   50% {
     box-shadow:
-      0 0 34px rgba(217, 70, 239, 0.40),
-      0 0 75px rgba(168, 85, 247, 0.24),
-      inset 0 0 20px rgba(168, 85, 247, 0.14);
+      0 0 30px rgba(217, 70, 239, 0.42),
+      0 0 52px rgba(240, 185, 75, 0.28),
+      0 0 78px rgba(168, 85, 247, 0.22),
+      inset 0 0 18px rgba(168, 85, 247, 0.14),
+      inset 0 0 32px rgba(240, 185, 75, 0.08);
   }
 }
 
