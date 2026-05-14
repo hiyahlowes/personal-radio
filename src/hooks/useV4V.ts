@@ -121,7 +121,6 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts: number, label: st
     try {
       return await fn();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
       // Timeout errors: every retry wastes another 60 s — fail fast instead
       if (isTimeoutLike(e)) {
         throw e;
@@ -160,6 +159,10 @@ function loadBuffer(): Map<string, PendingPayment> {
 
 function saveBuffer(buf: Map<string, PendingPayment>) {
   localStorage.setItem(NWC_PENDING_KEY, JSON.stringify([...buf.entries()]));
+}
+
+function getPendingTotal(buf: Map<string, PendingPayment>): number {
+  return [...buf.values()].reduce((s, e) => s + Math.max(0, e.accumulatedSats), 0);
 }
 
 /**
@@ -329,6 +332,7 @@ export function useV4V() {
   const failureCountRef    = useRef<Map<string, number>>(new Map());
   const disabledRef        = useRef<Set<string>>(new Set());
   const connectAttemptRef  = useRef(0);
+  const flushInFlightRef   = useRef(false);
 
   // Keep refs in sync with state (so callbacks don't need to re-register)
   useEffect(() => { satRateRef.current   = satRatePerMinute; }, [satRatePerMinute]);
@@ -344,22 +348,15 @@ export function useV4V() {
 
     if (!client || buf.size === 0) return result;
 
-    if (reason) console.log(`[V4V] flush triggered — reason: "${reason}"`);
-
-    // Health check — only use get_balance when the wallet explicitly advertises it.
-    // Otherwise this creates noisy, non-actionable failures before every flush.
-    if (capabilities.includes('get_balance')) {
-      try {
-        await client.getBalance();
-      } catch (e) {
-        if (isTimeoutLike(e)) {
-          console.warn('[V4V] NWC wallet unreachable — skipping flush');
-          setHasPaymentErrors(true);
-          return result;
-        }
-        // Non-timeout errors from getBalance are non-fatal even when advertised.
-      }
+    if (flushInFlightRef.current) {
+      if (reason) console.log(`[V4V] flush skipped — already running (reason: "${reason}")`);
+      return result;
     }
+
+    flushInFlightRef.current = true;
+
+    try {
+    if (reason) console.log(`[V4V] flush triggered — reason: "${reason}"`);
 
     const now          = Date.now();
     const senderId     = senderIdRef.current;
@@ -371,18 +368,22 @@ export function useV4V() {
 
     for (const [address, entry] of buf.entries()) {
       if (disabledRef.current.has(address)) {
-        console.log(`[V4V] skipping disabled recipient "${entry.recipientName}"`);
+        console.log(`[V4V] clearing disabled recipient "${entry.recipientName}"`);
+        buf.delete(address);
         continue;
       }
+
+      if (entry.accumulatedSats <= 0) {
+        buf.delete(address);
+        continue;
+      }
+
       const overThreshold = entry.accumulatedSats >= MIN_FLUSH_SATS;
       const isStale       = (now - entry.firstAccumulatedAt) >= MAX_BUFFER_AGE_MS;
       if (!overThreshold && !isStale) {
-        if (entry.accumulatedSats > 0) {
-          console.log(`[V4V] skipping "${entry.recipientName}" — only ${entry.accumulatedSats} sats (below 10 sat threshold)`);
-        }
+        console.log(`[V4V] skipping "${entry.recipientName}" — only ${entry.accumulatedSats} sats (below 10 sat threshold)`);
         continue;
       }
-      if (entry.accumulatedSats <= 0) continue;
 
       if (entry.recipientType === 'node') {
         keysendBatch.push({ address, entry });
@@ -394,6 +395,32 @@ export function useV4V() {
     }
 
     const allBatches = [...keysendBatch, ...invoiceBatch, ...wavlakeBatch];
+
+    if (allBatches.length === 0) {
+      saveBuffer(buf);
+      setPendingTotal(getPendingTotal(buf));
+      setLastFlushResult(result);
+      console.log('[V4V] flush skipped — no payable recipients');
+      return result;
+    }
+
+    // Health check — only use get_balance when the wallet explicitly advertises it.
+    // Otherwise this creates noisy, non-actionable failures before every flush.
+    if (capabilities.includes('get_balance')) {
+      try {
+        await client.getBalance();
+      } catch (e) {
+        if (isTimeoutLike(e)) {
+          console.warn('[V4V] NWC wallet unreachable — skipping flush');
+          saveBuffer(buf);
+          setPendingTotal(getPendingTotal(buf));
+          setLastFlushResult(result);
+          setHasPaymentErrors(true);
+          return result;
+        }
+        // Non-timeout errors from getBalance are non-fatal even when advertised.
+      }
+    }
     console.log(`[V4V] flush — ${allBatches.length} recipients, total: ${allBatches.reduce((s, { entry }) => s + entry.accumulatedSats, 0)} sats`);
 
     // TLV stream metadata (bLIP-10, type 7629169)
@@ -439,7 +466,7 @@ export function useV4V() {
             console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
-            buf.get(address)!.accumulatedSats = 0;
+            buf.delete(address);
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -464,7 +491,7 @@ export function useV4V() {
             console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
-            buf.get(address)!.accumulatedSats = 0;
+            buf.delete(address);
             failureCountRef.current.delete(address);
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -474,6 +501,7 @@ export function useV4V() {
             failureCountRef.current.set(address, count);
             if (count >= MAX_CONSEC_FAILURES) {
               disabledRef.current.add(address);
+              buf.delete(address);
               console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
             }
           }
@@ -493,7 +521,7 @@ export function useV4V() {
         console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
         result.sent     += entry.accumulatedSats;
         result.payments += 1;
-        buf.get(address)!.accumulatedSats = 0;
+        buf.delete(address);
         failureCountRef.current.delete(address);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -503,6 +531,7 @@ export function useV4V() {
         failureCountRef.current.set(address, count);
         if (count >= MAX_CONSEC_FAILURES) {
           disabledRef.current.add(address);
+          buf.delete(address);
           console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
         }
       }
@@ -525,13 +554,14 @@ export function useV4V() {
 
         if (proxyData.below_minimum) {
           console.log(`[V4V] buffering ${entry.accumulatedSats} sats for "${entry.recipientName}" — below Wavlake minimum (${proxyData.minSendableSats} sats)`);
+          entry.firstAccumulatedAt = now;
           paid = true; // carry forward, no fallback needed
         } else if (proxyData.pr) {
           await client.sendPayment(proxyData.pr);
           console.log(`[V4V] ✅ paid ${entry.accumulatedSats} sats for "${entry.recipientName}" via Wavlake LNURL`);
           result.sent     += entry.accumulatedSats;
           result.payments += 1;
-          buf.get(trackId)!.accumulatedSats = 0;
+          buf.delete(trackId);
           failureCountRef.current.delete(trackId);
           paid = true;
         } else {
@@ -559,7 +589,7 @@ export function useV4V() {
           console.log(`[V4V] ✅ paid ${entry.accumulatedSats} sats for "${entry.recipientName}" via keysend fallback`);
           result.sent     += entry.accumulatedSats;
           result.payments += 1;
-          buf.get(trackId)!.accumulatedSats = 0;
+          buf.delete(trackId);
           failureCountRef.current.delete(trackId);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -569,13 +599,14 @@ export function useV4V() {
           failureCountRef.current.set(trackId, count);
           if (count >= MAX_CONSEC_FAILURES) {
             disabledRef.current.add(trackId);
+            buf.delete(trackId);
             console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
           }
         }
       }
     }
 
-    // Persist updated buffer (amounts zeroed, entries kept for future accumulation)
+    // Persist updated buffer after paid, disabled, and zero-value entries are pruned.
     saveBuffer(buf);
 
     if (result.sent > 0) {
@@ -593,11 +624,14 @@ export function useV4V() {
     }
 
     // Recompute pending total
-    const newPending = [...buf.values()].reduce((s, e) => s + e.accumulatedSats, 0);
+    const newPending = getPendingTotal(buf);
     setPendingTotal(newPending);
 
     setLastFlushResult(result);
     return result;
+    } finally {
+      flushInFlightRef.current = false;
+    }
   }, [capabilities]);
 
   // ── Connection ─────────────────────────────────────────────────────────────
