@@ -2406,18 +2406,26 @@ export function RadioPage() {
           {/* Activation burst — re-mounts on every OFF→ON via key */}
           <div key={ssBurstKey} className="ss-burst" />
 
-          {/* Floating PR-logo plaques — round, 3D-feel discs that drift through
-              the fog on either side of the player. Each carries its own pulse
-              keyframe that briefly coincides with a lightning strike, giving
-              the impression of being hit by the bolt: a 3 s glow that fades. */}
+          {/* Floating PR-logo plaques — circular 3D-feel coin bodies that
+              drift through the fog and spin slowly on their Y-axis. The
+              PNG is masked to a circle via `overflow: hidden`+border-radius
+              and laid over the disc face as a skin. A radial highlight is
+              painted on top to suggest the curved surface catching light;
+              `.ss-plaque-rim` paints a thin metallic edge. Each plaque
+              carries a pulse keyframe that coincides with a lightning
+              strike, lighting it up for ~3 s before fading. */}
           <div className="ss-plaque ss-plaque-left">
             <div className="ss-plaque-disc">
-              <img src="/PR_logo.png" alt="" className="ss-plaque-logo" />
+              <img src="/PR_logo.png" alt="" className="ss-plaque-face" />
+              <div className="ss-plaque-shine" />
+              <div className="ss-plaque-rim" />
             </div>
           </div>
           <div className="ss-plaque ss-plaque-right">
             <div className="ss-plaque-disc">
-              <img src="/PR_logo.png" alt="" className="ss-plaque-logo" />
+              <img src="/PR_logo.png" alt="" className="ss-plaque-face" />
+              <div className="ss-plaque-shine" />
+              <div className="ss-plaque-rim" />
             </div>
           </div>
 

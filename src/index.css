@@ -393,7 +393,14 @@ input[type="range"]::-moz-range-thumb {
 
 /* FX overlay layer — sits BEHIND page content (z-1 < z-10 wrapper).
    Always mounted while the user has armed the mode; visibility is driven
-   by `.ss-on` so the storm can slowly fade in/out instead of popping. */
+   by `.ss-on` so the storm can slowly fade in/out instead of popping.
+
+   Perf: promoted to its own GPU composite layer (translateZ + will-change)
+   AND `contain: paint` so page scroll doesn't invalidate the heavy
+   blurred clouds. When toggled off we also flip `visibility: hidden`
+   after the opacity transition ends — that lets the browser skip
+   compositing the layer entirely, instead of paying for blur filters
+   on five invisible clouds every frame. */
 .ss-fx-layer {
   position: fixed;
   inset: 0;
@@ -401,9 +408,17 @@ input[type="range"]::-moz-range-thumb {
   z-index: 1;
   overflow: hidden;
   opacity: 0;
-  transition: opacity 2.6s ease-in-out;
+  visibility: hidden;
+  transition: opacity 2.6s ease-in-out, visibility 0s linear 2.6s;
+  transform: translateZ(0);
+  will-change: opacity;
+  contain: paint;
 }
-.ss-fx-layer.ss-on { opacity: 1; }
+.ss-fx-layer.ss-on {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 2.6s ease-in-out, visibility 0s linear 0s;
+}
 
 /* Cloud / fog layer — desaturated dark-purple clouds, heavily blurred for
    a diffuse storm-fog look. Drift cycles are long (40-60s) so motion is
@@ -418,31 +433,43 @@ input[type="range"]::-moz-range-thumb {
 .ss-cloud {
   position: absolute;
   border-radius: 50%;
-  filter: blur(70px) drop-shadow(0 0 32px rgba(168, 85, 247, 0.24)) drop-shadow(0 0 70px rgba(240, 180, 70, 0.10));
+  /* Single blur only — earlier versions stacked drop-shadow filters here
+     to suggest internal glow, but on heavily-blurred elements drop-shadow
+     produces a soft halo that reads as a bright band rather than diffuse
+     fog. Inner glow now comes from the layered rgba radial-gradients in
+     each cloud's background. Single blur is also much cheaper to paint. */
+  filter: blur(50px);
+  /* GPU promotion — clouds drift continuously, scrolling the page should
+     not invalidate them. translateZ + will-change keeps each cloud on
+     its own composited layer so the only per-frame work is a transform. */
+  transform: translateZ(0);
   will-change: transform;
 }
 
-/* Front clouds — drawn over the lightning SVG. Slightly less blur so the
-   cloud edge reads as a soft mask over the bolt; reduced opacity so the
-   bolt still bleeds through enough to look like it's piercing the cloud
-   rather than being hidden entirely. */
+/* Front clouds — drawn over the lightning SVG, slightly less blur so the
+   cloud edge reads as a soft mask over the bolt. The bolt still bleeds
+   through enough to look like it's piercing the cloud rather than being
+   hidden entirely. */
 .ss-cloud-front {
-  filter: blur(58px) drop-shadow(0 0 36px rgba(168, 85, 247, 0.28)) drop-shadow(0 0 70px rgba(240, 180, 70, 0.12));
-  mix-blend-mode: normal;
+  filter: blur(42px);
 }
 
-/* Bottom-spanning fog bank — the "cloud floor" the strikes hit */
+/* Bottom-spanning fog bank — the "cloud floor" the strikes hit. Each cloud
+   is a stack of radial gradients with warm-purple cores and a touch of
+   gold/peach at the centres so the storm reads as backlit fog from inside. */
 .ss-cloud-1 {
   bottom: -25vh;
   left: -20vw;
   width: 140vw;
   height: 75vh;
   background:
-    radial-gradient(ellipse 45% 50% at 28% 60%, rgba(110, 70, 150, 0.55), transparent 70%),
-    radial-gradient(ellipse 40% 45% at 65% 55%, rgba(95, 60, 135, 0.50), transparent 72%),
-    radial-gradient(ellipse 35% 40% at 50% 45%, rgba(140, 100, 180, 0.32), transparent 75%);
+    radial-gradient(ellipse 28% 32% at 28% 60%, rgba(245, 195, 110, 0.18), transparent 65%),
+    radial-gradient(ellipse 45% 50% at 28% 60%, rgba(130, 80, 170, 0.65), transparent 70%),
+    radial-gradient(ellipse 26% 30% at 65% 55%, rgba(240, 180, 90, 0.14), transparent 65%),
+    radial-gradient(ellipse 40% 45% at 65% 55%, rgba(110, 70, 150, 0.58), transparent 72%),
+    radial-gradient(ellipse 35% 40% at 50% 45%, rgba(155, 110, 195, 0.38), transparent 75%);
   animation: ss-cloud-drift-a 48s ease-in-out infinite;
-  opacity: 0.85;
+  opacity: 0.9;
 }
 .ss-cloud-2 {
   bottom: -20vh;
@@ -450,10 +477,11 @@ input[type="range"]::-moz-range-thumb {
   width: 120vw;
   height: 65vh;
   background:
-    radial-gradient(ellipse 45% 50% at 60% 55%, rgba(125, 85, 165, 0.42), transparent 72%),
-    radial-gradient(ellipse 40% 45% at 25% 65%, rgba(100, 65, 140, 0.40), transparent 72%);
+    radial-gradient(ellipse 26% 32% at 60% 55%, rgba(240, 175, 95, 0.14), transparent 65%),
+    radial-gradient(ellipse 45% 50% at 60% 55%, rgba(140, 95, 175, 0.50), transparent 72%),
+    radial-gradient(ellipse 40% 45% at 25% 65%, rgba(115, 75, 155, 0.46), transparent 72%);
   animation: ss-cloud-drift-b 56s ease-in-out infinite 6s;
-  opacity: 0.7;
+  opacity: 0.78;
 }
 /* Upper haze framing the page — keeps the top from looking empty */
 .ss-cloud-3 {
@@ -462,10 +490,11 @@ input[type="range"]::-moz-range-thumb {
   width: 110vw;
   height: 55vh;
   background:
-    radial-gradient(ellipse 45% 55% at 45% 70%, rgba(95, 60, 135, 0.42), transparent 75%),
-    radial-gradient(ellipse 35% 45% at 75% 55%, rgba(80, 50, 120, 0.38), transparent 75%);
+    radial-gradient(ellipse 24% 30% at 45% 70%, rgba(240, 180, 100, 0.12), transparent 65%),
+    radial-gradient(ellipse 45% 55% at 45% 70%, rgba(110, 70, 150, 0.48), transparent 75%),
+    radial-gradient(ellipse 35% 45% at 75% 55%, rgba(90, 55, 130, 0.42), transparent 75%);
   animation: ss-cloud-drift-c 60s ease-in-out infinite 3s;
-  opacity: 0.65;
+  opacity: 0.72;
 }
 .ss-cloud-4 {
   top: -12vh;
@@ -473,23 +502,26 @@ input[type="range"]::-moz-range-thumb {
   width: 90vw;
   height: 42vh;
   background:
-    radial-gradient(ellipse 50% 55% at 40% 65%, rgba(115, 75, 155, 0.35), transparent 75%),
-    radial-gradient(ellipse 40% 45% at 70% 50%, rgba(95, 60, 135, 0.32), transparent 75%);
+    radial-gradient(ellipse 24% 32% at 40% 65%, rgba(240, 180, 100, 0.10), transparent 65%),
+    radial-gradient(ellipse 50% 55% at 40% 65%, rgba(130, 85, 170, 0.42), transparent 75%),
+    radial-gradient(ellipse 40% 45% at 70% 50%, rgba(110, 70, 150, 0.38), transparent 75%);
   animation: ss-cloud-drift-a 52s ease-in-out infinite 10s;
-  opacity: 0.6;
+  opacity: 0.7;
 }
-/* Mid-screen wisp drifting across — adds depth without obscuring content */
+/* Mid-screen wisp drifting across — adds depth without obscuring content.
+   This cloud sits IN FRONT of the lightning so the bolt sometimes appears
+   to be partly inside it. */
 .ss-cloud-5 {
   top: 38vh;
   left: -30vw;
   width: 160vw;
   height: 32vh;
   background:
-    radial-gradient(ellipse 25% 60% at 22% 50%, rgba(120, 85, 165, 0.18), transparent 78%),
-    radial-gradient(ellipse 22% 55% at 55% 50%, rgba(100, 70, 145, 0.16), transparent 78%),
-    radial-gradient(ellipse 26% 60% at 82% 50%, rgba(115, 80, 160, 0.18), transparent 78%);
+    radial-gradient(ellipse 25% 60% at 22% 50%, rgba(140, 95, 180, 0.26), transparent 78%),
+    radial-gradient(ellipse 22% 55% at 55% 50%, rgba(115, 80, 165, 0.22), transparent 78%),
+    radial-gradient(ellipse 26% 60% at 82% 50%, rgba(135, 90, 175, 0.26), transparent 78%);
   animation: ss-cloud-drift-b 70s ease-in-out infinite 8s;
-  opacity: 0.45;
+  opacity: 0.55;
 }
 
 /* Sky-flash: full-viewport tints synced with strikes */
@@ -629,6 +661,13 @@ input[type="range"]::-moz-range-thumb {
   border-color: rgba(180, 130, 220, 0.28);
   backdrop-filter: none;
   animation: ss-card-breathe 8s ease-in-out infinite;
+  /* GPU promotion + paint containment: prevents scroll from invalidating
+     every card. Without this, scrolling caused the playlist to disappear
+     mid-scroll and pop back in once the breathe shadow finished
+     re-composing. */
+  transform: translateZ(0);
+  will-change: box-shadow;
+  contain: layout paint;
 }
 
 /* Sayajin glow: violet base, gold ring threaded in between layers,
@@ -706,72 +745,114 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   PR-logo plaques — round 3D-feel discs that drift through the fog on
-   either side of the player. Each plaque rotates slowly in 3D; a separate
-   pulse keyframe lines up with a lightning strike, briefly lighting the
-   plaque from within for ~3 s before fading. The pulse cycle matches the
-   bolt cycle so the plaque appears to be "hit" by the strike.
+   PR-logo plaques — circular coin bodies that drift through the fog on
+   either side of the player and spin slowly on their Y axis. Built in
+   three layers:
+
+     .ss-plaque-disc   – the coin body. `overflow: hidden` + border-radius
+                         makes every child render inside a perfect circle.
+                         Carries the 3D spin animation and the strike-hit
+                         pulse via `filter: brightness/drop-shadow` (cheap
+                         on the GPU) rather than re-rendering box-shadow
+                         every frame.
+     .ss-plaque-face   – the PR logo PNG, sized with `object-fit: cover`
+                         so the square image is clipped to the circle and
+                         fills the face cleanly.
+     .ss-plaque-shine  – a radial highlight overlay that suggests a curved
+                         metal surface catching light from upper-left.
+     .ss-plaque-rim    – a thin inset ring that reads as the coin's edge.
+
+   Perf: only `transform` and `filter` animate. No box-shadow keyframes,
+   no per-frame radial-gradient repaints. The .ss-plaque element itself
+   is GPU-promoted so the drift doesn't trigger page layout.
    ──────────────────────────────────────────────────────────────────────── */
 
 .ss-plaque {
   position: absolute;
-  width: 96px;
-  height: 96px;
+  width: 92px;
+  height: 92px;
   pointer-events: none;
   perspective: 600px;
-  /* Float the plaque gently through the fog. The drift is small — these
-     are anchors in the storm, not orbiting moons. */
   animation: ss-plaque-drift 26s ease-in-out infinite;
+  transform: translateZ(0);
   will-change: transform;
 }
 .ss-plaque-left  { top: 22vh; left: max(2vw, calc(50vw - 360px)); animation-delay: -3s; }
 .ss-plaque-right { top: 58vh; right: max(2vw, calc(50vw - 360px)); animation-delay: -15s; animation-duration: 32s; }
 
 @keyframes ss-plaque-drift {
-  0%, 100% { transform: translate(0, 0); }
-  25%      { transform: translate(-8px, -12px); }
-  50%      { transform: translate(4px, -20px); }
-  75%      { transform: translate(10px, -6px); }
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  25%      { transform: translate3d(-8px, -12px, 0); }
+  50%      { transform: translate3d(4px, -20px, 0); }
+  75%      { transform: translate3d(10px, -6px, 0); }
 }
 
-/* Inner disc — spins on its Y-axis (3D) so it reads as a coin face. The
-   spin cycle is long enough to feel architectural, not toy-like.
-   Pulse animation rides on top via filter to brighten the disc on hits. */
+/* The coin body. Everything inside is clipped to a perfect circle. */
 .ss-plaque-disc {
+  position: relative;
   width: 100%;
   height: 100%;
   border-radius: 50%;
+  overflow: hidden;
+  /* Deep purple base + a top-left "metal" highlight + a bottom-right
+     shadow so the disc reads as a 3D coin even when not spinning. */
   background:
-    radial-gradient(circle at 35% 30%, rgba(255, 230, 180, 0.18), transparent 55%),
-    radial-gradient(circle at 50% 50%, rgba(60, 30, 110, 0.92), rgba(20, 8, 45, 0.95) 80%);
-  border: 1px solid rgba(216, 180, 254, 0.35);
+    radial-gradient(circle at 30% 25%, rgba(255, 240, 210, 0.18), transparent 45%),
+    radial-gradient(circle at 70% 80%, rgba(0, 0, 0, 0.55), transparent 60%),
+    radial-gradient(circle at 50% 50%, #3a1a72 0%, #1a0a3e 78%, #0c0420 100%);
+  /* Outer drop-shadow gives the coin a faint cast shadow on the fog,
+     reinforcing depth without the cost of an animated box-shadow. */
   box-shadow:
-    inset 0 0 18px rgba(168, 85, 247, 0.25),
-    inset 0 0 6px rgba(255, 235, 200, 0.10),
-    0 0 12px rgba(168, 85, 247, 0.20);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+    0 4px 16px rgba(0, 0, 0, 0.55),
+    0 0 12px rgba(168, 85, 247, 0.32);
   transform-style: preserve-3d;
-  /* Two animations stacked: a slow 3D spin (continuous) and a
-     synchronized-with-strike pulse that lights the disc up for ~3s. */
   animation:
     ss-plaque-spin 12s linear infinite,
-    ss-plaque-hit-1 14s steps(120, end) infinite;
+    ss-plaque-hit  14s steps(140, end) infinite;
 }
 .ss-plaque-right .ss-plaque-disc {
   animation:
     ss-plaque-spin 14s linear infinite reverse,
-    ss-plaque-hit-2 22s steps(120, end) infinite 7s;
+    ss-plaque-hit  22s steps(140, end) infinite 7s;
 }
 
-.ss-plaque-logo {
-  width: 60%;
-  height: 60%;
-  object-fit: contain;
-  /* Drop-shadow gives the logo a faint embossed lift on the disc. */
-  filter: drop-shadow(0 1px 1px rgba(0,0,0,0.6));
-  opacity: 0.92;
+/* The PR logo as a skin on the coin's face. `object-fit: cover` makes the
+   square PNG fill the circular disc — the image's corners are clipped by
+   the disc's `overflow: hidden`. Inset slightly so the rim shows. */
+.ss-plaque-face {
+  position: absolute;
+  inset: 6%;
+  width: 88%;
+  height: 88%;
+  object-fit: cover;
+  border-radius: 50%;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.65));
+}
+
+/* Top-left highlight overlay — sells the curved metal surface. */
+.ss-plaque-shine {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 24%,
+    rgba(255, 245, 215, 0.30) 0%,
+    rgba(255, 235, 200, 0.10) 25%,
+    transparent 55%);
+  pointer-events: none;
+}
+
+/* Thin metallic rim — sits on top of everything, masks the face's
+   anti-aliased edge into a clean circle. */
+.ss-plaque-rim {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 0 1px rgba(216, 180, 254, 0.55),
+    inset 0 0 8px rgba(255, 235, 200, 0.18),
+    inset 0 -3px 6px rgba(0, 0, 0, 0.45),
+    inset 0 3px 4px rgba(255, 235, 200, 0.14);
+  pointer-events: none;
 }
 
 @keyframes ss-plaque-spin {
@@ -780,64 +861,32 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* Hit pulse — quiet for most of the cycle, then a fast brighten coincident
-   with a strike, followed by a ~3 s decay back to baseline.
-   The cycle duration matches the matching strike animation so the visual
-   "hit moment" lines up. */
-@keyframes ss-plaque-hit-1 {
-  0%, 100%, 86%   {
-    box-shadow:
-      inset 0 0 18px rgba(168, 85, 247, 0.25),
-      inset 0 0 6px rgba(255, 235, 200, 0.10),
-      0 0 12px rgba(168, 85, 247, 0.20);
-    background:
-      radial-gradient(circle at 35% 30%, rgba(255, 230, 180, 0.18), transparent 55%),
-      radial-gradient(circle at 50% 50%, rgba(60, 30, 110, 0.92), rgba(20, 8, 45, 0.95) 80%);
+   with the strike followed by a ~3 s decay. Uses `filter` only (no
+   box-shadow rewrites) so the GPU can composite the brightness change
+   without repainting the disc's layered gradients. */
+@keyframes ss-plaque-hit {
+  0%, 100%, 86% {
+    filter: brightness(1) drop-shadow(0 0 0 transparent);
   }
-  89%   {
-    box-shadow:
-      inset 0 0 30px rgba(255, 235, 200, 0.65),
-      inset 0 0 14px rgba(245, 195, 90, 0.55),
-      0 0 38px rgba(255, 235, 200, 0.85),
-      0 0 72px rgba(217, 70, 239, 0.6);
-    background:
-      radial-gradient(circle at 35% 30%, rgba(255, 245, 210, 0.55), transparent 55%),
-      radial-gradient(circle at 50% 50%, rgba(150, 100, 200, 0.95), rgba(60, 30, 110, 0.95) 80%);
+  88.5% {
+    filter:
+      brightness(2.4)
+      drop-shadow(0 0 16px rgba(255, 235, 200, 0.95))
+      drop-shadow(0 0 38px rgba(245, 195, 90, 0.85))
+      drop-shadow(0 0 60px rgba(217, 70, 239, 0.7));
   }
-  /* ~3s glow tail — 14s cycle, so 3s ≈ 21% of cycle */
-  95%   {
-    box-shadow:
-      inset 0 0 24px rgba(216, 180, 254, 0.45),
-      inset 0 0 10px rgba(255, 230, 180, 0.30),
-      0 0 24px rgba(168, 85, 247, 0.55),
-      0 0 48px rgba(245, 195, 90, 0.30);
+  /* ~3 s decay tail (3s / 14s ≈ 21% of the cycle, so land at ~107% — wrap
+     by shaping the curve to come back through 95% / 100%) */
+  92% {
+    filter:
+      brightness(1.6)
+      drop-shadow(0 0 10px rgba(255, 230, 200, 0.55))
+      drop-shadow(0 0 24px rgba(245, 195, 90, 0.45));
   }
-}
-@keyframes ss-plaque-hit-2 {
-  0%, 100%, 70%   {
-    box-shadow:
-      inset 0 0 18px rgba(168, 85, 247, 0.25),
-      inset 0 0 6px rgba(255, 235, 200, 0.10),
-      0 0 12px rgba(168, 85, 247, 0.20);
-    background:
-      radial-gradient(circle at 35% 30%, rgba(255, 230, 180, 0.18), transparent 55%),
-      radial-gradient(circle at 50% 50%, rgba(60, 30, 110, 0.92), rgba(20, 8, 45, 0.95) 80%);
-  }
-  72.5% {
-    box-shadow:
-      inset 0 0 30px rgba(255, 235, 200, 0.65),
-      inset 0 0 14px rgba(245, 195, 90, 0.55),
-      0 0 38px rgba(255, 235, 200, 0.85),
-      0 0 72px rgba(217, 70, 239, 0.6);
-    background:
-      radial-gradient(circle at 35% 30%, rgba(255, 245, 210, 0.55), transparent 55%),
-      radial-gradient(circle at 50% 50%, rgba(150, 100, 200, 0.95), rgba(60, 30, 110, 0.95) 80%);
-  }
-  86%   {
-    box-shadow:
-      inset 0 0 24px rgba(216, 180, 254, 0.45),
-      inset 0 0 10px rgba(255, 230, 180, 0.30),
-      0 0 24px rgba(168, 85, 247, 0.55),
-      0 0 48px rgba(245, 195, 90, 0.30);
+  95% {
+    filter:
+      brightness(1.25)
+      drop-shadow(0 0 6px rgba(216, 180, 254, 0.4));
   }
 }
 
