@@ -169,7 +169,6 @@ export function SetupPage() {
   };
 
   // ── Navigation guards ──────────────────────────────────────────────────────
-  const canNext1 = true; // language always has a default
   const canNext2 = name.trim().length > 0;
   const canNext3 = selectedGenres.length > 0;
   const canNext4 = addedFeeds.length > 0;

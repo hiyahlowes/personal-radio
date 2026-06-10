@@ -58,12 +58,11 @@ function lp(en: string, de: string, fr: string): string {
  * when spoken aloud: "(Acoustic Version)", "[Remaster]", "(feat. X)", "(Live)", etc.
  */
 function cleanTrackTitle(title: string): string {
+  const suffixWords = 'feat\\.?|ft\\.?|featuring|acoustic|acustico|live|live at .+?|remaster(ed)?|remix(ed)?|radio edit|single (version|edit)|album version|extended|instrumental|demo|cover|original|bonus|deluxe|explicit|clean|radio version|unplugged|version|edit|mix';
+  const suffixPattern = new RegExp(`\\s*(?:\\((${suffixWords})[^)]*\\)|\\[(${suffixWords})[^\\]]*\\])`, 'gi');
   return title
-    .replace(
-      /\s*[\(\[](feat\.?|ft\.?|featuring|acoustic|acustico|live|live at .+?|remaster(ed)?|remix(ed)?|radio edit|single (version|edit)|album version|extended|instrumental|demo|cover|original|bonus|deluxe|explicit|clean|radio version|unplugged|version|edit|mix)[^\)\]]*[\)\]]/gi,
-      ''
-    )
-    .replace(/\s*[\(\[\{][^\)\]\}]*[\)\]\}]\s*$/, '')
+    .replace(suffixPattern, '')
+    .replace(/\s*(?:\([^)]*\)|\[[^\]]*\]|[{][^}]*[}])\s*$/, '')
     .trim();
 }
 

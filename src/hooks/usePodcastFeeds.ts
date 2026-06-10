@@ -250,7 +250,7 @@ function getPodcastValueTag(item: Element, channel: Element | null): ValueTag | 
   ];
 
   const recipients: ValueRecipient[] = recipientEls
-    .map(el => {
+    .map<ValueRecipient | null>(el => {
       const recipType = el.getAttribute('type') ?? '';
       const address   = el.getAttribute('address') ?? el.getAttribute('node') ?? '';
       const splitRaw  = el.getAttribute('split') ?? '0';

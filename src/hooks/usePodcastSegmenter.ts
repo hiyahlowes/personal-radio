@@ -722,7 +722,6 @@ export function usePodcastSegmenter() {
 
       // Promise that resolves true on natural end, false on split or pause
       const result = await new Promise<'ended' | 'split' | 'paused'>((resolve) => {
-        let pollId: ReturnType<typeof setInterval>;
         let prevPollTime = audio.currentTime; // for seek detection
 
         function cleanup() {
@@ -744,12 +743,9 @@ export function usePodcastSegmenter() {
           // else: transient pause (buffering) — ignore
         };
 
-        audio.addEventListener('ended', onEnded);
-        audio.addEventListener('pause', onPause);
-
         let silenceStart: number | null = null;
 
-        pollId = setInterval(() => {
+        const pollId = setInterval(() => {
           if (!callbacks.isRunning()) { cleanup(); resolve('paused'); return; }
 
           const ct = audio.currentTime;
@@ -907,6 +903,9 @@ export function usePodcastSegmenter() {
             }
           }
         }, POLL_INTERVAL);
+
+        audio.addEventListener('ended', onEnded);
+        audio.addEventListener('pause', onPause);
       });
 
       if (result === 'paused' || !callbacks.isRunning()) {

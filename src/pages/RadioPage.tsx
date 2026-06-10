@@ -27,6 +27,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { getStoredName } from '@/pages/SetupPage';
 import type { ItemMeta } from '@/types/value4value';
 
+type WindowWithWebkitAudio = Window & typeof globalThis & {
+  webkitAudioContext?: typeof AudioContext;
+};
+
+type HowlerWithOptionalContext = typeof Howler & {
+  ctx?: AudioContext;
+};
+
 // ─── Play-count helpers ────────────────────────────────────────────────────────
 /** In-place Fisher-Yates shuffle; returns the same array. */
 function fisherYates<T>(arr: T[]): T[] {
@@ -55,11 +63,6 @@ function applyPlayCountBias(
   return current ? [current, ...unplayed, ...played] : [...unplayed, ...played];
 }
 
-// ─── RadioItem union ─────────────────────────────────────────────────────────
-type RadioItem =
-  | { kind: 'music';   track:   WavlakeTrack    }
-  | { kind: 'podcast'; episode: PodcastEpisode  };
-
 // ─── Volume ramping via setInterval ──────────────────────────────────────────
 const DUCK_LEVEL     = 0.08;
 const BRIDGE_VOLUME  = 0.3;  // ambient bridge playback volume
@@ -71,7 +74,7 @@ const TICK_MS        = 40;   // ~25 steps/s — smooth enough
 // Warms the audio session on the first touchend anywhere on the page.
 // Based on: https://gist.github.com/kus/3f01d60569eeadefe3a1
 const _warmIOSAudio = () => {
-  const AudioCtxCtor = window.AudioContext ?? (window as any).webkitAudioContext as typeof AudioContext | undefined;
+  const AudioCtxCtor = window.AudioContext ?? (window as WindowWithWebkitAudio).webkitAudioContext;
   if (!AudioCtxCtor) return;
   const ctx    = new AudioCtxCtor();
   const buffer = ctx.createBuffer(1, 1, 22050);
@@ -81,7 +84,7 @@ const _warmIOSAudio = () => {
   source.start(0);
   // Also resume Howler's shared AudioContext if it already exists
   // (created lazily by the first Howl instance — may be undefined here).
-  (Howler as any).ctx?.resume();
+  (Howler as HowlerWithOptionalContext).ctx?.resume();
   // Create + unlock the TTS element within the gesture so iOS allows play()
   // later without a fresh gesture token.
   unlockTTSAudio();
@@ -488,7 +491,7 @@ export function RadioPage() {
   useEffect(() => { markMusicPlayedRef.current = musicHistory.markPlayed;   }, [musicHistory.markPlayed]);
 
   // Set of track IDs that have been played at least once — used for UI indicators.
-  const playedTrackIds = useMemo(
+  const _playedTrackIds = useMemo(
     () => new Set(Object.keys(musicHistory.history)),
     [musicHistory.history],
   );
@@ -562,7 +565,7 @@ export function RadioPage() {
   // playlist, used only as background music under podcast transition speech.
   useEffect(() => {
     fetchAmbientBridgePool(5).then(pool => { ambientBridgeRef.current = pool; });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Pre-generate greeting ─────────────────────────────────────────────────
   // Fires once on mount — as early as possible, before firstName state may
@@ -1046,22 +1049,25 @@ export function RadioPage() {
       bridgeHowlRef.current?.stop();
       bridgeHowlRef.current = null;
 
-      if (bridgeTrack) {
-        await new Promise<void>(resolve => {
+      const activeBridgeHowl = bridgeTrack
+        ? await new Promise<Howl>(resolve => {
           const bh = new Howl({ src: [bridgeTrack.liveUrl], html5: true, volume: 0,
-            onload: () => resolve(), onerror: () => resolve() });
+            onload: () => resolve(bh), onloaderror: () => resolve(bh) });
           bridgeHowlRef.current = bh;
-          setTimeout(resolve, 3000);
-        });
-        bridgeHowlRef.current?.volume(BRIDGE_VOLUME);
-        bridgeHowlRef.current?.play();
+          setTimeout(() => resolve(bh), 3000);
+        })
+        : null;
+
+      if (activeBridgeHowl && bridgeTrack) {
+        activeBridgeHowl?.volume(BRIDGE_VOLUME);
+        activeBridgeHowl?.play();
         console.log(`[Bridge] using ambient track: ${bridgeTrack.name} by ${bridgeTrack.artist}`);
       } else {
         console.log('[Loop] podcast bridge — no ambient tracks available, skipping');
       }
 
       if (!runningRef.current) {
-        bridgeHowlRef.current?.stop(); bridgeHowlRef.current = null;
+        activeBridgeHowl?.stop(); bridgeHowlRef.current = null;
         podcastTransitionRef.current = false; return;
       }
 
@@ -1096,15 +1102,15 @@ export function RadioPage() {
       console.log('[Loop] podcast intro done');
 
       if (!runningRef.current) {
-        bridgeHowlRef.current?.stop(); bridgeHowlRef.current = null;
+        activeBridgeHowl?.stop(); bridgeHowlRef.current = null;
         podcastTransitionRef.current = false; return;
       }
 
       // 3. Fade bridge to 0 — jingle must play into silence.
-      if (bridgeHowlRef.current) {
-        const bh = bridgeHowlRef.current;
+      if (activeBridgeHowl) {
+        const bh = activeBridgeHowl;
         await new Promise<void>(res => {
-          bh.once('fade', res); bh.fade(bh.volume() as number, 0, 3000); setTimeout(res, 3500);
+          bh.once('fade', () => res()); bh.fade(bh.volume() as number, 0, 3000); setTimeout(res, 3500);
         });
         bh.stop(); bridgeHowlRef.current = null;
         console.log('[Bridge] ambient Howl stopped');
@@ -1175,8 +1181,7 @@ export function RadioPage() {
           v4vCurrentRef.current = { meta };
         }
 
-        let podStarted  = false;
-        let skipEpisode = false;
+        let podStarted = false;
         if (audioSrc.includes('.mp4')) console.warn(`[Podcast] mp4 URL detected — may fail on iOS: ${audioSrc}`);
         console.log(`[Loop] starting podcast element — src=${pod.src.slice(0, 80)} readyState=${pod.readyState}`);
         try {
@@ -1196,7 +1201,7 @@ export function RadioPage() {
           podStarted = true;
           startPodcastV4V(episode);
           console.log(`[Podcast] volume after play: ${pod.volume}`);
-          (Howler as any).ctx?.resume();
+          (Howler as HowlerWithOptionalContext).ctx?.resume();
           console.log('[Loop] podcast play() resolved — podcast playing');
           // Re-sync timeline state after play() resolves.
           // The pre-play setCT/setDur calls use episode.duration which may be 0
@@ -1228,7 +1233,6 @@ export function RadioPage() {
           setOrderedEpisodes(prev => prev.filter(ep => ep.id !== episode.id));
           resumePodcastEpisodeRef.current = null;
           nowPlayingRef.current = null; setNowPlaying(null);
-          skipEpisode = true;
           try { await moderatorRef.current.speakTechnicalDifficulty(); } catch { /* best effort */ }
         }
 
@@ -1302,23 +1306,24 @@ export function RadioPage() {
                   try { await audio.play(); } catch (e) { console.error('[Loop] break music play failed:', e); break; }
                   cancelRampRef.current?.();
                   cancelRampRef.current = rampVolume(audio, localMuted.current ? 0 : localVolume.current, 1000);
+                  const breakAudio = audio;
                   // Poll audio.currentTime directly — onMusicTime bails when howlRef is set,
                   // and Howler's poll only covers tracks playing through Howler.
                   const breakPoll = setInterval(() => {
-                    if (isFinite(audio.currentTime)) setCT(audio.currentTime);
+                    if (isFinite(breakAudio.currentTime)) setCT(breakAudio.currentTime);
                   }, 250);
                   await new Promise<void>(res => {
                     const onEnded = () => { if (loopGenRef.current !== breakGen) return; cleanup(); res(); };
                     const onPause = () => { if (loopGenRef.current !== breakGen) return; if (!runningRef.current) { cleanup(); res(); } };
                     function cleanup() {
                       clearInterval(breakPoll);
-                      audio.removeEventListener('ended', onEnded);
-                      audio.removeEventListener('pause', onPause);
+                      breakAudio.removeEventListener('ended', onEnded);
+                      breakAudio.removeEventListener('pause', onPause);
                     }
-                    audio.addEventListener('ended', onEnded);
-                    audio.addEventListener('pause', onPause);
+                    breakAudio.addEventListener('ended', onEnded);
+                    breakAudio.addEventListener('pause', onPause);
                   });
-                  audio.pause();
+                  breakAudio.pause();
                 }
                 nowPlayingRef.current = { kind: 'podcast', episode };
                 setNowPlaying({ kind: 'podcast', episode });
@@ -1407,9 +1412,10 @@ export function RadioPage() {
       if (resumeEp) {
         resumePodcastEpisodeRef.current = null;
         const pod = podAudioRef.current;
-        if (pod?.getAttribute('src') && runningRef.current) {
+        if (pod && pod.getAttribute('src') && runningRef.current) {
+          const resumePod = pod;
           console.log(`[Loop] resuming paused podcast: "${resumeEp.title}"`);
-          try { await pod.play(); } catch (e) { console.warn('[Loop] pod resume failed:', e); }
+          try { await resumePod.play(); } catch (e) { console.warn('[Loop] pod resume failed:', e); }
 
           // Wait for episode to finish or user to pause again
           if (runningRef.current) {
@@ -1417,15 +1423,15 @@ export function RadioPage() {
               const onEnded       = () => { cleanup(); res(); };
               const onResumePause = () => { if (!runningRef.current) { cleanup(); res(); } };
               function cleanup() {
-                pod.removeEventListener('ended',  onEnded);
-                pod.removeEventListener('pause',  onResumePause);
+                resumePod.removeEventListener('ended',  onEnded);
+                resumePod.removeEventListener('pause',  onResumePause);
               }
-              pod.addEventListener('ended', onEnded);
-              pod.addEventListener('pause', onResumePause);
+              resumePod.addEventListener('ended', onEnded);
+              resumePod.addEventListener('pause', onResumePause);
             });
           }
 
-          pod.pause();
+          resumePod.pause();
           if (runningRef.current) {
             // Episode finished naturally after resume
             pod.src = '';
@@ -1727,6 +1733,8 @@ export function RadioPage() {
           }
         };
 
+        const activeAudio = audio;
+
         const onTimeUpdate = () => {
           if (loopGenRef.current !== myGen) return;
           if (crossfadeStarted) return;
@@ -1735,8 +1743,8 @@ export function RadioPage() {
           if (moderatorRef.current.isSpeaking || moderatorRef.current.isGenerating) return;
           // Read position from Howler when active; fall back to audio element.
           const h   = howlRef.current;
-          const dur = h ? (h.duration() ?? 0) : audio.duration;
-          const ct  = h ? (h.seek() as number) : audio.currentTime;
+          const dur = h ? (h.duration() ?? 0) : activeAudio.duration;
+          const ct  = h ? (h.seek() as number) : activeAudio.currentTime;
           // Only crossfade if: duration is known, track is longer than 2× crossfade,
           // and we're within the crossfade window
           if (isFinite(dur) && dur > CROSSFADE_SECS * 2 && ct >= dur - CROSSFADE_SECS) {
@@ -1766,9 +1774,9 @@ export function RadioPage() {
 
         function cleanup() {
           clearInterval(howlTimerId);
-          audio.removeEventListener('timeupdate', onTimeUpdate);
-          audio.removeEventListener('ended',      onEnded);
-          audio.removeEventListener('pause',      onPause);
+          activeAudio.removeEventListener('timeupdate', onTimeUpdate);
+          activeAudio.removeEventListener('ended',      onEnded);
+          activeAudio.removeEventListener('pause',      onPause);
         }
 
         // If the track already ended during the speech phase (e.g. during TTS or
@@ -1777,7 +1785,7 @@ export function RadioPage() {
         // audio.ended covers the legacy HTMLAudioElement path.
         // howlerEndedRef covers Howler's onend, which dispatches a synthetic event
         // that does NOT set audio.ended on the legacy element.
-        if (audio.ended || howlerEndedRef.current) {
+        if (activeAudio.ended || howlerEndedRef.current) {
           howlerEndedRef.current = false;
           console.log(`[Loop] track already ended during speech — advancing (gen ${myGen})`);
           resolve(true);
@@ -1785,9 +1793,9 @@ export function RadioPage() {
         }
         if (!runningRef.current) { resolve(false); return; }
 
-        audio.addEventListener('timeupdate', onTimeUpdate);
-        audio.addEventListener('ended',      onEnded);
-        audio.addEventListener('pause',      onPause);
+        activeAudio.addEventListener('timeupdate', onTimeUpdate);
+        activeAudio.addEventListener('ended',      onEnded);
+        activeAudio.addEventListener('pause',      onPause);
       });
 
       if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
@@ -2007,7 +2015,7 @@ export function RadioPage() {
     listenerMemory.recordSongDislike(track.id);
     setOrderedTracks(prev => prev.filter(t => t.id !== track.id));
     handleNext();
-  }, [handleNext, listenerMemory]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [handleNext, listenerMemory]);
 
   const handlePodSkip = useCallback((deltaSecs: number) => {
     const pod = podAudioRef.current;
@@ -2021,7 +2029,7 @@ export function RadioPage() {
   // Moves the episode to the front of the queue, forces the podcast slot to
   // fire on the very next track end, and seeks the current music track to
   // near its end so the episode starts within ~1 second.
-  const jumpToEpisode = useCallback((episode: PodcastEpisode) => {
+  const _jumpToEpisode = useCallback((episode: PodcastEpisode) => {
     // Move episode to front of queue
     setOrderedEpisodes(prev => {
       const next = [episode, ...prev.filter(e => e.id !== episode.id)];
@@ -2234,7 +2242,7 @@ export function RadioPage() {
   // no music track is "current", so show the full list from position 0.
   // When idle, show from the current position.
   // displayedTracks is ONLY for rendering — reordering uses ID lookup into orderedTracks.
-  const displayedStart = nowPlaying === 'music' ? idx + 1 : nowPlaying === 'podcast' ? 0 : idx;
+  const displayedStart = nowPlaying?.kind === 'music' ? idx + 1 : nowPlaying?.kind === 'podcast' ? 0 : idx;
   const displayedTracks = orderedTracks.slice(displayedStart, displayedStart + 10);
   // Keep refs in sync so handleDragEnd (memoised, no closure over idx) always
   // sees the exact same slice and offset the user is looking at — not a
