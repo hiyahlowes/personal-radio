@@ -11,7 +11,7 @@ import {
   type DraggableProvided,
 } from '@hello-pangea/dnd';
 
-import { useWavlakeTracks, fetchAmbientBridgePool, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
+import { useWavlakeTracks, fetchAmbientBridgePool, buildWavlakeValueTag, type WavlakeTrack, GENRES, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { usePodcastEpisodes, useSingleFeedEpisodes, getStoredFeeds, type PodcastEpisode, type PodcastFeed } from '@/hooks/usePodcastFeeds';
 import { useRadioModerator, type ResumeContext } from '@/hooks/useRadioModerator';
 import { unlockTTSAudio } from '@/hooks/useElevenLabs';
@@ -316,6 +316,9 @@ export function RadioPage() {
   const [mixRatio, setMixRatio] = useState<number>(loadMixRatio);
   const mixRatioRef = useRef<number>(loadMixRatio());
 
+  // Super Saiyan mode lives in RadioContext so the storm doesn't reset when the
+  // user navigates to Settings and back. Always starts OFF per browser session.
+
   // ── Draggable / reorderable local copies of playlist & queue ──────────────
   // Initialise from persisted queue so content appears instantly on page return,
   // before the Wavlake / RSS queries resolve. API data overwrites these on load.
@@ -336,16 +339,36 @@ export function RadioPage() {
   // route changes (e.g. navigating to Settings and back).
   const audioRef    = radioCtx.audioRef;
   const podAudioRef = radioCtx.podAudioRef;
-  const howlRef        = useRef<Howl | null>(null);
+  // Howl + its poll interval live in context so they survive Settings → back.
+  // Without this, the old Howl keeps playing as an orphan and the UI loses
+  // its handle (the player shows "paused" while music continues).
+  const howlRef        = radioCtx.howlRef;
+  const howlPollRef    = radioCtx.howlPollRef;
   const nextHowlRef    = useRef<Howl | null>(null);
   // Tracks the last-set Howler music volume independently of howl.volume(),
   // which is unreliable in html5:true mode on iOS.
   const musicVolumeRef = useRef<number>(0.9);
-  const howlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const runningRef  = radioCtx.runningRef;
   const greetedRef  = radioCtx.greetedRef;
   const idxRef      = radioCtx.idxRef;
   const loopGenRef  = radioCtx.loopGenRef;
+
+  // Super Saiyan visual mode — toggled on/off, persists across nav.
+  const superSaiyan       = radioCtx.superSaiyan;
+  const setSuperSaiyan    = radioCtx.setSuperSaiyan;
+  const ssBurstKey        = radioCtx.ssBurstKey;
+  const toggleSuperSaiyan = useCallback(() => {
+    setSuperSaiyan(prev => {
+      if (!prev) radioCtx.bumpSsBurst();
+      return !prev;
+    });
+  }, [setSuperSaiyan, radioCtx]);
+
+  // Monster flash celebration — bumped on every successful V4V flush; the
+  // FX layer reacts by re-mounting the key'd element (one-shot animation),
+  // and `.ss-mega` is applied to the root for a 10s extra-bright glow.
+  const [megaFlashKey, setMegaFlashKey] = useState(0);
+  const [megaActive, setMegaActive]     = useState(false);
 
   // nowPlaying lives in RadioContext so it survives navigation to Settings and back.
   const nowPlaying    = radioCtx.nowPlaying;
@@ -360,6 +383,8 @@ export function RadioPage() {
   const resumePodcastEpisodeRef = useRef<PodcastEpisode | null>(null);
   // Timestamp of last podcast position save (throttle to every 5 s).
   const lastPodSaveRef          = useRef(0);
+  const podReconnectTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const podIsReconnectingRef    = useRef(false);
   // Set true after a crossfade completes so the loop top skips re-loading audio
   const crossfadeActiveRef  = useRef(false);
   const crossfadeTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -410,6 +435,48 @@ export function RadioPage() {
   // Checked in the crossfade wait so it can resolve even if the 'ended' event
   // fired on audioRef while no listener was registered (e.g. during TTS playback).
   const howlerEndedRef = useRef(false);
+
+  const stopMusicHowls = useCallback((reason: string) => {
+    if (crossfadeTimerRef.current !== null) {
+      clearTimeout(crossfadeTimerRef.current);
+      crossfadeTimerRef.current = null;
+      console.log(`[Howler] crossfade cancelled — ${reason}`);
+    }
+    crossfadeActiveRef.current = false;
+    howlerEndedRef.current = false;
+    if (howlRef.current) {
+      howlRef.current.stop();
+      howlRef.current.unload();
+      howlRef.current = null;
+    }
+    if (nextHowlRef.current) {
+      nextHowlRef.current.stop();
+      nextHowlRef.current.unload();
+      nextHowlRef.current = null;
+    }
+  }, []);
+
+  const startMusicV4V = useCallback((track: WavlakeTrack) => {
+    const meta: ItemMeta = {
+      itemId: track.id,
+      itemTitle: track.name,
+      feedTitle: track.artist,
+      isEpisode: false,
+    };
+    v4vCurrentRef.current = { meta };
+    v4vRef.current.onPlay(buildWavlakeValueTag(track), meta);
+  }, []);
+
+  const startPodcastV4V = useCallback((episode: PodcastEpisode) => {
+    const meta: ItemMeta = {
+      itemId: episode.id,
+      itemTitle: episode.title,
+      feedTitle: episode.feedTitle,
+      isEpisode: true,
+    };
+    v4vCurrentRef.current = { meta };
+    v4vRef.current.onPlay(episode.valueTag, meta);
+  }, []);
 
   // Sync refs to latest state/props
   useEffect(() => { moderatorRef.current      = moderator;      }, [moderator]);
@@ -627,11 +694,78 @@ export function RadioPage() {
     };
     const onPodDur   = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
     const onPodMeta  = () => { if (isFinite(pod.duration) && pod.duration > 0) setDur(pod.duration); };
-    const onPodPlay  = () => { console.log('[Podcast] play'); setPlaying(true);  setBuf(false); };
-    const onPodPause = () => { console.log('[Podcast] pause'); setPlaying(false); };
-    const onPodWait  = () => setBuf(true);
-    const onPodCan   = () => setBuf(false);
-    const onPodErr   = () => { if (pod.src) console.error('[Podcast] audio error', pod.error?.message); };
+    // ── Podcast reconnect helper ──────────────────────────────────────────────
+    // The Netlify Edge Function drops TCP connections every ~7.5 min.
+    // On error or prolonged stall, re-assign the same src to open a fresh stream.
+    const reconnectPodcast = (resumeTime: number) => {
+      if (podIsReconnectingRef.current) return;      // already reconnecting
+      if (!runningRef.current) return;               // user paused — don't reconnect
+      const src = pod.getAttribute('src');
+      if (!src) return;                              // no podcast loaded
+      podIsReconnectingRef.current = true;
+      console.log(`[Podcast] reconnecting from ${resumeTime.toFixed(1)}s`);
+      pod.src = '';
+      pod.src = src;
+      pod.addEventListener('loadedmetadata', () => {
+        if (isFinite(pod.duration) && resumeTime < pod.duration - 2) {
+          pod.currentTime = resumeTime;
+        }
+        pod.play().catch(e => console.warn('[Podcast] reconnect play failed:', e));
+      }, { once: true });
+    };
+
+    const onPodPlay  = () => {
+      console.log('[Podcast] play');
+      setPlaying(true); setBuf(false);
+      // Clear any pending reconnect — audio is actually playing now
+      if (podReconnectTimerRef.current) { clearTimeout(podReconnectTimerRef.current); podReconnectTimerRef.current = null; }
+      podIsReconnectingRef.current = false;
+      // Restart V4V for ANY play (user button OR reconnect after network drop).
+      // handlePlay() also calls onPlay() for user-initiated presses; calling twice
+      // is harmless — it just clears the pause timer and restarts the tick interval.
+      if (v4vCurrentRef.current && nowPlayingRef.current?.kind === 'podcast') {
+        const ep = nowPlayingRef.current.episode;
+        v4vRef.current.onPlay(ep.valueTag, v4vCurrentRef.current.meta);
+      }
+    };
+    const onPodPause = () => {
+      console.log('[Podcast] pause');
+      setPlaying(false);
+      // Stop V4V for ANY pause (user button, network drop, segmenter music break).
+      // handlePause() also calls onPause() for user presses; calling twice resets
+      // the 5-min flush timer, which is acceptable.
+      if (nowPlayingRef.current?.kind === 'podcast') {
+        v4vRef.current.onPause();
+      }
+    };
+    const onPodWait  = () => {
+      setBuf(true);
+      // If waiting more than 5 s and the radio is still supposed to be running, reconnect.
+      if (podReconnectTimerRef.current) clearTimeout(podReconnectTimerRef.current);
+      podReconnectTimerRef.current = setTimeout(() => {
+        if (!runningRef.current || pod.paused) return;
+        console.log('[Podcast] waiting >5s — reconnecting');
+        reconnectPodcast(pod.currentTime);
+      }, 5000);
+    };
+    const onPodCan   = () => {
+      setBuf(false);
+      if (podReconnectTimerRef.current) { clearTimeout(podReconnectTimerRef.current); podReconnectTimerRef.current = null; }
+    };
+    const onPodStalled = () => {
+      if (podReconnectTimerRef.current) clearTimeout(podReconnectTimerRef.current);
+      podReconnectTimerRef.current = setTimeout(() => {
+        if (!runningRef.current || pod.paused) return;
+        console.log('[Podcast] stalled for 3s — reconnecting');
+        reconnectPodcast(pod.currentTime);
+      }, 3000);
+    };
+    const onPodErr   = () => {
+      if (!pod.src) return;
+      console.error('[Podcast] audio error:', pod.error?.message);
+      if (!runningRef.current) return;
+      reconnectPodcast(pod.currentTime);
+    };
 
     pod.addEventListener('timeupdate',     onPodTime);
     pod.addEventListener('durationchange', onPodDur);
@@ -640,6 +774,7 @@ export function RadioPage() {
     pod.addEventListener('pause',          onPodPause);
     pod.addEventListener('waiting',        onPodWait);
     pod.addEventListener('canplay',        onPodCan);
+    pod.addEventListener('stalled',        onPodStalled);
     pod.addEventListener('error',          onPodErr);
 
     // Sync UI state immediately on mount — handles returning from Settings
@@ -652,6 +787,26 @@ export function RadioPage() {
       setPlaying(true);
       setCT(audio.currentTime);
       if (isFinite(audio.duration)) setDur(audio.duration);
+    } else if (howlRef.current?.playing()) {
+      // Music is being played via Howler (audio + pod elements are paused).
+      // Howl's onplay/onpause callbacks reference setState closures that are
+      // stale after a remount — restart the seek poll here with fresh setters
+      // so the seek bar updates, and reflect the playing state in the UI.
+      setPlaying(true);
+      const h = howlRef.current;
+      const ct = h.seek() as number;
+      if (isFinite(ct)) setCT(ct);
+      const d = h.duration() ?? 0;
+      if (d > 0 && isFinite(d)) setDur(d);
+      if (howlPollRef.current) clearInterval(howlPollRef.current);
+      howlPollRef.current = setInterval(() => {
+        const hh = howlRef.current;
+        if (!hh) return;
+        const t = hh.seek() as number;
+        if (isFinite(t)) setCT(t);
+        const dd = hh.duration() ?? 0;
+        if (dd > 0 && isFinite(dd)) setDur(dd);
+      }, 250);
     }
 
     return () => {
@@ -672,7 +827,9 @@ export function RadioPage() {
       pod.removeEventListener('pause',          onPodPause);
       pod.removeEventListener('waiting',        onPodWait);
       pod.removeEventListener('canplay',        onPodCan);
+      pod.removeEventListener('stalled',        onPodStalled);
       pod.removeEventListener('error',          onPodErr);
+      if (podReconnectTimerRef.current) { clearTimeout(podReconnectTimerRef.current); podReconnectTimerRef.current = null; }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -762,6 +919,23 @@ export function RadioPage() {
     }
     return () => cancelRampRef.current?.();
   }, [moderator.isSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── V4V flush celebration ─────────────────────────────────────────────────
+  // On every successful flush (sats actually paid), fire a "monster lightning"
+  // strike and keep the UI in heavy-glow mode for 10 s. Re-triggers correctly
+  // even if two flushes land back-to-back.
+  const lastFlushTsRef = useRef<number>(0);
+  useEffect(() => {
+    const r = v4v.lastFlushResult;
+    if (!r) return;
+    if (r.sent <= 0) return;
+    if (r.timestamp === lastFlushTsRef.current) return;
+    lastFlushTsRef.current = r.timestamp;
+    setMegaFlashKey(k => k + 1);
+    setMegaActive(true);
+    const t = setTimeout(() => setMegaActive(false), 10000);
+    return () => clearTimeout(t);
+  }, [v4v.lastFlushResult]);
 
   // ── Volume/mute slider (when not ducked) ─────────────────────────────────
   // Only fires on user volume/mute changes — NOT on isSpeaking changes, so the
@@ -857,15 +1031,9 @@ export function RadioPage() {
       // ── Transition: ambient bridge → moderator → fade → jingle → podcast ────
       podcastTransitionRef.current = true;
 
-      if (crossfadeTimerRef.current !== null) {
-        clearTimeout(crossfadeTimerRef.current);
-        crossfadeTimerRef.current = null;
-        console.log('[Howler] crossfade cancelled — podcast slot');
-      }
-
       // 1. Stop current music and find ambient bridge.
-      if (howlRef.current) { howlRef.current.stop(); console.log('[Howler] stopped for podcast transition'); }
-      if (nextHowlRef.current) { nextHowlRef.current.stop(); nextHowlRef.current = null; }
+      stopMusicHowls('podcast slot');
+      console.log('[Howler] stopped for podcast transition');
       audio.pause();
 
       const bridgePool  = ambientBridgeRef.current.length > 0
@@ -1005,7 +1173,6 @@ export function RadioPage() {
         {
           const meta: ItemMeta = { itemId: episode.id, itemTitle: episode.title, feedTitle: episode.feedTitle, isEpisode: true };
           v4vCurrentRef.current = { meta };
-          v4vRef.current.onTrackChange(episode.valueTag, meta);
         }
 
         let podStarted  = false;
@@ -1027,6 +1194,7 @@ export function RadioPage() {
           await pod.play();
           if (isIOS) console.log('[Podcast] iOS: play() resolved successfully');
           podStarted = true;
+          startPodcastV4V(episode);
           console.log(`[Podcast] volume after play: ${pod.volume}`);
           (Howler as any).ctx?.resume();
           console.log('[Loop] podcast play() resolved — podcast playing');
@@ -1200,11 +1368,7 @@ export function RadioPage() {
             setNowPlaying({ kind: 'music', track: nextMusicTrack });
             setCT(0); setDur(nextMusicTrack.duration || 0); setIdx(idxRef.current);
             listenerMemoryRef.current.recordSongStart(nextMusicTrack);
-            {
-              const meta: ItemMeta = { itemId: nextMusicTrack.id, itemTitle: nextMusicTrack.name, feedTitle: nextMusicTrack.artist, isEpisode: false };
-              v4vCurrentRef.current = { meta };
-              v4vRef.current.onTrackChange(undefined, meta);
-            }
+            startMusicV4V(nextMusicTrack);
 
             if (!runningRef.current) { podcastTransitionRef.current = false; crossfadeActiveRef.current = true; return; }
 
@@ -1305,6 +1469,7 @@ export function RadioPage() {
         setIdx(currentIdx);
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
+        startMusicV4V(t);
         // Volume guard: promotion sets full volume, but the duck effect may have
         // fired during the async load. Correct immediately rather than waiting
         // for the speech/no-speech branch to ramp up from 0.08.
@@ -1327,6 +1492,7 @@ export function RadioPage() {
         try {
           await audio.play();
           console.log('[Loop] resume play() resolved');
+          startMusicV4V(t);
         } catch (e) {
           console.warn('[Loop] resume play() failed:', e);
         }
@@ -1345,11 +1511,6 @@ export function RadioPage() {
         nowPlayingRef.current = { kind: 'music', track: t };
         setNowPlaying({ kind: 'music', track: t });
         listenerMemoryRef.current.recordSongStart(t);
-        {
-          const meta: ItemMeta = { itemId: t.id, itemTitle: t.name, feedTitle: t.artist, isEpisode: false };
-          v4vCurrentRef.current = { meta };
-          v4vRef.current.onTrackChange(undefined, meta);
-        }
 
         // Pre-load the next track so it's buffered before the crossfade window.
         // Do this early — before speech — so the browser has time to buffer.
@@ -1425,10 +1586,12 @@ export function RadioPage() {
           musicVolumeRef.current = DUCK_LEVEL;
           howl.play();
           console.log(`[Howler] playing: ${t.name}`);
+          startMusicV4V(t);
         } else {
           try {
             await audio.play();
             console.log('[Loop] audio.play() resolved at duck level');
+            startMusicV4V(t);
           } catch (e) {
             console.error('[Loop] audio.play() failed — skipping to next track:', e);
             // Skip to next track rather than freezing the loop.
@@ -1739,7 +1902,11 @@ export function RadioPage() {
       // Resume V4V streaming with the current item's recipients
       if (v4vCurrentRef.current) {
         const np = nowPlayingRef.current;
-        const valueTag = np?.kind === 'podcast' ? np.episode.valueTag : undefined;
+        const valueTag = np?.kind === 'podcast'
+          ? np.episode.valueTag
+          : np?.kind === 'music'
+            ? buildWavlakeValueTag(np.track)
+            : undefined;
         v4vRef.current.onPlay(valueTag, v4vCurrentRef.current.meta);
       }
       if (resumePodcastEpisodeRef.current) {
@@ -1799,11 +1966,13 @@ export function RadioPage() {
     // speakXxx() promises resolve right away rather than after the full clip.
     runningRef.current = false;
     moderatorRef.current.stop();
+    stopMusicHowls('manual jump');
 
     // Stop both audio elements so no stale 'pause' event lingers on the wrong
     // element (e.g. podcast playing while we skip music).
     audioRef.current?.pause();
     podAudioRef.current?.pause();
+    v4vRef.current.onPause();
     // removeAttribute rather than .src = '' so that getAttribute('src') reliably
     // returns null/'' — the IDL property .src would otherwise return the document
     // base URL for an empty content attribute, breaking guards that check .src.
@@ -1904,15 +2073,10 @@ export function RadioPage() {
     }
 
     // Stop everything in flight
-    if (crossfadeTimerRef.current !== null) {
-      clearTimeout(crossfadeTimerRef.current);
-      crossfadeTimerRef.current = null;
-    }
-    howlRef.current?.stop();
-    nextHowlRef.current?.unload();
-    nextHowlRef.current = null;
+    stopMusicHowls('manual podcast start');
     audioRef.current?.pause();
     moderatorRef.current.stop();
+    v4vRef.current.onPause();
 
     // Discard any stale pre-generated blobs for the previous context
     if (nextIntroUrlRef.current)      { URL.revokeObjectURL(nextIntroUrlRef.current);      nextIntroUrlRef.current      = null; }
@@ -2091,11 +2255,198 @@ export function RadioPage() {
   const statusColor  = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
 
   return (
-    <div className="min-h-screen gradient-bg text-white relative overflow-x-hidden">
+    <div className={`min-h-screen gradient-bg text-white relative overflow-x-hidden ${superSaiyan ? 'super-saiyan' : ''} ${megaActive ? 'ss-mega' : ''}`}>
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         <div className="absolute top-0 left-1/3 w-96 h-96 bg-purple-900/20 rounded-full blur-3xl" />
         <div className="absolute bottom-0 right-1/3 w-80 h-80 bg-violet-900/20 rounded-full blur-3xl" />
       </div>
+
+      {/* Super Saiyan FX layer — rendered whenever the user has armed the
+          mode in this session. The clouds and lightning fade in/out via the
+          `ss-on` modifier so toggling doesn't feel abrupt — they slowly
+          appear when streaming starts and slowly disappear when it stops.
+          Sits BEHIND the page content (z-1) so it never covers the player. */}
+      <div className={`ss-fx-layer ${superSaiyan ? 'ss-on' : ''}`} aria-hidden="true">
+          {/* Back clouds — sit BEHIND the lightning SVG so the bolts cut
+              cleanly across the sky. */}
+          <div className="ss-cloud ss-cloud-1" />
+          <div className="ss-cloud ss-cloud-2" />
+          <div className="ss-cloud ss-cloud-3" />
+
+          {/* Whole-sky illumination — fires in sync with each strike */}
+          <div className="ss-skyflash ss-skyflash-1" />
+          <div className="ss-skyflash ss-skyflash-2" />
+          <div className="ss-skyflash ss-skyflash-3" />
+
+          {/* Lightning — dramatic forks. preserveAspectRatio="none" stretches
+              the SVG to fill any viewport; jagged paths take the distortion
+              well and side-strikes never get cropped on narrow phones. */}
+          <svg className="ss-bolts" viewBox="0 0 1000 1000" preserveAspectRatio="none">
+            <defs>
+              <filter id="ssGlowFilter" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="3" result="b1" />
+                <feGaussianBlur stdDeviation="9" in="SourceGraphic" result="b2" />
+                <feGaussianBlur stdDeviation="20" in="SourceGraphic" result="b3" />
+                <feMerge>
+                  <feMergeNode in="b3" />
+                  <feMergeNode in="b2" />
+                  <feMergeNode in="b1" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+            </defs>
+
+            {/* Strike 1 — center. Many small zig-zags + a few asymmetric forks
+                give a more photographic feel than uniform straight segments. */}
+            <g className="ss-strike ss-strike-1" filter="url(#ssGlowFilter)">
+              <path d="M 500 0 L 494 28 L 506 52 L 488 78 L 510 102 L 492 128 L 514 154 L 486 182 L 510 210 L 482 240 L 514 268 L 488 298 L 522 326 L 494 358 L 518 388 L 484 420 L 516 450 L 488 482 L 522 514 L 494 548 L 510 580 L 488 612"
+                stroke="#ffffff" strokeWidth="2" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              {/* upper-left fork (jagged) */}
+              <path d="M 510 102 L 480 124 L 470 148 L 442 168 L 432 196 L 408 220 L 396 248"
+                stroke="#ffffff" strokeWidth="1.2" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.9" />
+              {/* upper-right fork */}
+              <path d="M 492 128 L 528 150 L 538 178 L 568 198 L 580 226 L 612 248"
+                stroke="#ffffff" strokeWidth="1.3" fill="none" strokeLinejoin="miter" strokeLinecap="round" opacity="0.9" />
+              {/* small twig — left mid */}
+              <path d="M 486 182 L 466 200 L 472 218" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.75" />
+              {/* small twig — right mid */}
+              <path d="M 514 268 L 540 286 L 532 304 L 552 322" stroke="#ffffff" strokeWidth="1" fill="none" opacity="0.8" />
+              {/* asymmetric lower fork */}
+              <path d="M 484 420 L 452 444 L 462 472 L 432 498 L 442 522"
+                stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              {/* micro hairs */}
+              <path d="M 522 326 L 538 340" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.7" />
+              <path d="M 518 388 L 504 400" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.6" />
+              <path d="M 522 514 L 540 528 L 534 542" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.7" />
+              {/* impact splash into clouds */}
+              <path d="M 488 612 L 528 638 L 514 658 L 548 682" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              <path d="M 488 612 L 458 640 L 472 662 L 446 686" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              <path d="M 488 612 L 488 660 L 478 686" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.75" />
+            </g>
+
+            {/* Strike 2 — off to the right side, narrower, fewer forks */}
+            <g className="ss-strike ss-strike-2" filter="url(#ssGlowFilter)">
+              <path d="M 760 0 L 766 30 L 754 60 L 770 92 L 748 124 L 768 154 L 750 186 L 772 218 L 752 252 L 772 286 L 750 320 L 766 354 L 748 390 L 770 422 L 750 458 L 768 492 L 754 528 L 770 562 L 752 600 L 768 636"
+                stroke="#ffffff" strokeWidth="1.8" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+              {/* one major fork */}
+              <path d="M 770 92 L 800 116 L 792 144 L 822 166 L 814 198 L 842 220"
+                stroke="#ffffff" strokeWidth="1.2" fill="none" opacity="0.85" />
+              {/* secondary fork — left-leaning */}
+              <path d="M 752 252 L 722 276 L 732 304 L 706 330" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              {/* micro hairs */}
+              <path d="M 766 354 L 782 366" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.6" />
+              <path d="M 770 422 L 754 434" stroke="#ffffff" strokeWidth="0.8" fill="none" opacity="0.6" />
+              <path d="M 770 562 L 788 576 L 782 590" stroke="#ffffff" strokeWidth="0.9" fill="none" opacity="0.7" />
+              {/* impact splash */}
+              <path d="M 768 636 L 800 666 L 786 688 L 814 712" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+              <path d="M 768 636 L 740 668 L 754 690 L 730 712" stroke="#ffffff" strokeWidth="1.1" fill="none" opacity="0.85" />
+            </g>
+          </svg>
+
+          {/* Front clouds — drawn AFTER the bolts so they partly obscure
+              the strikes where they overlap. This is what gives the
+              "lightning is partly inside / behind the clouds" feel. */}
+          <div className="ss-cloud ss-cloud-4 ss-cloud-front" />
+          <div className="ss-cloud ss-cloud-5 ss-cloud-front" />
+
+          {/* Sparkle bursts — fire at each strike's impact point inside the clouds */}
+          <div className="ss-sparks ss-sparks-1">
+            {Array.from({ length: 18 }).map((_, i) => {
+              const angle = (Math.PI * 2 * i) / 18 + (i % 2 === 0 ? 0.2 : -0.1);
+              const dist = 28 + (i % 4) * 14;
+              return (
+                <span
+                  key={i}
+                  className="ss-spark"
+                  style={{
+                    // CSS custom props drive the burst direction & timing
+                    ['--dx' as string]: `${Math.cos(angle) * dist}px`,
+                    ['--dy' as string]: `${Math.sin(angle) * dist - 12}px`,
+                    ['--d' as string]: `${(i * 13) % 220}ms`,
+                  } as React.CSSProperties}
+                />
+              );
+            })}
+          </div>
+          <div className="ss-sparks ss-sparks-2">
+            {Array.from({ length: 14 }).map((_, i) => {
+              const angle = (Math.PI * 2 * i) / 14 + 0.4;
+              const dist = 22 + (i % 3) * 12;
+              return (
+                <span
+                  key={i}
+                  className="ss-spark"
+                  style={{
+                    ['--dx' as string]: `${Math.cos(angle) * dist}px`,
+                    ['--dy' as string]: `${Math.sin(angle) * dist - 8}px`,
+                    ['--d' as string]: `${(i * 19) % 200}ms`,
+                  } as React.CSSProperties}
+                />
+              );
+            })}
+          </div>
+          <div className="ss-sparks ss-sparks-3">
+            {Array.from({ length: 14 }).map((_, i) => {
+              const angle = (Math.PI * 2 * i) / 14 - 0.3;
+              const dist = 24 + (i % 3) * 12;
+              return (
+                <span
+                  key={i}
+                  className="ss-spark"
+                  style={{
+                    ['--dx' as string]: `${Math.cos(angle) * dist}px`,
+                    ['--dy' as string]: `${Math.sin(angle) * dist - 8}px`,
+                    ['--d' as string]: `${(i * 23) % 200}ms`,
+                  } as React.CSSProperties}
+                />
+              );
+            })}
+          </div>
+
+          {/* Activation burst — re-mounts on every OFF→ON via key */}
+          <div key={ssBurstKey} className="ss-burst" />
+
+          {/* Floating PR-logo plaques — circular 3D-feel coin bodies that
+              drift through the fog and spin slowly on their Y-axis. The
+              PNG is masked to a circle via `overflow: hidden`+border-radius
+              and laid over the disc face as a skin. A radial highlight is
+              painted on top to suggest the curved surface catching light;
+              `.ss-plaque-rim` paints a thin metallic edge. Each plaque
+              carries a pulse keyframe that coincides with a lightning
+              strike, lighting it up for ~3 s before fading. */}
+          <div className="ss-plaque ss-plaque-left">
+            <div className="ss-plaque-disc">
+              <img src="/PR_logo.png" alt="" className="ss-plaque-face" />
+              <div className="ss-plaque-shine" />
+              <div className="ss-plaque-rim" />
+            </div>
+          </div>
+          <div className="ss-plaque ss-plaque-right">
+            <div className="ss-plaque-disc">
+              <img src="/PR_logo.png" alt="" className="ss-plaque-face" />
+              <div className="ss-plaque-shine" />
+              <div className="ss-plaque-rim" />
+            </div>
+          </div>
+
+          {/* Monster strike — re-mounts (and so re-plays the one-shot
+              animation) every time a V4V flush successfully pays out.
+              Sits on top of the regular bolt SVG. */}
+          <div key={`mega-${megaFlashKey}`} className={`ss-monster ${megaActive ? 'ss-monster-on' : ''}`}>
+            <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" className="ss-monster-svg">
+              <g filter="url(#ssGlowFilter)">
+                <path d="M 500 -20 L 478 60 L 522 130 L 470 210 L 540 290 L 466 380 L 552 470 L 460 560 L 558 660 L 444 770 L 570 880 L 460 990"
+                  stroke="#ffffff" strokeWidth="5" fill="none" strokeLinejoin="miter" strokeLinecap="round" />
+                <path d="M 522 130 L 600 180 L 580 240 L 660 290 L 640 360 L 720 410" stroke="#ffffff" strokeWidth="3" fill="none" opacity="0.95" />
+                <path d="M 470 210 L 400 260 L 420 330 L 340 380 L 360 460 L 280 510" stroke="#ffffff" strokeWidth="3" fill="none" opacity="0.95" />
+                <path d="M 540 290 L 620 340 L 600 410" stroke="#ffffff" strokeWidth="2.4" fill="none" opacity="0.85" />
+                <path d="M 466 380 L 390 430 L 410 500" stroke="#ffffff" strokeWidth="2.4" fill="none" opacity="0.85" />
+                <path d="M 460 560 L 380 620 L 400 690 L 320 740" stroke="#ffffff" strokeWidth="2.6" fill="none" opacity="0.9" />
+                <path d="M 558 660 L 640 720 L 620 790 L 700 840" stroke="#ffffff" strokeWidth="2.6" fill="none" opacity="0.9" />
+              </g>
+            </svg>
+          </div>
+        </div>
 
       <div className="relative z-10 max-w-2xl mx-auto px-4 py-8 space-y-6">
 
@@ -2138,6 +2489,30 @@ export function RadioPage() {
             </div>
           </div>
         )}
+
+        {/* Super Saiyan toggle — always available from page load so the user can
+            arm the visual upgrade before any song starts. The actual sat streaming
+            still requires a connected NWC wallet, but the toggle itself doesn't gate on that. */}
+        <div className="fade-in-up-delay-1 flex justify-center">
+          <button
+            onClick={toggleSuperSaiyan}
+            aria-pressed={superSaiyan}
+            className={`ss-toggle group relative flex items-center gap-3 px-4 py-2 rounded-full border transition-all
+              ${superSaiyan
+                ? 'ss-toggle-on bg-gradient-to-r from-fuchsia-600/30 via-amber-500/20 to-violet-600/30 border-amber-300/50 text-amber-50'
+                : 'bg-white/5 border-white/10 text-white/60 hover:border-purple-400/40 hover:text-white/80'}`}
+          >
+            <span className={`text-base leading-none ${superSaiyan ? 'ss-toggle-icon' : 'opacity-60'}`}>⚡</span>
+            <span className="text-[11px] font-semibold tracking-[0.18em] uppercase">
+              {superSaiyan ? 'Streaming value over Lightning' : 'Stream value over Lightning'}
+            </span>
+            <span className={`relative inline-block w-9 h-5 rounded-full transition-colors ${superSaiyan ? 'bg-fuchsia-500/80' : 'bg-white/15'}`}>
+              <span
+                className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all ${superSaiyan ? 'left-[18px] shadow-[0_0_10px_rgba(255,255,255,0.9)]' : 'left-0.5'}`}
+              />
+            </span>
+          </button>
+        </div>
 
         {/* Player card */}
         <div className="fade-in-up-delay-2 glass-card rounded-3xl p-6">
@@ -2331,17 +2706,42 @@ export function RadioPage() {
           </div>
         </div>
 
-        {/* V4V session display — shown when NWC is connected */}
+        {/* V4V session display — shown when NWC is connected.
+            Slightly larger type and a ⚡ on both sides so the running sat
+            counter is legible at a glance. */}
         {v4v.isConnected && (
-          <div className="fade-in-up-delay-2 flex items-center gap-2 px-1">
-            <span className="text-yellow-400 text-xs">⚡</span>
-            <span className="text-xs text-white/40">
+          <div className="fade-in-up-delay-2 flex items-center justify-center gap-2 px-1">
+            <span
+              className={`text-sm ${
+                v4v.hasPaymentErrors
+                  ? 'text-red-400'
+                  : superSaiyan
+                    ? 'text-fuchsia-300 ss-toggle-icon'
+                    : 'text-yellow-400'
+              }`}
+              title={v4v.hasPaymentErrors ? 'Payment errors — check wallet connection' : undefined}
+            >⚡</span>
+            <span className={`text-sm ${superSaiyan ? 'text-fuchsia-100/90 font-medium tracking-wide' : 'text-white/60'}`}>
               {v4v.totalSentThisSession > 0
-                ? `${v4v.totalSentThisSession} sats streamed this session`
+                ? nowPlaying?.kind === 'music'
+                  ? `${v4v.totalSentThisSession} sats → ${nowPlaying.track.artist} (via Wavlake)`
+                  : `${v4v.totalSentThisSession} sats streamed this session`
                 : v4v.pendingTotal > 0
-                  ? `${v4v.pendingTotal} sats pending`
+                  ? nowPlaying?.kind === 'music'
+                    ? `${v4v.pendingTotal} sats pending → ${nowPlaying.track.artist} (via Wavlake)`
+                    : `${v4v.pendingTotal} sats pending`
                   : 'Streaming value to artists'}
             </span>
+            <span
+              className={`text-sm ${
+                v4v.hasPaymentErrors
+                  ? 'text-red-400'
+                  : superSaiyan
+                    ? 'text-fuchsia-300 ss-toggle-icon'
+                    : 'text-yellow-400'
+              }`}
+              aria-hidden="true"
+            >⚡</span>
           </div>
         )}
 
@@ -2610,11 +3010,14 @@ export function RadioPage() {
               </div>
               <Droppable droppableId="podcast-queue">
                 {(provided, snapshot) => (
+                  // No inner overflow — the Super Saiyan card glow extends
+                  // ~80px outside each card. With overflow:auto here the glow
+                  // got clipped at the wrapper edges and the list read as a
+                  // hard rectangle frame. Let the page scroll naturally.
                   <div
                     ref={provided.innerRef}
                     {...provided.droppableProps}
                     className={`space-y-2 rounded-2xl transition-colors ${snapshot.isDraggingOver ? 'bg-amber-900/10' : ''}`}
-                    style={{ maxHeight: 400, overflowY: 'auto' }}
                   >
                      {orderedEpisodes.length === 0 && storedFeeds.length > 0 && (
                        <div className="glass-card rounded-2xl px-5 py-6 text-center">

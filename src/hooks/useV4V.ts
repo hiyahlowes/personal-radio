@@ -19,13 +19,123 @@ const NWC_PR_SPLIT_KEY    = 'nwc_pr_split';
 const NWC_SENDER_ID_KEY   = 'nwc_sender_id';
 const NWC_PENDING_KEY     = 'nwc_pending_buffer';
 
-const PR_LIGHTNING_ADDRESS = 'accoladecool329256@getalby.com';
-const MIN_FLUSH_SATS       = 10;    // don't send payments below this threshold
+const PR_LIGHTNING_ADDRESS  = 'accoladecool329256@getalby.com';
+const MIN_FLUSH_SATS        = 10;   // don't send payments below this threshold
+const MAX_PENDING_SATS      = 500;  // drop accumulated sats above this cap per recipient
+const MAX_CONSEC_FAILURES   = 3;    // disable a recipient after this many consecutive failures
+
+// Wavlake keysend constants — used as fallback when the LNURL API is unavailable.
+// Verified from Wavlake RSS feeds: all tracks route through this node;
+// customValue (track UUID) tells Wavlake which artist to credit.
+const WAVLAKE_LN_NODE    = '02682b7c86f474d082fa9d274c3751291225448468691784c6f112187de975a8c2';
+const WAVLAKE_CUSTOM_KEY = '16180339';
 const MAX_BUFFER_AGE_MS    = 30 * 60 * 1000; // flush stale entries after 30 min
 const FLUSH_INTERVAL_MS    = 15 * 60 * 1000; // 15-minute periodic flush
 const PAUSE_FLUSH_MS       = 5  * 60 * 1000; // flush after 5-min pause
 
+type NWCWalletServiceInfo = {
+  capabilities: string[];
+  encryptions: string[];
+  notifications: string[];
+};
+
+type NWCWebLNClient = import('@getalby/sdk').webln.NostrWebLNProvider & {
+  client: {
+    getWalletServiceInfo: () => Promise<NWCWalletServiceInfo>;
+    close: () => void;
+  };
+};
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function parseNwcUrl(connString: string): URL {
+  const normalized = connString
+    .replace(/^nostrwalletconnect:\/\//, 'http://')
+    .replace(/^nostr\+walletconnect:\/\//, 'http://')
+    .replace(/^nostrwalletconnect:/, 'http://')
+    .replace(/^nostr\+walletconnect:/, 'http://');
+  return new URL(normalized);
+}
+
+function assertValidNwcConnectionString(connString: string): void {
+  if (!/^nostr(\+)?walletconnect:\/\//.test(connString) && !/^nostr(\+)?walletconnect:/.test(connString)) {
+    throw new Error('Invalid NWC URI protocol. Expected nostr+walletconnect://...');
+  }
+
+  const url = parseNwcUrl(connString);
+  if (!url.host) throw new Error('NWC URI is missing the wallet service pubkey');
+  if (!url.searchParams.get('secret')) throw new Error('NWC URI is missing the secret parameter');
+  if (url.searchParams.getAll('relay').length === 0) throw new Error('NWC URI is missing at least one relay parameter');
+}
+
+function getNwcConnectionTarget(connString: string): { walletPubkey: string; relays: string[] } {
+  const url = parseNwcUrl(connString);
+  return {
+    walletPubkey: url.host,
+    relays: [...new Set(url.searchParams.getAll('relay').filter(Boolean))],
+  };
+}
+
+function shortNwcPubkey(pubkey: string): string {
+  return pubkey.length > 16 ? `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}` : pubkey;
+}
+
+function nwcCandidates(connString: string): string[] {
+  const trimmed = connString.trim();
+  assertValidNwcConnectionString(trimmed);
+
+  const url = parseNwcUrl(trimmed);
+  const relays = [...new Set(url.searchParams.getAll('relay').filter(Boolean))];
+  if (relays.length <= 1) return [trimmed];
+
+  return relays.map((relay) => {
+    const params = new URLSearchParams(url.searchParams);
+    params.delete('relay');
+    params.append('relay', relay);
+    return `nostr+walletconnect://${url.host}${url.pathname === '/' ? '' : url.pathname}?${params.toString()}`;
+  });
+}
+
+function isTimeoutLike(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.toLowerCase().includes('reply timeout') || msg.toLowerCase().includes('timed out') || msg.toLowerCase().includes('timeout');
+}
+
+function describeNwcConnectError(error: unknown, target?: { walletPubkey: string; relays: string[] }): string {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (msg.includes('no info event (kind 13194)')) {
+    const relayList = target?.relays.length ? ` Checked: ${target.relays.join(', ')}.` : '';
+    const wallet = target?.walletPubkey ? ` for wallet ${shortNwcPubkey(target.walletPubkey)}` : '';
+    return `No NWC info event (kind 13194) was found${wallet}.${relayList} Recreate the NWC connection in your wallet and paste the exact connection string, including the relay URL shown by the wallet.`;
+  }
+  return msg;
+}
+
+/**
+ * Retry a payment call up to `maxAttempts` times with linear backoff.
+ * Used for both keysend and lnaddress payments where relay lag can cause
+ * false "reply timeout" errors even when the payment actually succeeded.
+ */
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts: number, label: string): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      // Timeout errors: every retry wastes another 60 s — fail fast instead
+      if (isTimeoutLike(e)) {
+        throw e;
+      }
+      if (attempt < maxAttempts) {
+        const delay = 3000 * attempt;
+        console.log(`[V4V] attempt ${attempt}/${maxAttempts} failed for "${label}" — retrying in ${delay / 1000}s`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw e;
+      }
+    }
+  }
+  throw new Error('unreachable');
+}
 
 function getOrCreateSenderId(): string {
   let id = localStorage.getItem(NWC_SENDER_ID_KEY);
@@ -51,8 +161,14 @@ function saveBuffer(buf: Map<string, PendingPayment>) {
   localStorage.setItem(NWC_PENDING_KEY, JSON.stringify([...buf.entries()]));
 }
 
+function getPendingTotal(buf: Map<string, PendingPayment>): number {
+  return [...buf.values()].reduce((s, e) => s + Math.max(0, e.accumulatedSats), 0);
+}
+
 /**
  * Scale feed recipients to leave room for the PR split, then append PR.
+ * Wavlake tracks are excluded — PR's 5% split is already included via the
+ * appId=personal-radio referrer in the LNURL call (handled server-side).
  */
 function buildRecipients(
   feedRecipients: ValueRecipient[],
@@ -60,6 +176,25 @@ function buildRecipients(
   prSplitPercent: number,
 ): ValueRecipient[] {
   if (!supportPR || prSplitPercent <= 0) return feedRecipients;
+
+  // Wavlake's LNURL (appId=personal-radio) already includes 5% PR + 5% Wavlake = 10%
+  // built-in. Only add a PR recipient for the portion the user requested ABOVE 10%.
+  if (feedRecipients.some(r => r.type === 'wavlake')) {
+    const WAVLAKE_BUILTIN_PR_PERCENT = 10; // 5% PR + 5% Wavlake fee baked in via appId
+    const extraPR = prSplitPercent - WAVLAKE_BUILTIN_PR_PERCENT;
+    if (extraPR <= 0) return feedRecipients; // user's split ≤ 10% — already covered
+
+    // Scale the wavlake recipient down by extraPR%, add PR for the remainder
+    const wavlakeShare = 100 - extraPR;
+    const scaled = feedRecipients.map(r => ({
+      ...r,
+      split: Math.round((r.split / 100) * wavlakeShare),
+    }));
+    return [
+      ...scaled,
+      { name: 'Personal Radio', type: 'lnaddress' as const, address: PR_LIGHTNING_ADDRESS, split: extraPR },
+    ];
+  }
 
   const artistsShare  = 100 - prSplitPercent;
   const totalShares   = feedRecipients.reduce((s, r) => s + r.split, 0);
@@ -95,6 +230,10 @@ function accumulateToBuffer(
     const existing = buffer.get(r.address);
     if (existing) {
       existing.accumulatedSats += sats;
+      if (existing.accumulatedSats > MAX_PENDING_SATS) {
+        console.log(`[V4V] dropped ${existing.accumulatedSats} pending sats for "${r.name}" — payment cap exceeded`);
+        existing.accumulatedSats = 0;
+      }
     } else {
       buffer.set(r.address, {
         recipientName:     r.name,
@@ -175,9 +314,10 @@ export function useV4V() {
   const [totalSentThisSession, setTotalSent]        = useState(0);
   const [pendingTotal,       setPendingTotal]       = useState(0);
   const [lastFlushResult,    setLastFlushResult]    = useState<FlushResult | null>(null);
+  const [hasPaymentErrors,   setHasPaymentErrors]  = useState(false);
 
   // ── Refs (mutable, not reactive) ───────────────────────────────────────────
-  const nwcClientRef       = useRef<import('@getalby/sdk').webln.NWC | null>(null);
+  const nwcClientRef       = useRef<NWCWebLNClient | null>(null);
   const bufferRef          = useRef<Map<string, PendingPayment>>(loadBuffer());
   const currentRecipientsRef = useRef<ValueRecipient[]>([]);
   const currentMetaRef     = useRef<ItemMeta | null>(null);
@@ -189,6 +329,10 @@ export function useV4V() {
   const satRateRef         = useRef(satRatePerMinute);
   const supportPRRef       = useRef(supportPREnabled);
   const prSplitRef         = useRef(prSplitPercent);
+  const failureCountRef    = useRef<Map<string, number>>(new Map());
+  const disabledRef        = useRef<Set<string>>(new Set());
+  const connectAttemptRef  = useRef(0);
+  const flushInFlightRef   = useRef(false);
 
   // Keep refs in sync with state (so callbacks don't need to re-register)
   useEffect(() => { satRateRef.current   = satRatePerMinute; }, [satRatePerMinute]);
@@ -204,6 +348,14 @@ export function useV4V() {
 
     if (!client || buf.size === 0) return result;
 
+    if (flushInFlightRef.current) {
+      if (reason) console.log(`[V4V] flush skipped — already running (reason: "${reason}")`);
+      return result;
+    }
+
+    flushInFlightRef.current = true;
+
+    try {
     if (reason) console.log(`[V4V] flush triggered — reason: "${reason}"`);
 
     const now          = Date.now();
@@ -212,26 +364,64 @@ export function useV4V() {
 
     const keysendBatch: { address: string; entry: PendingPayment }[] = [];
     const invoiceBatch: { address: string; entry: PendingPayment }[] = [];
+    const wavlakeBatch: { address: string; entry: PendingPayment }[] = [];
 
     for (const [address, entry] of buf.entries()) {
+      if (disabledRef.current.has(address)) {
+        console.log(`[V4V] clearing disabled recipient "${entry.recipientName}"`);
+        buf.delete(address);
+        continue;
+      }
+
+      if (entry.accumulatedSats <= 0) {
+        buf.delete(address);
+        continue;
+      }
+
       const overThreshold = entry.accumulatedSats >= MIN_FLUSH_SATS;
       const isStale       = (now - entry.firstAccumulatedAt) >= MAX_BUFFER_AGE_MS;
       if (!overThreshold && !isStale) {
-        if (entry.accumulatedSats > 0) {
-          console.log(`[V4V] skipping "${entry.recipientName}" — only ${entry.accumulatedSats} sats (below 10 sat threshold)`);
-        }
+        console.log(`[V4V] skipping "${entry.recipientName}" — only ${entry.accumulatedSats} sats (below 10 sat threshold)`);
         continue;
       }
-      if (entry.accumulatedSats <= 0) continue;
 
       if (entry.recipientType === 'node') {
         keysendBatch.push({ address, entry });
+      } else if (entry.recipientType === 'wavlake') {
+        wavlakeBatch.push({ address, entry });
       } else {
         invoiceBatch.push({ address, entry });
       }
     }
 
-    console.log(`[V4V] flush — ${keysendBatch.length + invoiceBatch.length} recipients, total: ${[...keysendBatch, ...invoiceBatch].reduce((s, { entry }) => s + entry.accumulatedSats, 0)} sats`);
+    const allBatches = [...keysendBatch, ...invoiceBatch, ...wavlakeBatch];
+
+    if (allBatches.length === 0) {
+      saveBuffer(buf);
+      setPendingTotal(getPendingTotal(buf));
+      setLastFlushResult(result);
+      console.log('[V4V] flush skipped — no payable recipients');
+      return result;
+    }
+
+    // Health check — only use get_balance when the wallet explicitly advertises it.
+    // Otherwise this creates noisy, non-actionable failures before every flush.
+    if (capabilities.includes('get_balance')) {
+      try {
+        await client.getBalance();
+      } catch (e) {
+        if (isTimeoutLike(e)) {
+          console.warn('[V4V] NWC wallet unreachable — skipping flush');
+          saveBuffer(buf);
+          setPendingTotal(getPendingTotal(buf));
+          setLastFlushResult(result);
+          setHasPaymentErrors(true);
+          return result;
+        }
+        // Non-timeout errors from getBalance are non-fatal even when advertised.
+      }
+    }
+    console.log(`[V4V] flush — ${allBatches.length} recipients, total: ${allBatches.reduce((s, { entry }) => s + entry.accumulatedSats, 0)} sats`);
 
     // TLV stream metadata (bLIP-10, type 7629169)
     const streamMeta = currentMeta ? {
@@ -261,20 +451,22 @@ export function useV4V() {
         // Batch all keysends into one NWC request
         try {
           const keysends = keysendBatch.map(({ address, entry }) => ({
-            pubkey:     address,
-            amount:     entry.accumulatedSats,
-            tlv_records: tlvHex ? [{ type: 7629169, value: tlvHex }] : [],
+            destination:   address,
+            amount:        entry.accumulatedSats,
+            customRecords: {
+              ...(tlvHex ? { '7629169': tlvHex } : {}),
+              ...(entry.customRecords ?? {}),
+            },
           }));
           for (const { entry } of keysendBatch) {
             console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via keysend`);
           }
-          await (client as unknown as { multiKeysend: (p: unknown) => Promise<void> })
-            .multiKeysend({ keysends });
+          await client.multiKeysend(keysends);
           for (const { address, entry } of keysendBatch) {
             console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
-            buf.get(address)!.accumulatedSats = 0;
+            buf.delete(address);
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -288,22 +480,30 @@ export function useV4V() {
         for (const { address, entry } of keysendBatch) {
           console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via keysend`);
           try {
-            await client.keysend({
+            await withRetry(() => client.keysend({
               destination: address,
               amount:      entry.accumulatedSats,
               customRecords: {
                 ...(tlvHex ? { '7629169': tlvHex } : {}),
                 ...(entry.customRecords ?? {}),
               },
-            });
+            }), 2, entry.recipientName);
             console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
             result.sent     += entry.accumulatedSats;
             result.payments += 1;
-            buf.get(address)!.accumulatedSats = 0;
+            buf.delete(address);
+            failureCountRef.current.delete(address);
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
             result.errors.push(`keysend to ${entry.recipientName} failed: ${msg}`);
+            const count = (failureCountRef.current.get(address) ?? 0) + 1;
+            failureCountRef.current.set(address, count);
+            if (count >= MAX_CONSEC_FAILURES) {
+              disabledRef.current.add(address);
+              buf.delete(address);
+              console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
+            }
           }
         }
       }
@@ -313,20 +513,100 @@ export function useV4V() {
     for (const { address, entry } of invoiceBatch) {
       console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via lnaddress`);
       try {
-        const invoice = await fetchInvoiceForLnAddress(address, entry.accumulatedSats);
-        await client.sendPayment(invoice);
+        // Fetch a fresh invoice on each attempt (invoices expire, can't reuse).
+        await withRetry(async () => {
+          const invoice = await fetchInvoiceForLnAddress(address, entry.accumulatedSats);
+          await client.sendPayment(invoice);
+        }, 2, entry.recipientName);
         console.log(`[V4V] ✅ paid "${entry.recipientName}" — ${entry.accumulatedSats} sats`);
         result.sent     += entry.accumulatedSats;
         result.payments += 1;
-        buf.get(address)!.accumulatedSats = 0;
+        buf.delete(address);
+        failureCountRef.current.delete(address);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
         result.errors.push(`lnaddress payment to ${entry.recipientName} failed: ${msg}`);
+        const count = (failureCountRef.current.get(address) ?? 0) + 1;
+        failureCountRef.current.set(address, count);
+        if (count >= MAX_CONSEC_FAILURES) {
+          disabledRef.current.add(address);
+          buf.delete(address);
+          console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
+        }
       }
     }
 
-    // Persist updated buffer (amounts zeroed, entries kept for future accumulation)
+    // ── Wavlake payments (LNURL primary → keysend fallback) ──────────────────
+    for (const { address: trackId, entry } of wavlakeBatch) {
+      console.log(`[V4V] paying "${entry.recipientName}" — ${entry.accumulatedSats} sats via Wavlake`);
+      let paid = false;
+
+      // Primary: LNURL invoice via server-side proxy (includes appId=personal-radio split)
+      try {
+        const amountMsats = entry.accumulatedSats * 1000;
+        const proxyRes = await fetch(
+          `/.netlify/functions/wavlake-pay?contentId=${encodeURIComponent(trackId)}&amountMsats=${amountMsats}`,
+          { signal: AbortSignal.timeout(30_000) },
+        );
+        if (!proxyRes.ok) throw new Error(`wavlake-pay HTTP ${proxyRes.status}`);
+        const proxyData = await proxyRes.json() as { pr?: string; below_minimum?: boolean; minSendableSats?: number; error?: string };
+
+        if (proxyData.below_minimum) {
+          console.log(`[V4V] buffering ${entry.accumulatedSats} sats for "${entry.recipientName}" — below Wavlake minimum (${proxyData.minSendableSats} sats)`);
+          entry.firstAccumulatedAt = now;
+          paid = true; // carry forward, no fallback needed
+        } else if (proxyData.pr) {
+          await client.sendPayment(proxyData.pr);
+          console.log(`[V4V] ✅ paid ${entry.accumulatedSats} sats for "${entry.recipientName}" via Wavlake LNURL`);
+          result.sent     += entry.accumulatedSats;
+          result.payments += 1;
+          buf.delete(trackId);
+          failureCountRef.current.delete(trackId);
+          paid = true;
+        } else {
+          throw new Error(proxyData.error ?? 'No invoice from wavlake-pay');
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.log(`[Wavlake] LNURL failed for "${entry.recipientName}" — ${msg} — trying keysend fallback`);
+      }
+
+      // Fallback: direct keysend to Wavlake's Lightning node
+      if (!paid) {
+        const customValueHex = Array.from(new TextEncoder().encode(trackId))
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join('');
+        try {
+          await withRetry(() => client.keysend({
+            destination: WAVLAKE_LN_NODE,
+            amount:      entry.accumulatedSats,
+            customRecords: {
+              [WAVLAKE_CUSTOM_KEY]: customValueHex,
+              ...(tlvHex ? { '7629169': tlvHex } : {}),
+            },
+          }), 2, entry.recipientName);
+          console.log(`[V4V] ✅ paid ${entry.accumulatedSats} sats for "${entry.recipientName}" via keysend fallback`);
+          result.sent     += entry.accumulatedSats;
+          result.payments += 1;
+          buf.delete(trackId);
+          failureCountRef.current.delete(trackId);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.log(`[V4V] ❌ failed "${entry.recipientName}" — ${msg}`);
+          result.errors.push(`Wavlake payment to ${entry.recipientName} failed: ${msg}`);
+          const count = (failureCountRef.current.get(trackId) ?? 0) + 1;
+          failureCountRef.current.set(trackId, count);
+          if (count >= MAX_CONSEC_FAILURES) {
+            disabledRef.current.add(trackId);
+            buf.delete(trackId);
+            console.warn(`[V4V] disabled payments to "${entry.recipientName}" — too many failures`);
+          }
+        }
+      }
+    }
+
+    // Persist updated buffer after paid, disabled, and zero-value entries are pruned.
     saveBuffer(buf);
 
     if (result.sent > 0) {
@@ -338,48 +618,106 @@ export function useV4V() {
     }
     if (result.errors.length > 0) {
       console.warn('[V4V] flush errors:', result.errors);
+      setHasPaymentErrors(true);
+    } else if (result.payments > 0) {
+      setHasPaymentErrors(false);
     }
 
     // Recompute pending total
-    const newPending = [...buf.values()].reduce((s, e) => s + e.accumulatedSats, 0);
+    const newPending = getPendingTotal(buf);
     setPendingTotal(newPending);
 
     setLastFlushResult(result);
     return result;
+    } finally {
+      flushInFlightRef.current = false;
+    }
   }, [capabilities]);
 
   // ── Connection ─────────────────────────────────────────────────────────────
 
   const connect = useCallback(async (connString: string): Promise<boolean> => {
+    const attemptId = connectAttemptRef.current + 1;
+    connectAttemptRef.current = attemptId;
+    const isLatestAttempt = () => connectAttemptRef.current === attemptId;
+
     setIsConnecting(true);
     setConnectError(null);
     try {
       const { webln } = await import('@getalby/sdk');
-      const client = new webln.NWC({ nostrWalletConnectUrl: connString });
-      await client.enable();
 
-      // Fetch wallet info / capabilities
-      let detectedMethods: string[] = [];
-      try {
-        const info = await client.getInfo();
-        setWalletAlias(info.node?.alias ?? null);
-        detectedMethods = (info as unknown as { methods?: string[] }).methods ?? [];
-        setCapabilities(detectedMethods);
-      } catch {
-        // Non-fatal — not all wallets support get_info
-        detectedMethods = ['pay_invoice', 'pay_keysend'];
-        setCapabilities(detectedMethods);
+      let lastError: unknown = null;
+      const candidates = nwcCandidates(connString);
+
+      for (const candidate of candidates) {
+        const target = getNwcConnectionTarget(candidate);
+        console.log(`[V4V] trying NWC relay ${target.relays[0] ?? 'unknown'} for wallet ${shortNwcPubkey(target.walletPubkey)}`);
+
+        const client = new webln.NWC({
+          nostrWalletConnectUrl: candidate,
+        }) as NWCWebLNClient;
+
+        try {
+          await client.enable();
+
+          // NIP-47 requires the wallet service info event (kind 13194). Without it
+          // the SDK cannot reliably select NIP-44/NIP-04 encryption for requests.
+          const serviceInfo = await client.client.getWalletServiceInfo();
+          const detectedMethods = [...new Set(serviceInfo.capabilities.filter(Boolean))];
+
+          if (!detectedMethods.includes('pay_invoice')) {
+            throw new Error(`NWC wallet does not advertise pay_invoice. Capabilities: ${detectedMethods.join(', ') || 'none'}`);
+          }
+
+          let alias: string | null = null;
+          if (detectedMethods.includes('get_info')) {
+            try {
+              const info = await client.getInfo();
+              alias = info.node?.alias ?? null;
+            } catch (e) {
+              console.warn('[V4V] get_info request failed after service-info discovery:', e);
+            }
+          }
+
+          if (!isLatestAttempt()) {
+            client.close();
+            return false;
+          }
+
+          nwcClientRef.current?.close();
+          nwcClientRef.current = client;
+          setWalletAlias(alias);
+          setCapabilities(detectedMethods);
+          setConnectionString(candidate);
+          localStorage.setItem(NWC_CONN_KEY, candidate);
+          setIsConnected(true);
+          setIsConnecting(false);
+          console.log(`[V4V] connected — relay OK, wallet capabilities: ${detectedMethods.join(', ')}`);
+          return true;
+        } catch (e) {
+          lastError = e;
+          client.close();
+          if (!isLatestAttempt()) return false;
+          console.warn('[V4V] NWC candidate failed:', describeNwcConnectError(e, target));
+        }
       }
 
-      nwcClientRef.current = client;
-      setConnectionString(connString);
-      localStorage.setItem(NWC_CONN_KEY, connString);
-      setIsConnected(true);
-      setIsConnecting(false);
-      console.log(`[V4V] connected — wallet capabilities: ${detectedMethods.join(', ')}`);
-      return true;
+      throw lastError ?? new Error('Unable to connect to NWC wallet');
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      if (!isLatestAttempt()) return false;
+
+      const target = (() => {
+        try {
+          return getNwcConnectionTarget(connString.trim());
+        } catch {
+          return undefined;
+        }
+      })();
+      const msg = describeNwcConnectError(e, target);
+      nwcClientRef.current?.close();
+      nwcClientRef.current = null;
+      setWalletAlias(null);
+      setCapabilities([]);
       setConnectError(msg);
       setIsConnected(false);
       setIsConnecting(false);
@@ -389,6 +727,8 @@ export function useV4V() {
   }, []);
 
   const disconnect = useCallback(() => {
+    connectAttemptRef.current += 1;
+    nwcClientRef.current?.close();
     nwcClientRef.current = null;
     setIsConnected(false);
     setConnectionString(null);
@@ -559,6 +899,7 @@ export function useV4V() {
     pendingTotal,
     totalSentThisSession,
     lastFlushResult,
+    hasPaymentErrors,
     flushPendingPayments,
   };
 }

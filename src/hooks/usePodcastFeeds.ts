@@ -257,7 +257,7 @@ function getPodcastValueTag(item: Element, channel: Element | null): ValueTag | 
       if (!address) return null;
       return {
         name:    el.getAttribute('name') ?? 'Unknown',
-        type:    (recipType === 'lnaddress' ? 'lnaddress' : 'node') as 'node' | 'lnaddress',
+        type:    (recipType === 'lnaddress' ? 'lnaddress' : 'node') as ValueRecipient['type'],
         address,
         split:   parseInt(splitRaw, 10) || 0,
         fee:     el.getAttribute('fee') === 'true',

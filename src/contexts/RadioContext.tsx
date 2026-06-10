@@ -12,6 +12,7 @@
  */
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import type { Howl } from 'howler';
 
 // ── RadioItem type (duplicated here to avoid a circular import) ──────────────
 // This is the minimal shape needed by RadioContext. RadioPage casts it properly.
@@ -66,6 +67,21 @@ export interface RadioContextValue {
   nowPlayingRef: React.RefObject<RadioItem | null>;
   nowPlaying: RadioItem | null;
   setNowPlaying: (item: RadioItem | null) => void;
+  /**
+   * Howler instance for the active music track. Lives in context so it
+   * survives navigation — otherwise the Howl keeps playing as an orphan
+   * (audible) but the UI loses its handle and can't sync play state.
+   */
+  howlRef: React.RefObject<Howl | null>;
+  howlPollRef: React.RefObject<ReturnType<typeof setInterval> | null>;
+  /**
+   * Super Saiyan visual mode — opt-in storm/lightning FX. In context so
+   * the storm doesn't reset when the user navigates to Settings and back.
+   */
+  superSaiyan: boolean;
+  setSuperSaiyan: React.Dispatch<React.SetStateAction<boolean>>;
+  ssBurstKey: number;
+  bumpSsBurst: () => void;
 }
 
 const RadioContext = createContext<RadioContextValue | null>(null);
@@ -91,6 +107,15 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
     nowPlayingRef.current = item;
     setNowPlayingState(item);
   }, []);
+
+  // Music Howl + its poll interval — persistent across navigations.
+  const howlRef     = useRef<Howl | null>(null);
+  const howlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Super Saiyan visual mode, persistent across navigations (but not browser sessions).
+  const [superSaiyan, setSuperSaiyan] = useState(false);
+  const [ssBurstKey, setSsBurstKey]   = useState(0);
+  const bumpSsBurst = useCallback(() => setSsBurstKey(k => k + 1), []);
 
   // Create the audio elements exactly once on mount.
   useEffect(() => {
@@ -130,6 +155,12 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
     nowPlayingRef,
     nowPlaying,
     setNowPlaying,
+    howlRef,
+    howlPollRef,
+    superSaiyan,
+    setSuperSaiyan,
+    ssBurstKey,
+    bumpSsBurst,
   };
 
   return (

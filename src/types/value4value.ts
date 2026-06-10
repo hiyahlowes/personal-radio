@@ -2,8 +2,8 @@
 
 export interface ValueRecipient {
   name: string;
-  type: 'node' | 'lnaddress';
-  address: string;   // node pubkey (66 hex chars) or lightning address (user@domain)
+  type: 'node' | 'lnaddress' | 'wavlake';
+  address: string;   // node pubkey (hex), lightning address (user@domain), or Wavlake trackId (UUID)
   split: number;     // integer share weight (not a percentage)
   customRecords?: Record<string, string>;
   fee?: boolean;     // true = app-fee recipient (e.g. hosting provider)
@@ -26,7 +26,7 @@ export interface ItemMeta {
 
 export interface PendingPayment {
   recipientName: string;
-  recipientType: 'node' | 'lnaddress';
+  recipientType: 'node' | 'lnaddress' | 'wavlake';
   address: string;
   splitPercent: number;        // normalized percentage of this flush's total
   accumulatedSats: number;
