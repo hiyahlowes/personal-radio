@@ -23,6 +23,8 @@ try {
 } catch {}
 
 const { handler: podcastProxy } = await import(pathToFileURL(path.join(root, 'netlify/functions/podcast-proxy.mjs')).href);
+const { handler: wavlakeCharts } = await import(pathToFileURL(path.join(root, 'netlify/functions/wavlake-charts.mjs')).href);
+const { handler: wavlakePay } = await import(pathToFileURL(path.join(root, 'netlify/functions/wavlake-pay.mjs')).href);
 const { default: claudeProxy } = await import(pathToFileURL(path.join(root, 'netlify/functions/claude-proxy.mjs')).href);
 
 const mime = {
@@ -54,7 +56,7 @@ function collectBody(req) {
   });
 }
 
-async function handlePodcastProxy(req, res, url) {
+async function handleNetlifyHandler(handler, req, res, url) {
   const body = await collectBody(req);
   const event = {
     httpMethod: req.method,
@@ -65,10 +67,14 @@ async function handlePodcastProxy(req, res, url) {
     body: body.length ? body.toString('utf8') : null,
     isBase64Encoded: false,
   };
-  const out = await podcastProxy(event);
+  const out = await handler(event);
   const headers = out.headers || {};
   const responseBody = out.isBase64Encoded ? Buffer.from(out.body || '', 'base64') : (out.body || '');
   send(res, out.statusCode || 200, headers, responseBody);
+}
+
+async function handlePodcastProxy(req, res, url) {
+  return handleNetlifyHandler(podcastProxy, req, res, url);
 }
 
 async function handleClaudeProxy(req, res) {
@@ -129,6 +135,8 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://localhost:${port}`);
     if (url.pathname === '/health') return send(res, 200, { 'content-type': 'application/json' }, JSON.stringify({ ok: true }));
     if (url.pathname === '/.netlify/functions/podcast-proxy') return await handlePodcastProxy(req, res, url);
+    if (url.pathname === '/.netlify/functions/wavlake-charts') return await handleNetlifyHandler(wavlakeCharts, req, res, url);
+    if (url.pathname === '/.netlify/functions/wavlake-pay') return await handleNetlifyHandler(wavlakePay, req, res, url);
     if (url.pathname === '/.netlify/functions/claude-proxy') return await handleClaudeProxy(req, res);
     if (url.pathname === '/podcast-stream') return await handlePodcastStream(req, res, url);
     return await serveStatic(req, res, url);
