@@ -13,41 +13,58 @@
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import type { Howl } from 'howler';
-import type { WavlakeTrack } from '@/hooks/useWavlakeTracks';
-import type { PodcastEpisode } from '@/hooks/usePodcastFeeds';
 
 // ── RadioItem type (duplicated here to avoid a circular import) ──────────────
 // This is the minimal shape needed by RadioContext. RadioPage casts it properly.
 export interface RadioItemMusic {
   kind: 'music';
-  track: WavlakeTrack;
+  track: {
+    id: string;
+    name: string;
+    artist: string;
+    albumTitle: string;
+    artworkUrl: string;
+    liveUrl: string;
+    duration: number;
+    artistId: string;
+    albumId: string;
+    avatarUrl: string;
+  };
 }
 export interface RadioItemPodcast {
   kind: 'podcast';
-  episode: PodcastEpisode;
+  episode: {
+    id: string;
+    feedTitle: string;
+    title: string;
+    audioUrl: string;
+    duration: number;
+    description: string;
+    pubDate: string;
+  };
 }
 export type RadioItem = RadioItemMusic | RadioItemPodcast;
 
 export interface RadioContextValue {
   /** Main music <audio> element (currently playing). NO crossOrigin — Wavlake CDN has no CORS. */
-  audioRef: React.MutableRefObject<HTMLAudioElement | null>;
+  audioRef: React.RefObject<HTMLAudioElement | null>;
   /** Second music <audio> element used for crossfade pre-loading of the next track. */
-  nextAudioRef: React.MutableRefObject<HTMLAudioElement | null>;
+  nextAudioRef: React.RefObject<HTMLAudioElement | null>;
   /** Podcast <audio> element. crossOrigin='anonymous' for Web Audio API. */
-  podAudioRef: React.MutableRefObject<HTMLAudioElement | null>;
+  podAudioRef: React.RefObject<HTMLAudioElement | null>;
   /** True while the radio loop is running (survives navigations). */
-  runningRef: React.MutableRefObject<boolean>;
+  runningRef: React.RefObject<boolean>;
   /** True once the opening greeting has been spoken. */
-  greetedRef: React.MutableRefObject<boolean>;
+  greetedRef: React.RefObject<boolean>;
   /** Current track index in the playlist. */
-  idxRef: React.MutableRefObject<number>;
+  idxRef: React.RefObject<number>;
   /** Generation counter — incremented each loop iteration to cancel stale listeners. */
-  loopGenRef: React.MutableRefObject<number>;
+  loopGenRef: React.RefObject<number>;
   /**
    * The currently-playing item (music or podcast), stored in context so it
    * survives navigation to Settings and back. RadioPage keeps this in sync.
    */
-  nowPlayingRef: React.MutableRefObject<RadioItem | null>;
+  nowPlayingRef: React.RefObject<RadioItem | null>;
   nowPlaying: RadioItem | null;
   setNowPlaying: (item: RadioItem | null) => void;
   /**
@@ -55,8 +72,8 @@ export interface RadioContextValue {
    * survives navigation — otherwise the Howl keeps playing as an orphan
    * (audible) but the UI loses its handle and can't sync play state.
    */
-  howlRef: React.MutableRefObject<Howl | null>;
-  howlPollRef: React.MutableRefObject<ReturnType<typeof setInterval> | null>;
+  howlRef: React.RefObject<Howl | null>;
+  howlPollRef: React.RefObject<ReturnType<typeof setInterval> | null>;
   /**
    * Super Saiyan visual mode — opt-in storm/lightning FX. In context so
    * the storm doesn't reset when the user navigates to Settings and back.

@@ -19,6 +19,45 @@ function corsHeaders() {
   };
 }
 
+export function shouldUseViaModeration(body, env = process.env) {
+  return body?.purpose === 'radio-moderation' && env.PERSONAL_RADIO_USE_VIA === 'true';
+}
+
+async function runViaModeration(body, env = process.env) {
+  const port = Number(env.VIA_MODERATOR_PORT || 8902);
+  const timeout = Number(env.PERSONAL_RADIO_HERMES_TIMEOUT_MS || 120000);
+
+  const res = await fetch(`http://127.0.0.1:${port}/moderation`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeout),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => res.statusText);
+    throw new Error(`Via moderator service ${res.status}: ${errBody.slice(0, 300)}`);
+  }
+
+  const json = await res.json();
+  const text = json?.content?.[0]?.text?.trim();
+  if (!text) throw new Error('Via moderator service returned empty text');
+  return text;
+}
+
+function anthropicTextResponse(text) {
+  return {
+    id: `via-radio-${Date.now()}`,
+    type: 'message',
+    role: 'assistant',
+    model: 'via-nova-hermes',
+    content: [{ type: 'text', text }],
+    stop_reason: 'end_turn',
+    stop_sequence: null,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
+}
+
 export default async function handler(req) {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -28,15 +67,6 @@ export default async function handler(req) {
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
       status: 405,
-      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-    });
-  }
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.error('[claude-proxy] ANTHROPIC_API_KEY is not set');
-    return new Response(JSON.stringify({ error: 'Server misconfiguration: missing API key' }), {
-      status: 500,
       headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
     });
   }
@@ -51,12 +81,31 @@ export default async function handler(req) {
     });
   }
 
+  if (shouldUseViaModeration(body)) {
+    try {
+      const text = await runViaModeration(body);
+      return new Response(JSON.stringify(anthropicTextResponse(text)), {
+        status: 200,
+        headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+      });
+    } catch (err) {
+      console.warn('[claude-proxy] Via moderation failed, falling back to Anthropic:', err?.message || err);
+    }
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.error('[claude-proxy] ANTHROPIC_API_KEY is not set');
+    return new Response(JSON.stringify({ error: 'Server misconfiguration: missing API key' }), {
+      status: 500,
+      headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+    });
+  }
+
   const { system, messages, model, max_tokens } = body;
 
   const requestBody = JSON.stringify({ system, messages, model, max_tokens });
-  console.log('[Claude Proxy] Sending body:', requestBody);
-  console.log('[Claude Proxy] API key length:', process.env.ANTHROPIC_API_KEY?.length);
-  console.log('[Claude Proxy] API key prefix:', process.env.ANTHROPIC_API_KEY?.substring(0, 10));
+  console.log('[Claude Proxy] Sending request to Anthropic:', { model, max_tokens, messageCount: Array.isArray(messages) ? messages.length : 0, hasSystem: Boolean(system) });
 
   const upstream = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

@@ -7,7 +7,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import App from './App.tsx';
 import './index.css';
 
-// Optional: add a custom font import here if the brand needs one.
+// A custom font can be wired here later if the design needs one. Eg:
 // import '@fontsource-variable/<font-name>';
 
 createRoot(document.getElementById("root")!).render(

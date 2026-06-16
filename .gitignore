@@ -24,8 +24,9 @@ yarn.lock
 *.sln
 *.sw?
 
-# Vercel
+# Vercel / Netlify local state
 .vercel
+.netlify
 
 # Secrets
 .env

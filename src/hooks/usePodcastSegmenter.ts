@@ -45,6 +45,7 @@ const SILENCE_MIN_DURATION = 1.5;   // seconds of continuous silence to trigger
 const SPLIT_WINDOW_MIN     = 8 * 60;  // 8 min — don't split before this
 const SPLIT_WINDOW_MAX     = 15 * 60; // 15 min — force split at this point
 const BUFFER_CAPTURE_SECS  = 90;      // seconds of audio to send to STT
+const MODERATION_LEAD_SECS = 90;      // start moderation/TTS prep before a planned interruption
 
 // Analyser settings
 const FFT_SIZE        = 2048;
@@ -715,13 +716,17 @@ export function usePodcastSegmenter() {
       let scribeCutTime: number | null = null;
 
       // TTS pre-gen: for chapter-based splits, start Claude + onCommentaryReady
-      // 30 s before the cut so Fish Audio TTS is ready at the actual break point.
+      // 90 s before the cut so slow Via/Fish Audio moderation is ready at the
+      // actual break point. This is intentionally earlier than the natural-cut
+      // transcript lookup, which still starts close to the chapter boundary.
       let preGenStarted   = false;
       let preGenCommentary: string | null = null;
       let preGenPromise: Promise<string> | null = null;
 
       // Promise that resolves true on natural end, false on split or pause
       const result = await new Promise<'ended' | 'split' | 'paused'>((resolve) => {
+        // eslint-disable-next-line prefer-const
+        let pollId: ReturnType<typeof setInterval>;
         let prevPollTime = audio.currentTime; // for seek detection
 
         function cleanup() {
@@ -743,9 +748,12 @@ export function usePodcastSegmenter() {
           // else: transient pause (buffering) — ignore
         };
 
+        audio.addEventListener('ended', onEnded);
+        audio.addEventListener('pause', onPause);
+
         let silenceStart: number | null = null;
 
-        const pollId = setInterval(() => {
+        pollId = setInterval(() => {
           if (!callbacks.isRunning()) { cleanup(); resolve('paused'); return; }
 
           const ct = audio.currentTime;
@@ -791,6 +799,33 @@ export function usePodcastSegmenter() {
           }
 
           if (targetChapterTime !== null) {
+            // Start commentary generation MODERATION_LEAD_SECS before the
+            // planned chapter interruption. The later natural-cut lookup may
+            // refine the exact stop point, but the moderation itself should
+            // already be cooking by then.
+            if (
+              !preGenStarted &&
+              ct >= targetChapterTime - MODERATION_LEAD_SECS
+            ) {
+              preGenStarted = true;
+              console.log(`[TTS-Pre] starting interrupt pre-gen ${MODERATION_LEAD_SECS}s early`);
+              const preGenAt = ct;
+              preGenPromise = (async () => {
+                const preCtx = await buildContext(preGenAt, transcriptUrl, chapters, description);
+                const preMain = preCtx.primaryText;
+                let script: string;
+                if (preMain.length > 20 || preCtx.backgroundText.length > 20) {
+                  const ai = await generateCommentary(episodeFeedTitle, preMain, preCtx.backgroundText);
+                  script = ai ?? fallbackCommentary(episodeFeedTitle);
+                } else {
+                  script = fallbackCommentary(episodeFeedTitle);
+                }
+                preGenCommentary = script;
+                callbacks.onCommentaryReady?.(script);
+                return script;
+              })();
+            }
+
             // 30 s before the chapter boundary: kick off async natural-cut search.
             // The result arrives well before the boundary; if not, we fall back to
             // the chapter timestamp (naturalCutTime stays null → effectiveCutTime = targetChapterTime).
@@ -803,28 +838,6 @@ export function usePodcastSegmenter() {
               findNaturalCutPoint(transcriptUrl, targetChapterTime)
                 .then(t  => { naturalCutTime = t; })
                 .catch(() => { naturalCutTime = targetChapterTime; });
-
-              // Start commentary pre-gen immediately — 30s before the cut —
-              // so TTS audio is ready when speakCommentary fires.
-              if (!preGenStarted) {
-                preGenStarted = true;
-                console.log('[TTS-Pre] starting interrupt pre-gen 30s early');
-                const preGenAt = ct;
-                preGenPromise = (async () => {
-                  const preCtx = await buildContext(preGenAt, transcriptUrl, chapters, description);
-                  const preMain = preCtx.primaryText;
-                  let script: string;
-                  if (preMain.length > 20 || preCtx.backgroundText.length > 20) {
-                    const ai = await generateCommentary(episodeFeedTitle, preMain, preCtx.backgroundText);
-                    script = ai ?? fallbackCommentary(episodeFeedTitle);
-                  } else {
-                    script = fallbackCommentary(episodeFeedTitle);
-                  }
-                  preGenCommentary = script;
-                  callbacks.onCommentaryReady?.(script);
-                  return script;
-                })();
-              }
             }
 
             // Use the refined cut time once it arrives; fall back to chapter boundary.
@@ -903,9 +916,6 @@ export function usePodcastSegmenter() {
             }
           }
         }, POLL_INTERVAL);
-
-        audio.addEventListener('ended', onEnded);
-        audio.addEventListener('pause', onPause);
       });
 
       if (result === 'paused' || !callbacks.isRunning()) {

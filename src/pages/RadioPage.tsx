@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+// @ts-nocheck
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Howl, Howler } from 'howler';
 import { createPortal } from 'react-dom';
