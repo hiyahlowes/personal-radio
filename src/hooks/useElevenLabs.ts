@@ -148,12 +148,12 @@ export function useElevenLabs() {
         body = {
           text,
           voice_id: voiceId,
-          model_id: 'eleven_turbo_v2_5',
+          model_id: 'eleven_v3',
           voice_settings: {
-            // German: lower stability + higher style for a more expressive, lively delivery.
-            stability:         opts.stability        ?? (isGerman ? 0.25 : 0.45),
-            similarity_boost:  opts.similarity_boost ?? 0.82,
-            style:             opts.style            ?? (isGerman ? 0.35 : 0.35),
+            // German radio host: low stability + high style for expressive, emotional delivery.
+            stability:         opts.stability        ?? (isGerman ? 0.25 : 0.35),
+            similarity_boost:  opts.similarity_boost ?? 0.78,
+            style:             opts.style            ?? (isGerman ? 0.75 : 0.55),
             use_speaker_boost: opts.use_speaker_boost ?? true,
           },
         };

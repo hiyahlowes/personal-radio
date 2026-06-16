@@ -442,13 +442,13 @@ async function handleTts(event) {
   }
 
   const { text, voice_id, voice_settings: clientSettings } = parsed;
-  const model_id = 'eleven_turbo_v2_5'; // hardcoded server-side — client value ignored
+  const model_id = 'eleven_v3'; // expressive model; supports emotional tags and wider vocal dynamics
   // Client may override specific voice settings (e.g. language-specific expressiveness).
-  // model_id stays locked server-side; voice_settings are not secrets.
+  // Voice settings are not secrets.
   const voice_settings = {
-    stability:        0.40,
-    similarity_boost: 0.75,
-    style:            0.15,
+    stability:        0.25,
+    similarity_boost: 0.78,
+    style:            0.75,
     use_speaker_boost: true,
     ...(clientSettings && typeof clientSettings === 'object' ? clientSettings : {}),
   };
