@@ -1464,6 +1464,65 @@ export function RadioPage() {
       const nextIdx   = (currentIdx + 1) % tracks.length;
       const nextTrack = tracks[nextIdx];
 
+      const prepareUpcomingTrack = () => {
+        if (!nextTrack || nextTrack.id === t.id) return;
+
+        const nextUrl = nextTrack.liveUrl;
+        // Prefer Howler for pre-load (keeps crossfade fully in Howler)
+        nextHowlRef.current?.unload();
+        nextHowlRef.current = new Howl({
+          src: [nextUrl],
+          html5: true,
+          volume: 0,
+          onload:      () => console.log('[Howler] next track preloaded:', nextTrack.name),
+          onloaderror: (_id: number, err: unknown) => console.warn('[Howler] next load error:', err),
+        });
+        console.log(`[Crossfade] pre-loading next: "${nextTrack.name}"`);
+        // nextAudio is no longer pre-loaded — Howler is the sole playback system.
+        // Loading nextAudio in parallel caused the legacy HTMLAudioElement crossfade
+        // to fire on iOS, creating two competing audio sessions.
+        console.log('[Cleanup] old audioRef crossfade disabled');
+
+        // Pre-generate TTS for what comes AFTER the current track.
+        // If the NEXT slot is a podcast (silentCount + 1 reaches budget AND episodes exist),
+        // pre-generate the podcast transition; otherwise pre-generate the track intro.
+        if (nextIntroUrlRef.current) {
+          URL.revokeObjectURL(nextIntroUrlRef.current);
+          nextIntroUrlRef.current = null;
+        }
+
+        const nextIsPodcast =
+          (silentCountRef.current + 1) >= silentBudgetRef.current &&
+          episodesRef.current.length > 0;
+
+        if (nextIsPodcast) {
+          // Pick the upcoming episode (same logic as the podcast slot below).
+          const eps    = episodesRef.current;
+          const epIdx  = podcastIdxRef.current % eps.length;
+          const upcomingEp = eps[epIdx];
+          if (upcomingEp) {
+            // Discard stale podcast transition blob.
+            if (podTransitionBlobRef.current) {
+              URL.revokeObjectURL(podTransitionBlobRef.current);
+              podTransitionBlobRef.current = null;
+            }
+            console.log(`[TTS-Pre] pre-generating podcast intro for: "${upcomingEp.feedTitle}"`);
+            moderatorRef.current.generatePodcastTransitionAudio(
+              upcomingEp.title, upcomingEp.feedTitle, upcomingEp.description, upcomingEp.author,
+            ).then(url => {
+              podTransitionBlobRef.current     = url;
+              podTransitionBlobTimeRef.current = Date.now();
+            }).catch(() => {});
+          }
+        } else {
+          const nextIsLiked = listenerMemoryRef.current.memory.likedSongs.includes(nextTrack.id);
+          console.log(`[TTS-Pre] pre-generating intro for: "${nextTrack.name}"`);
+          moderatorRef.current.generateTrackIntroAudio(nextTrack, nextTrack.isTopChart, nextIsLiked)
+            .then(url => { nextIntroUrlRef.current = url; })
+            .catch(() => {});
+        }
+      };
+
       // ── If a crossfade already handed off this track, audio is playing it ──
       // Skip the load/play so we don't interrupt the seamless transition.
       if (crossfadeActiveRef.current) {
@@ -1487,6 +1546,7 @@ export function RadioPage() {
             audio.volume = expected;
           }
         }
+        prepareUpcomingTrack();
       } else if (resumeMusicRef.current) {
         // ── User resumed after pausing mid-track — src is still loaded ─────
         resumeMusicRef.current = false;
@@ -1520,62 +1580,7 @@ export function RadioPage() {
 
         // Pre-load the next track so it's buffered before the crossfade window.
         // Do this early — before speech — so the browser has time to buffer.
-        if (nextTrack && nextTrack.id !== t.id) {
-          const nextUrl = nextTrack.liveUrl;
-          // Prefer Howler for pre-load (keeps crossfade fully in Howler)
-          nextHowlRef.current?.unload();
-          nextHowlRef.current = new Howl({
-            src: [nextUrl],
-            html5: true,
-            volume: 0,
-            onload:      () => console.log('[Howler] next track preloaded:', nextTrack.name),
-            onloaderror: (_id: number, err: unknown) => console.warn('[Howler] next load error:', err),
-          });
-          console.log(`[Crossfade] pre-loading next: "${nextTrack.name}"`);
-          // nextAudio is no longer pre-loaded — Howler is the sole playback system.
-          // Loading nextAudio in parallel caused the legacy HTMLAudioElement crossfade
-          // to fire on iOS, creating two competing audio sessions.
-          console.log('[Cleanup] old audioRef crossfade disabled');
-
-          // Pre-generate TTS for what comes AFTER the current track.
-          // If the NEXT slot is a podcast (silentCount + 1 reaches budget AND episodes exist),
-          // pre-generate the podcast transition; otherwise pre-generate the track intro.
-          if (nextIntroUrlRef.current) {
-            URL.revokeObjectURL(nextIntroUrlRef.current);
-            nextIntroUrlRef.current = null;
-          }
-
-          const nextIsPodcast =
-            (silentCountRef.current + 1) >= silentBudgetRef.current &&
-            episodesRef.current.length > 0;
-
-          if (nextIsPodcast) {
-            // Pick the upcoming episode (same logic as the podcast slot below).
-            const eps    = episodesRef.current;
-            const epIdx  = podcastIdxRef.current % eps.length;
-            const upcomingEp = eps[epIdx];
-            if (upcomingEp) {
-              // Discard stale podcast transition blob.
-              if (podTransitionBlobRef.current) {
-                URL.revokeObjectURL(podTransitionBlobRef.current);
-                podTransitionBlobRef.current = null;
-              }
-              console.log(`[TTS-Pre] pre-generating podcast intro for: "${upcomingEp.feedTitle}"`);
-              moderatorRef.current.generatePodcastTransitionAudio(
-                upcomingEp.title, upcomingEp.feedTitle, upcomingEp.description, upcomingEp.author,
-              ).then(url => {
-                podTransitionBlobRef.current     = url;
-                podTransitionBlobTimeRef.current = Date.now();
-              }).catch(() => {});
-            }
-          } else {
-            const nextIsLiked = listenerMemoryRef.current.memory.likedSongs.includes(nextTrack.id);
-            console.log(`[TTS-Pre] pre-generating intro for: "${nextTrack.name}"`);
-            moderatorRef.current.generateTrackIntroAudio(nextTrack, nextTrack.isTopChart, nextIsLiked)
-              .then(url => { nextIntroUrlRef.current = url; })
-              .catch(() => {});
-          }
-        }
+        prepareUpcomingTrack();
 
         // Wait for the current track to buffer before playing — prevents dead air.
         if (audio.readyState < 3 /* HAVE_FUTURE_DATA */) {
@@ -1745,6 +1750,8 @@ export function RadioPage() {
           const h   = howlRef.current;
           const dur = h ? (h.duration() ?? 0) : activeAudio.duration;
           const ct  = h ? (h.seek() as number) : activeAudio.currentTime;
+          if (isFinite(ct)) setCT(ct);
+          if (dur > 0 && isFinite(dur)) setDur(dur);
           // Only crossfade if: duration is known, track is longer than 2× crossfade,
           // and we're within the crossfade window
           if (isFinite(dur) && dur > CROSSFADE_SECS * 2 && ct >= dur - CROSSFADE_SECS) {
@@ -1770,10 +1777,12 @@ export function RadioPage() {
         };
 
         // Howler doesn't fire timeupdate on audioRef — poll independently.
+        const activeHowlAtWait = howlRef.current;
         const howlTimerId = setInterval(onTimeUpdate, 250);
 
         function cleanup() {
           clearInterval(howlTimerId);
+          activeHowlAtWait?.off('end', onEnded);
           activeAudio.removeEventListener('timeupdate', onTimeUpdate);
           activeAudio.removeEventListener('ended',      onEnded);
           activeAudio.removeEventListener('pause',      onPause);
@@ -1796,6 +1805,7 @@ export function RadioPage() {
         activeAudio.addEventListener('timeupdate', onTimeUpdate);
         activeAudio.addEventListener('ended',      onEnded);
         activeAudio.addEventListener('pause',      onPause);
+        activeHowlAtWait?.once('end', onEnded);
       });
 
       if (!runningRef.current) { console.log('[Loop] runningRef false — exiting'); break; }
