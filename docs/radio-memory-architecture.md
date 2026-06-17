@@ -58,6 +58,29 @@ They are stored as `open`, then marked `used` once included in a successful mode
 
 Call-ins do not trigger moderation. They are only considered when the normal radio loop reaches a moderation point such as a music moderation, podcast intro or podcast segment commentary.
 
+## Listener-aware sessions
+
+The self-hosted engine treats listening as a real radio session, not as an endless unattended playlist.
+
+An active listener currently means:
+
+- a configured physical output sink exists, such as Bluetooth headphones or a deck/tunnel sink
+- or the configured livestream sink has at least one `/live.mp3` client
+
+If no active listener exists, the engine enters `suspended` instead of continuing playback. It stores the current music or podcast position as `pausedResumeItem`; podcast positions are also persisted in `podcast-state.json`.
+
+Relevant settings are stored in `/api/settings`:
+
+- `autoSuspendWhenNoListeners`
+- `noListenerGraceSeconds`
+- `newSessionAfterMinutes`
+- `resumeWithLikedSong`
+- `sessionIntroAfterFirstSong`
+
+After a short outage the engine resumes the paused item. After a long outage, currently defaulting to 180 minutes, it starts a new session with a liked song when possible, prepares the welcome-back moderation during that song, and only then resumes any deferred podcast.
+
+`/api/status` exposes `listenerState` so the Remote can show whether the engine is active, in grace, or suspended.
+
 ## Future Honcho-like layer
 
 This first layer is intentionally simple. A later layer can add embeddings/retrieval:

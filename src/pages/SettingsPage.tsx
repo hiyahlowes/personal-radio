@@ -711,6 +711,72 @@ export function SettingsPage() {
                 </div>
               </div>
 
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-3 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-white/75">Auto Suspend</p>
+                    <p className="text-xs text-white/35">
+                      {engineMode.status?.listenerState?.mode === 'suspended'
+                        ? `Still for ${Math.round((engineMode.status.listenerState.silenceDurationSeconds || 0) / 60)} min`
+                        : `${engineMode.status?.listenerState?.activeListeners ?? 0} active listener${(engineMode.status?.listenerState?.activeListeners ?? 0) === 1 ? '' : 's'}`}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => engineMode.saveSettings({ autoSuspendWhenNoListeners: !(engineMode.settings?.autoSuspendWhenNoListeners ?? true) })}
+                    className={`relative w-10 h-5 rounded-full transition-colors ${(engineMode.settings?.autoSuspendWhenNoListeners ?? true) ? 'bg-emerald-500' : 'bg-white/15'}`}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${(engineMode.settings?.autoSuspendWhenNoListeners ?? true) ? 'translate-x-5' : ''}`} />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="space-y-1">
+                    <span className="text-[10px] font-bold tracking-[0.14em] uppercase text-white/35">Grace seconds</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={300}
+                      value={engineMode.settings?.noListenerGraceSeconds ?? 30}
+                      onChange={e => engineMode.saveSettings({ noListenerGraceSeconds: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-xl bg-black/25 border border-white/10 text-sm text-white/75 focus:outline-none focus:border-emerald-400/40"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-[10px] font-bold tracking-[0.14em] uppercase text-white/35">New session after min</span>
+                    <input
+                      type="number"
+                      min={5}
+                      max={1440}
+                      value={engineMode.settings?.newSessionAfterMinutes ?? 180}
+                      onChange={e => engineMode.saveSettings({ newSessionAfterMinutes: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-xl bg-black/25 border border-white/10 text-sm text-white/75 focus:outline-none focus:border-emerald-400/40"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <label className="flex items-center gap-2 text-xs text-white/55">
+                    <input
+                      type="checkbox"
+                      checked={engineMode.settings?.resumeWithLikedSong ?? true}
+                      onChange={e => engineMode.saveSettings({ resumeWithLikedSong: e.target.checked })}
+                      className="accent-emerald-400"
+                    />
+                    Start new session with liked song
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-white/55">
+                    <input
+                      type="checkbox"
+                      checked={engineMode.settings?.sessionIntroAfterFirstSong ?? true}
+                      onChange={e => engineMode.saveSettings({ sessionIntroAfterFirstSong: e.target.checked })}
+                      className="accent-emerald-400"
+                    />
+                    Intro after first song
+                  </label>
+                </div>
+              </div>
+
               {remoteOutputNames.map(output => {
                 const current = remoteVolumeDrafts[output] ?? engineMode.volumes?.[output]?.volume ?? 0.8;
                 const active = engineMode.status?.outputs?.[output]?.playing;

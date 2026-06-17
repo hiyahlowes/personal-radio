@@ -146,6 +146,11 @@ const DEFAULT_SETTINGS = {
   },
   fishVoiceIdEn: process.env.FISH_AUDIO_VOICE_ID_EN || process.env.FISH_AUDIO_VOICE_ID || '',
   fishVoiceIdDe: process.env.FISH_AUDIO_VOICE_ID_DE || process.env.FISH_AUDIO_VOICE_ID || '',
+  autoSuspendWhenNoListeners: true,
+  noListenerGraceSeconds: 30,
+  newSessionAfterMinutes: 180,
+  resumeWithLikedSong: true,
+  sessionIntroAfterFirstSong: true,
 };
 
 function loadSettings() {
@@ -215,6 +220,28 @@ let podcastSessionActive = false;
 let shuttingDown = false;
 let pausedResumeItem = null;
 let currentPlaybackStartSeconds = 0;
+let deferredResumeItem = null;
+let sessionIntroRequest = null;
+let pendingSessionIntroPromise = null;
+let sessionIntroSongKey = null;
+let listenerResumeInProgress = false;
+
+const listenerState = {
+  mode: 'unknown',
+  activeListeners: 0,
+  activeOutputs: [],
+  outputDetails: [],
+  liveStreamClients: null,
+  lastCheckedAt: null,
+  lastHeardAt: null,
+  graceStartedAt: null,
+  suspendedAt: null,
+  lastResumedAt: null,
+  lastSuspendDurationSeconds: 0,
+  silenceDurationSeconds: 0,
+  resumeWillStartNewSession: false,
+  reason: null,
+};
 
 // Pre-generated moderation ready to play: Promise<ModerationItem|null>|null
 let pendingModerationPromise = null;
@@ -390,6 +417,7 @@ function buildStatus() {
     podcastQueue: Array.isArray(engineSettings.podcastQueue) ? engineSettings.podcastQueue : [],
     podcastState: buildPodcastStatus(),
     outputs: { ...outputState },
+    listenerState: buildListenerStatus(),
     settings: engineSettings,
     source: engineSettings.musicSource === 'wavlakePlaylist'
       ? 'wavlake-playlist'
@@ -397,6 +425,30 @@ function buildStatus() {
         ? 'pr-liked-songs'
         : 'wavlake-top40',
     songCount,
+  };
+}
+
+function buildListenerStatus() {
+  const now = Date.now();
+  const suspendedAtMs = listenerState.suspendedAt ? Date.parse(listenerState.suspendedAt) : 0;
+  const graceStartedAtMs = listenerState.graceStartedAt ? Date.parse(listenerState.graceStartedAt) : 0;
+  const silenceDurationSeconds = listenerState.mode === 'suspended' && suspendedAtMs
+    ? Math.max(listenerState.silenceDurationSeconds || 0, Math.floor((now - suspendedAtMs) / 1000))
+    : listenerState.mode === 'grace' && graceStartedAtMs
+      ? Math.floor((now - graceStartedAtMs) / 1000)
+      : listenerState.silenceDurationSeconds || 0;
+  const thresholdSeconds = Math.max(60, Number(engineSettings.newSessionAfterMinutes ?? 180) * 60);
+  return {
+    ...listenerState,
+    silenceDurationSeconds,
+    autoSuspendWhenNoListeners: engineSettings.autoSuspendWhenNoListeners !== false,
+    noListenerGraceSeconds: Math.max(0, Number(engineSettings.noListenerGraceSeconds ?? 30)),
+    newSessionAfterMinutes: Number(engineSettings.newSessionAfterMinutes ?? 180),
+    resumeWillStartNewSession: listenerState.mode === 'suspended'
+      ? silenceDurationSeconds >= thresholdSeconds
+      : !!listenerState.resumeWillStartNewSession,
+    pendingSessionIntro: !!sessionIntroRequest || !!pendingSessionIntroPromise,
+    deferredResumeKind: deferredResumeItem?.item?.kind || null,
   };
 }
 
@@ -1655,7 +1707,8 @@ async function playItemOnAllOutputs(item, options = {}) {
   const promises = OUTPUTS.map(o => playOnOutput(item.liveUrl, o, token, playbackOptions));
   broadcastStatus();
 
-  await Promise.allSettled(promises);
+  const results = await Promise.allSettled(promises);
+  const values = results.map(r => r.status === 'fulfilled' ? r.value : { output: 'unknown', code: -1, reason: 'rejected' });
 
   // Clear any stragglers
   for (const [name, proc] of activeProcs) {
@@ -1664,6 +1717,14 @@ async function playItemOnAllOutputs(item, options = {}) {
     outputState[name].pid     = null;
   }
   activeProcs.clear();
+  const startedSomeOutput = values.some(v => v?.code !== -1 || v?.reason === 'close');
+  const allUnavailable = values.length > 0 && values.every(v => v?.reason === 'sink-unavailable' || v?.reason === 'cancelled');
+  if (!startedSomeOutput && allUnavailable && engineSettings.autoSuspendWhenNoListeners !== false && !paused && playing) {
+    const snapshot = await inspectActiveListeners();
+    applyListenerSnapshot(snapshot);
+    if (snapshot.activeListeners === 0) suspendForNoListeners(snapshot);
+  }
+  return values;
 }
 
 function killAll() {
@@ -1683,6 +1744,7 @@ async function radioLoop() {
   console.log('[engine] radio loop starting');
   while (!shuttingDown) {
     if (paused) { await sleep(500); continue; }
+    if (!(await ensureListenerBeforePlayback())) { await sleep(1000); continue; }
 
     if (queue.length === 0) {
       const ok = await refillQueue();
@@ -1774,6 +1836,14 @@ async function radioLoop() {
         recordTrackStarted(nextItem);
         rememberRecentTrack(nextItem, { event: 'started' });
       });
+      if (sessionIntroRequest && pendingSessionIntroPromise === null) {
+        const request = { ...sessionIntroRequest };
+        const starterSong = { ...nextItem };
+        sessionIntroSongKey = itemKey(nextItem);
+        pendingSessionIntroPromise = buildSessionIntroItem(request, starterSong)
+          .then(item => { if (item) console.log('[engine] session intro pre-generated, ready'); return item; })
+          .catch(err => { console.warn('[engine] session intro pre-gen error:', err.message); return null; });
+      }
     }
     broadcastStatus();
 
@@ -1781,6 +1851,7 @@ async function radioLoop() {
     // Nth music track. Only starts once — not restarted on partial completion.
     const moderationAfterSongs = Number(engineSettings.moderationAfterSongs);
     if (nextItem.kind === 'music'
+        && !sessionIntroRequest
         && engineSettings.moderationEnabled
         && moderationAfterSongs > 0
         && Number.isFinite(moderationAfterSongs)
@@ -1863,6 +1934,42 @@ async function radioLoop() {
       });
     }
     playing = false;
+
+    if (nextItem.kind === 'music'
+        && !itemWasKilled
+        && sessionIntroRequest
+        && sessionIntroSongKey === itemKey(nextItem)
+        && !paused
+        && !shuttingDown) {
+      const introItem = await Promise.race([
+        pendingSessionIntroPromise,
+        sleep(12_000).then(() => null),
+      ]);
+      pendingSessionIntroPromise = null;
+      sessionIntroSongKey = null;
+      const hadDeferredResume = !!deferredResumeItem;
+      sessionIntroRequest = null;
+      if (introItem && !paused && !shuttingDown) {
+        currentItem = introItem;
+        startedAt = Date.now();
+        currentPlaybackStartSeconds = 0;
+        playing = true;
+        itemWasKilled = false;
+        console.log(`[engine] PLAY [${introItem.kind}] ${introItem.artist} — ${introItem.title}`);
+        broadcastStatus();
+        await playItemOnAllOutputs(introItem);
+        if (introItem.tmpFile) { try { unlinkSync(introItem.tmpFile); } catch {} }
+        console.log(`[engine] DONE [${introItem.kind}] ${introItem.artist} — ${introItem.title} (killed=${itemWasKilled})`);
+        playing = false;
+      } else {
+        console.warn('[engine] session intro not ready after starter song; continuing radio');
+      }
+      if (hadDeferredResume && deferredResumeItem && !paused && !shuttingDown) {
+        pausedResumeItem = deferredResumeItem;
+        deferredResumeItem = null;
+        console.log(`[engine] deferred ${pausedResumeItem.item.kind} resume queued after session intro`);
+      }
+    }
 
     if (nextItem.kind === 'podcast' && podcastSegmentResult?.shouldModerate && !paused) {
       const returnJingle = buildJingleItem(PODCAST_RETURN_JINGLE, 'Studio Return Jingle');
@@ -2000,6 +2107,318 @@ async function setOutputVolume(outputName, volume) {
   const percent = `${Math.round(clamped * 100)}%`;
   const result = await runCommand('pactl', ['set-sink-volume', output.sink, percent]);
   if (!result.ok) throw new Error((result.stderr || `pactl failed for ${outputName}`).trim());
+}
+
+function isStreamOutput(output) {
+  return /stream/i.test(output.name || '') || /personal_radio_stream/i.test(output.sink || '');
+}
+
+async function fetchLiveStreamStatus() {
+  try {
+    const res = await fetch(`http://127.0.0.1:${APP_PORT}/api/live-stream/status`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    return { ok: false, clients: 0, error: err.message };
+  }
+}
+
+async function inspectActiveListeners() {
+  const sinkRes = await runCommand('pactl', ['list', 'short', 'sinks'], 3_000);
+  const sinkNames = new Set(
+    sinkRes.ok
+      ? sinkRes.stdout.split(/\r?\n/).map(line => line.split(/\s+/)[1]).filter(Boolean)
+      : []
+  );
+  const hasStreamOutput = OUTPUTS.some(isStreamOutput);
+  const liveStatus = hasStreamOutput ? await fetchLiveStreamStatus() : null;
+  const details = OUTPUTS.map(output => {
+    const sinkAvailable = sinkNames.has(output.sink);
+    if (isStreamOutput(output)) {
+      const clients = Number(liveStatus?.clients || 0);
+      return {
+        name: output.name,
+        sink: output.sink,
+        kind: 'stream',
+        sinkAvailable,
+        clients,
+        active: sinkAvailable && clients > 0,
+        reason: sinkAvailable
+          ? clients > 0 ? 'stream-client' : 'no-stream-clients'
+          : 'sink-unavailable',
+      };
+    }
+    return {
+      name: output.name,
+      sink: output.sink,
+      kind: 'physical',
+      sinkAvailable,
+      active: sinkAvailable,
+      reason: sinkAvailable ? 'sink-available' : 'sink-unavailable',
+    };
+  });
+  const activeOutputs = details.filter(d => d.active).map(d => d.name);
+  return {
+    checkedAt: new Date().toISOString(),
+    activeListeners: activeOutputs.length,
+    activeOutputs,
+    outputDetails: details,
+    liveStreamClients: hasStreamOutput ? Number(liveStatus?.clients || 0) : null,
+    liveStreamStatus: liveStatus,
+  };
+}
+
+function applyListenerSnapshot(snapshot) {
+  listenerState.lastCheckedAt = snapshot.checkedAt;
+  listenerState.activeListeners = snapshot.activeListeners;
+  listenerState.activeOutputs = snapshot.activeOutputs;
+  listenerState.outputDetails = snapshot.outputDetails;
+  listenerState.liveStreamClients = snapshot.liveStreamClients;
+
+  if (snapshot.activeListeners > 0) {
+    listenerState.lastHeardAt = snapshot.checkedAt;
+    listenerState.silenceDurationSeconds = 0;
+    if (listenerState.mode !== 'suspended') {
+      listenerState.mode = 'active';
+      listenerState.reason = null;
+      listenerState.graceStartedAt = null;
+      listenerState.resumeWillStartNewSession = false;
+    }
+    return;
+  }
+
+  if (listenerState.mode === 'suspended') {
+    const suspendedAtMs = listenerState.suspendedAt ? Date.parse(listenerState.suspendedAt) : Date.now();
+    listenerState.silenceDurationSeconds = Math.max(0, Math.floor((Date.now() - suspendedAtMs) / 1000));
+    listenerState.resumeWillStartNewSession = listenerState.silenceDurationSeconds >= Math.max(60, Number(engineSettings.newSessionAfterMinutes ?? 180) * 60);
+    return;
+  }
+
+  if (listenerState.mode !== 'grace') {
+    listenerState.mode = 'grace';
+    listenerState.graceStartedAt = snapshot.checkedAt;
+    listenerState.reason = 'no-active-listeners';
+    listenerState.silenceDurationSeconds = 0;
+  } else {
+    const startedMs = listenerState.graceStartedAt ? Date.parse(listenerState.graceStartedAt) : Date.now();
+    listenerState.silenceDurationSeconds = Math.max(0, Math.floor((Date.now() - startedMs) / 1000));
+  }
+}
+
+function formatDurationGerman(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds || 0)));
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  if (hours > 0 && minutes > 0) return `${hours} Stunden und ${minutes} Minuten`;
+  if (hours > 0) return `${hours} Stunden`;
+  if (minutes > 0) return `${minutes} Minuten`;
+  return `${s} Sekunden`;
+}
+
+function itemKey(item) {
+  if (!item) return '';
+  return item.id || item.liveUrl || `${item.artist || ''}::${item.title || ''}`;
+}
+
+async function pickSessionStarterSong() {
+  if (engineSettings.resumeWithLikedSong === false) return null;
+  const liked = shuffle((await fetchLikedTracks()).filter(t => !isBlocked(t)));
+  if (liked.length > 0) return { ...liked[0], sessionStarter: true };
+  return null;
+}
+
+async function generateSessionIntroText(request, starterSong, callIns = []) {
+  try {
+    const memory = memorySafe('load memory for session intro', () => loadMemory()) || {};
+    const today = memory.dailyMemory?.[new Date().toISOString().slice(0, 10)] || null;
+    const recentPodcast = (memory.podcastSegments || [])[0];
+    const system = [
+      'Du bist ein deutschsprachiger Radiosprecher für ein persönliches Radio.',
+      'Erzeuge eine kurze Anmoderation für eine neue Radio-Session.',
+      'Die Session startet nach längerer Stille zuerst mit Musik, danach sprichst du.',
+      'Klinge warm, klar, intelligent und nahbar. Nicht werblich.',
+      'Wenn Kontext unsicher ist, bleib ehrlich und knapp.',
+      'Antworte NUR mit sendefähigem Text.',
+    ].join(' ');
+    const task = [
+      `Das Radio stand still für: ${formatDurationGerman(request.suspendedSeconds)}.`,
+      `Erster Song nach der Rückkehr: ${starterSong?.artist || 'Unbekannt'} — ${starterSong?.title || 'Unbekannt'}.`,
+      request.deferredResumeKind === 'podcast' ? 'Ein Podcast wurde pausiert und kann nach der Begrüßung fortgesetzt werden.' : '',
+      today?.podcastTopics?.length ? `Heutige Podcast-Themen bisher: ${today.podcastTopics.slice(0, 8).join(', ')}.` : '',
+      recentPodcast ? `Letzter Podcast-Kontext: ${recentPodcast.showTitle || ''} — ${recentPodcast.episodeTitle || ''}; Themen: ${(recentPodcast.topics || []).slice(0, 6).join(', ')}.` : '',
+      callIns.length ? `Offene Call-Ins:\n${callIns.map(c => `- ${c.text}${c.mood ? ` (Stimmung: ${c.mood})` : ''}`).join('\n')}` : '',
+      '',
+      'Schreibe 2 kurze Sätze. Begrüße zurück, ohne dramatisch zu sein. Erwähne die Pause nur, wenn es natürlich klingt.',
+    ].filter(Boolean).join('\n');
+    const res = await fetch(CLAUDE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 150,
+        purpose: 'radio-moderation',
+        system,
+        messages: [{ role: 'user', content: task }],
+      }),
+      signal: AbortSignal.timeout(110_000),
+    });
+    if (!res.ok) throw new Error(`claude-proxy HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+    const json = await res.json();
+    return String(json?.content?.[0]?.text || '').trim() || null;
+  } catch (err) {
+    console.warn('[engine] session intro text failed:', err.message);
+    return null;
+  }
+}
+
+async function buildSessionIntroItem(request, starterSong) {
+  console.log('[engine] generating session intro…');
+  const callIns = memorySafe('list call-ins for session intro', () => listCallIns({ status: 'open', limit: 3 })) || [];
+  const text = await generateSessionIntroText(request, starterSong, callIns);
+  const fallback = `Willkommen zurück. Das Radio stand etwa ${formatDurationGerman(request.suspendedSeconds)} still; jetzt holen wir den Faden wieder auf.`;
+  const scriptText = text || fallback;
+  const tts = await ttsToTempFile(scriptText);
+  if (!tts?.file) return null;
+  memorySafe('record session intro moderation', () => {
+    recordModeration({
+      purpose: 'session-intro',
+      item: starterSong,
+      scriptText,
+      context: {
+        suspendedSeconds: request.suspendedSeconds,
+        callInIds: callIns.map(c => c.id),
+      },
+    });
+    markCallInsUsed(callIns.map(c => c.id), { purpose: 'session-intro' });
+  });
+  return {
+    kind: 'moderation',
+    id: `session-intro-${Date.now()}`,
+    title: 'Session Intro',
+    artist: 'Radio Host',
+    artworkUrl: starterSong?.artworkUrl || '',
+    liveUrl: tts.file,
+    duration: tts.durationSeconds || 0,
+    tmpFile: tts.file,
+    scriptText,
+  };
+}
+
+function suspendForNoListeners(snapshot) {
+  if (engineSettings.autoSuspendWhenNoListeners === false) return;
+  if (paused || !playing || !currentItem) return;
+
+  const saved = snapshotCurrentForPause();
+  if (saved?.item?.kind === 'podcast' || saved?.item?.kind === 'music') {
+    pausedResumeItem = saved;
+    persistPodcastPausePosition(saved);
+  } else {
+    pausedResumeItem = null;
+  }
+  pendingModerationPromise = null;
+  pendingSessionIntroPromise = null;
+  sessionIntroSongKey = null;
+  paused = true;
+  playing = false;
+  listenerState.mode = 'suspended';
+  listenerState.suspendedAt = snapshot.checkedAt;
+  listenerState.graceStartedAt = null;
+  listenerState.reason = 'no-active-listeners';
+  listenerState.silenceDurationSeconds = 0;
+  listenerState.resumeWillStartNewSession = false;
+  console.warn(`[engine] auto-suspend: no active listeners for ${engineSettings.noListenerGraceSeconds ?? 30}s; saved ${saved?.item?.kind || 'nothing'} at ${Math.round(saved?.positionSeconds || 0)}s`);
+  killAll();
+  broadcastStatus();
+}
+
+async function ensureListenerBeforePlayback() {
+  if (engineSettings.autoSuspendWhenNoListeners === false) return true;
+  const snapshot = await inspectActiveListeners();
+  applyListenerSnapshot(snapshot);
+  if (snapshot.activeListeners > 0) return true;
+
+  paused = true;
+  playing = false;
+  listenerState.mode = 'suspended';
+  listenerState.suspendedAt = listenerState.suspendedAt || snapshot.checkedAt;
+  listenerState.graceStartedAt = null;
+  listenerState.reason = 'no-active-listeners';
+  console.warn('[engine] auto-suspend: no active listeners before playback; waiting for an output/client');
+  broadcastStatus();
+  return false;
+}
+
+async function resumeFromListenerReturn(snapshot) {
+  if (listenerResumeInProgress || listenerState.mode !== 'suspended') return;
+  listenerResumeInProgress = true;
+  try {
+    const nowIso = snapshot.checkedAt;
+    const suspendedAtMs = listenerState.suspendedAt ? Date.parse(listenerState.suspendedAt) : Date.now();
+    const suspendedSeconds = Math.max(0, Math.floor((Date.now() - suspendedAtMs) / 1000));
+    const thresholdSeconds = Math.max(60, Number(engineSettings.newSessionAfterMinutes ?? 180) * 60);
+    const startsNewSession = suspendedSeconds >= thresholdSeconds;
+
+    listenerState.mode = 'active';
+    listenerState.lastResumedAt = nowIso;
+    listenerState.lastSuspendDurationSeconds = suspendedSeconds;
+    listenerState.silenceDurationSeconds = 0;
+    listenerState.resumeWillStartNewSession = startsNewSession;
+    listenerState.reason = null;
+
+    if (startsNewSession && engineSettings.sessionIntroAfterFirstSong !== false) {
+      const saved = pausedResumeItem;
+      deferredResumeItem = saved?.item?.kind === 'podcast' ? saved : null;
+      pausedResumeItem = null;
+      const starter = await pickSessionStarterSong();
+      if (starter) {
+        forcedNextItem = starter;
+        queue = queue.filter(t => itemKey(t) !== itemKey(starter));
+      }
+      sessionIntroRequest = {
+        suspendedAt: listenerState.suspendedAt,
+        resumedAt: nowIso,
+        suspendedSeconds,
+        deferredResumeKind: deferredResumeItem?.item?.kind || null,
+      };
+      console.log(`[engine] listener returned after ${formatDurationGerman(suspendedSeconds)}; starting new session${starter ? ` with liked song: ${starter.artist} — ${starter.title}` : ''}`);
+    } else {
+      console.log(`[engine] listener returned after ${formatDurationGerman(suspendedSeconds)}; resuming paused radio`);
+    }
+
+    paused = false;
+    broadcastStatus();
+  } finally {
+    listenerResumeInProgress = false;
+  }
+}
+
+async function listenerMonitorLoop() {
+  while (!shuttingDown) {
+    try {
+      if (engineSettings.autoSuspendWhenNoListeners === false) {
+        listenerState.mode = 'disabled';
+        await sleep(5_000);
+        continue;
+      }
+      const snapshot = await inspectActiveListeners();
+      const previousMode = listenerState.mode;
+      applyListenerSnapshot(snapshot);
+      if (previousMode === 'suspended' && snapshot.activeListeners > 0) {
+        await resumeFromListenerReturn(snapshot);
+      } else if (listenerState.mode === 'grace' && playing && !paused) {
+        const graceSeconds = Math.max(0, Number(engineSettings.noListenerGraceSeconds ?? 30));
+        if (listenerState.silenceDurationSeconds >= graceSeconds) {
+          suspendForNoListeners(snapshot);
+        }
+      }
+      broadcastStatus();
+    } catch (err) {
+      console.warn('[engine] listener monitor failed:', err.message);
+    }
+    await sleep(5_000);
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -2257,6 +2676,11 @@ const server = http.createServer(async (req, res) => {
         'elevenLabsVoiceSettings',
         'fishVoiceIdEn',
         'fishVoiceIdDe',
+        'autoSuspendWhenNoListeners',
+        'noListenerGraceSeconds',
+        'newSessionAfterMinutes',
+        'resumeWithLikedSong',
+        'sessionIntroAfterFirstSong',
       ]) {
         if (Object.prototype.hasOwnProperty.call(body, key)) allowed[key] = body[key];
       }
@@ -2369,6 +2793,7 @@ server.listen(PORT, HOST, () => {
   console.log(`[radio-engine] listening on http://${HOST}:${PORT}`);
   console.log(`[radio-engine] outputs: ${OUTPUTS.map(o => `${o.name}(${o.sink})`).join(', ')}`);
   console.log(`[radio-engine] moderation every ${MODERATION_AFTER_SONGS} songs, podcast every ${PODCAST_AFTER_SONGS} songs`);
+  listenerMonitorLoop().catch(err => console.error('[radio-engine] listener monitor crashed:', err));
   radioLoop().catch(err => {
     console.error('[radio-engine] loop crashed:', err);
     process.exit(1);

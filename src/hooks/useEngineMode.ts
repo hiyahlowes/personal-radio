@@ -53,7 +53,38 @@ export interface EngineStatus {
   volumes?: EngineVolumes;
   podcastQueue?: PodcastEpisode[];
   podcastState?: EnginePodcastState;
+  listenerState?: EngineListenerState;
   songCount?: number;
+}
+
+export interface EngineListenerState {
+  mode: 'unknown' | 'active' | 'grace' | 'suspended' | 'disabled' | string;
+  activeListeners: number;
+  activeOutputs: string[];
+  outputDetails?: Array<{
+    name: string;
+    sink: string;
+    kind: 'physical' | 'stream' | string;
+    sinkAvailable: boolean;
+    clients?: number;
+    active: boolean;
+    reason: string;
+  }>;
+  liveStreamClients: number | null;
+  lastCheckedAt: string | null;
+  lastHeardAt: string | null;
+  graceStartedAt: string | null;
+  suspendedAt: string | null;
+  lastResumedAt: string | null;
+  lastSuspendDurationSeconds: number;
+  silenceDurationSeconds: number;
+  resumeWillStartNewSession: boolean;
+  autoSuspendWhenNoListeners: boolean;
+  noListenerGraceSeconds: number;
+  newSessionAfterMinutes: number;
+  pendingSessionIntro?: boolean;
+  deferredResumeKind?: string | null;
+  reason: string | null;
 }
 
 export interface EnginePodcastState {
@@ -123,6 +154,11 @@ export interface EngineSettings {
   };
   fishVoiceIdEn: string;
   fishVoiceIdDe: string;
+  autoSuspendWhenNoListeners: boolean;
+  noListenerGraceSeconds: number;
+  newSessionAfterMinutes: number;
+  resumeWithLikedSong: boolean;
+  sessionIntroAfterFirstSong: boolean;
 }
 
 export type EngineVolumes = Record<string, { sink: string; volume: number | null; muted?: boolean }>;
