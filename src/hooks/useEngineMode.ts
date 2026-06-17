@@ -127,6 +127,19 @@ export interface EngineSettings {
 
 export type EngineVolumes = Record<string, { sink: string; volume: number | null; muted?: boolean }>;
 
+export interface EngineCallIn {
+  id: string;
+  ts: string;
+  text: string;
+  mood?: string;
+  intent?: string;
+  inferredTopics?: string[];
+  inferredMood?: string;
+  status: 'open' | 'used' | 'archived' | string;
+  usedAt?: string | null;
+  archivedAt?: string | null;
+}
+
 /** Map an engine music item → RadioItem so RadioPage can render it unchanged. */
 function engineItemToRadioItem(item: EngineCurrentItem | null | undefined): RadioItem | null {
   if (!item) return null;
@@ -194,6 +207,7 @@ export function useEngineMode() {
   const [podcastQueue, setPodcastQueue] = useState<PodcastEpisode[]>([]);
   const [settings, setSettings] = useState<EngineSettings | null>(null);
   const [volumes, setVolumes] = useState<EngineVolumes | null>(null);
+  const [callIns, setCallIns] = useState<EngineCallIn[]>([]);
   const sseRef  = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -222,6 +236,12 @@ export function useEngineMode() {
 
     fetchStatus(); // initial load
     fetchQueue();
+    fetch('/api/call-ins?status=open')
+      .then(r => r.json())
+      .then((out: { callIns?: EngineCallIn[] }) => {
+        if (Array.isArray(out.callIns)) setCallIns(out.callIns);
+      })
+      .catch(() => {});
 
     // Fallback polling — catches missed SSE events
     pollRef.current = setInterval(() => { fetchStatus(); fetchQueue(); }, 3000);
@@ -288,6 +308,40 @@ export function useEngineMode() {
     return v;
   }, [isRemote]);
 
+  const refreshCallIns = useCallback(async (status = 'open') => {
+    if (!isRemote) return [];
+    const r = await fetch(`/api/call-ins?status=${encodeURIComponent(status)}`);
+    const out = await r.json() as { callIns?: EngineCallIn[] };
+    const rows = Array.isArray(out.callIns) ? out.callIns : [];
+    if (status === 'open') setCallIns(rows);
+    return rows;
+  }, [isRemote]);
+
+  const submitCallIn = useCallback(async (text: string, patch: { mood?: string; intent?: string } = {}) => {
+    if (!isRemote) return null;
+    const r = await fetch('/api/call-in', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, ...patch, source: 'remote' }),
+    });
+    const out = await r.json() as { ok?: boolean; callIn?: EngineCallIn; error?: string };
+    if (!r.ok || out.ok === false || !out.callIn) throw new Error(out.error || 'Call-in failed');
+    setCallIns(prev => [out.callIn!, ...prev].slice(0, 20));
+    return out.callIn;
+  }, [isRemote]);
+
+  const archiveCallIn = useCallback(async (id: string) => {
+    if (!isRemote) return null;
+    const r = await fetch('/api/call-ins/archive', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const out = await r.json() as { ok?: boolean; callIn?: EngineCallIn };
+    setCallIns(prev => prev.filter(row => row.id !== id));
+    return out.callIn ?? null;
+  }, [isRemote]);
+
   const savePodcastQueue = useCallback(async (nextQueue: PodcastEpisode[]) => {
     if (!isRemote) return null;
     setPodcastQueue(nextQueue);
@@ -320,6 +374,7 @@ export function useEngineMode() {
     status,
     queue,
     podcastQueue,
+    callIns,
     settings,
     volumes,
     engineNowPlaying: engineItemToRadioItem(status?.currentItem),
@@ -340,5 +395,8 @@ export function useEngineMode() {
     refreshSettings,
     saveSettings,
     refreshVolumes,
+    refreshCallIns,
+    submitCallIn,
+    archiveCallIn,
   };
 }

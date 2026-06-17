@@ -350,6 +350,11 @@ export function RadioPage() {
   });
   const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>(() => loadQueue().episodes);
   const [remotePodcastRefreshing, setRemotePodcastRefreshing] = useState(false);
+  const [callInOpen, setCallInOpen] = useState(false);
+  const [callInText, setCallInText] = useState('');
+  const [callInMood, setCallInMood] = useState('');
+  const [callInSending, setCallInSending] = useState(false);
+  const [callInMessage, setCallInMessage] = useState('');
 
   // ── Episode management panel ──────────────────────────────────────────────
   const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
@@ -2447,6 +2452,27 @@ export function RadioPage() {
     const outputs = Object.keys(engineMode.status?.outputs ?? engineMode.volumes ?? {});
     for (const output of outputs) engineMode.setVolume(output, nextVolume);
   };
+  const openCallInCount = engineMode.callIns?.filter(c => c.status === 'open').length ?? 0;
+  const submitCallIn = async () => {
+    const text = callInText.trim();
+    if (!text || callInSending) return;
+    setCallInSending(true);
+    setCallInMessage('');
+    try {
+      await engineMode.submitCallIn(text, { mood: callInMood.trim() });
+      setCallInText('');
+      setCallInMood('');
+      setCallInMessage('Beim Moderator angekommen.');
+      setTimeout(() => {
+        setCallInOpen(false);
+        setCallInMessage('');
+      }, 1200);
+    } catch (err) {
+      setCallInMessage(err instanceof Error ? err.message : 'Call-in konnte nicht gespeichert werden.');
+    } finally {
+      setCallInSending(false);
+    }
+  };
 
   return (
     <div className={`min-h-screen gradient-bg text-white relative overflow-x-hidden ${superSaiyan ? 'super-saiyan' : ''} ${megaActive ? 'ss-mega' : ''}`}>
@@ -2973,9 +2999,64 @@ export function RadioPage() {
               </button>
             </div>
             <div className="flex-1 flex justify-end">
-              <a href="https://wavlake.com" target="_blank" rel="noopener noreferrer" className="hidden sm:inline text-white/20 hover:text-purple-400 transition-colors text-xs">⚡ Wavlake</a>
+              {IS_REMOTE ? (
+                <button
+                  type="button"
+                  onClick={() => setCallInOpen(open => !open)}
+                  className="relative px-3 py-1.5 rounded-full border border-amber-400/25 bg-amber-400/10 text-xs font-semibold text-amber-200 hover:bg-amber-400/15 transition-colors"
+                  aria-label="Call in"
+                >
+                  Call In
+                  {openCallInCount > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-amber-300 text-[10px] font-black text-black flex items-center justify-center">
+                      {openCallInCount}
+                    </span>
+                  )}
+                </button>
+              ) : (
+                <a href="https://wavlake.com" target="_blank" rel="noopener noreferrer" className="hidden sm:inline text-white/20 hover:text-purple-400 transition-colors text-xs">⚡ Wavlake</a>
+              )}
             </div>
           </div>
+          {IS_REMOTE && callInOpen && (
+            <div className="mt-4 space-y-2 rounded-lg border border-amber-400/20 bg-black/25 p-3">
+              <textarea
+                value={callInText}
+                onChange={e => setCallInText(e.target.value.slice(0, 1000))}
+                placeholder="Was willst du dem Moderator sagen?"
+                rows={3}
+                className="w-full resize-none rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/35 outline-none focus:border-amber-300/60"
+              />
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  value={callInMood}
+                  onChange={e => setCallInMood(e.target.value.slice(0, 80))}
+                  placeholder="Stimmung optional"
+                  className="min-w-0 flex-1 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-white/30 outline-none focus:border-amber-300/60"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={submitCallIn}
+                    disabled={!callInText.trim() || callInSending}
+                    className="px-4 py-2 rounded-lg bg-amber-400 text-sm font-bold text-black hover:bg-amber-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {callInSending ? 'Sendet…' : 'Senden'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCallInOpen(false)}
+                    className="px-3 py-2 rounded-lg border border-white/10 text-sm font-semibold text-white/50 hover:text-white/75 transition-colors"
+                  >
+                    Schliessen
+                  </button>
+                </div>
+              </div>
+              {callInMessage && (
+                <p className="text-xs text-amber-200/80">{callInMessage}</p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* V4V session display — shown when NWC is connected.

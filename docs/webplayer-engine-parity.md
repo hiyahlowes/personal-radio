@@ -45,6 +45,8 @@ This document tracks the old browser WebPlayer behavior against the self-hosted 
 | V4V sat streaming/boost UI | `useV4V.ts`, Settings | Partially remote-adapted. UI/settings remain; actual wallet payment logic still lives in the browser and uses current engine track metadata. |
 | Multi-output audio | N/A, new self-hosted feature | Implemented. Independent `ffplay` per configured sink. |
 | Tailscale livestream | N/A, new self-hosted feature | Implemented via `via-radio-server.mjs` `/live.mp3` and `/live.m3u`. |
+| Long-lived radio memory | Browser local memory only | Engine-only v1. Local files under `~/.config/personal-radio/` store raw events, track stats, podcast segment memory, moderation history and call-ins. |
+| Call-In button | N/A | Engine-only remote feature. A call-in can influence the next normal moderation but never triggers moderation by itself. |
 
 ## Intentional differences
 
@@ -52,6 +54,7 @@ This document tracks the old browser WebPlayer behavior against the self-hosted 
 - Ambient bridge mixing under podcast intros is the main remaining dramaturgy difference. It should be implemented only if it can be done without destabilizing Bluetooth/stream outputs.
 - V4V wallet/NWC logic remains browser-side because wallet authorization is user/browser state. The engine exposes the current track and settings; the browser remains responsible for payments.
 - Remote unban is read-only for now. The engine exposes banned rows, but does not yet offer an `/api/unban` endpoint.
+- Radio memory is intentionally self-hosted only for now. It is local to the Pi/mini-PC and should not sync to cloud services without an explicit future design.
 
 ## Regression rules
 

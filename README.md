@@ -88,6 +88,7 @@ For the self-hosted path, start here:
 
 - [Self-hosted Pi/mini-PC guide](docs/self-hosted-pi-mini-pc.md)
 - [WebPlayer → engine parity checklist](docs/webplayer-engine-parity.md)
+- [Radio memory architecture](docs/radio-memory-architecture.md)
 
 ---
 

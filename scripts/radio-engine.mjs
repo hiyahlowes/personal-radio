@@ -26,6 +26,26 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import process from 'node:process';
+import {
+  addCallIn,
+  archiveCallIn,
+  listCallIns,
+  loadMemory,
+  markCallInsUsed,
+  recordModeration,
+  recordPodcastSegment,
+  recordTrackBanned,
+  recordTrackFinished,
+  recordTrackLiked,
+  recordTrackSkipped,
+  recordTrackStarted,
+  rememberRecentTrack,
+} from './radio-memory.mjs';
+import {
+  buildMusicModerationContext,
+  buildPodcastIntroContext,
+  buildPodcastModerationContext,
+} from './radio-context.mjs';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -313,6 +333,14 @@ function broadcast(event, data) {
 }
 
 function broadcastStatus() { broadcast('status', buildStatus()); }
+
+function memorySafe(label, fn) {
+  try { return fn(); }
+  catch (err) {
+    console.warn(`[memory] ${label} failed:`, err.message);
+    return null;
+  }
+}
 
 function playbackPositionSeconds() {
   if (!startedAt) return Math.max(0, Math.floor(currentPlaybackStartSeconds || 0));
@@ -1084,7 +1112,7 @@ async function buildPodcastSegmentContext(item, episodeState, segment) {
   };
 }
 
-async function generatePodcastModerationText(item, episodeState, segment, context) {
+async function generatePodcastModerationText(item, episodeState, segment, context, memoryContext = '') {
   try {
     const system = [
       'Du bist ein deutschsprachiger Radiosprecher für ein persönliches Radio.',
@@ -1105,6 +1133,7 @@ async function generatePodcastModerationText(item, episodeState, segment, contex
       `Kontextquelle: ${context.source}`,
       '',
       `Kontext:\n${String(context.excerpt || '').slice(0, 2200)}`,
+      memoryContext,
     ].filter(Boolean).join('\n');
     const res = await fetch(CLAUDE_URL, {
       method: 'POST',
@@ -1130,10 +1159,16 @@ async function generatePodcastModerationText(item, episodeState, segment, contex
 
 async function buildPodcastModerationItem(item, episodeState, segment, context) {
   console.log(`[engine] generating podcast moderation (${context.source})…`);
-  const text = await generatePodcastModerationText(item, episodeState, segment, context);
+  const compiled = memorySafe('podcast moderation context', () => buildPodcastModerationContext({ item, episodeState, segment, context })) || { promptText: '', callInIds: [] };
+  const text = await generatePodcastModerationText(item, episodeState, segment, context, compiled.promptText);
   const fallback = `Das war ein Abschnitt aus ${episodeState.showTitle}: ${episodeState.episodeTitle}. Für die genaue Einordnung fehlt mir gerade belastbarer Kontext, deshalb halten wir es ehrlich kurz und lassen das Gehörte mit Musik nachklingen.`;
   const tts = await ttsToTempFile(text || fallback);
   if (!tts?.file) return null;
+  const scriptText = text || fallback;
+  memorySafe('record podcast moderation', () => {
+    recordModeration({ purpose: 'podcast-segment', item, scriptText, context: { ...context, callInIds: compiled.callInIds } });
+    markCallInsUsed(compiled.callInIds, { purpose: 'podcast-segment' });
+  });
   return {
     kind: 'moderation',
     id: `podcast-mod-${Date.now()}`,
@@ -1143,11 +1178,11 @@ async function buildPodcastModerationItem(item, episodeState, segment, context) 
     liveUrl: tts.file,
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,
-    scriptText: text || fallback,
+    scriptText,
   };
 }
 
-async function generatePodcastIntroText(item, episodeState, isResume) {
+async function generatePodcastIntroText(item, episodeState, isResume, memoryContext = '') {
   try {
     const system = [
       'Du bist ein deutschsprachiger Radiosprecher für ein persönliches Radio.',
@@ -1163,6 +1198,7 @@ async function generatePodcastIntroText(item, episodeState, isResume) {
           `Episode: ${episodeState.episodeTitle}`,
           `Resume-Position: ca. Minute ${minutes}`,
           episodeState.lastContextSource ? `Letzte Kontextquelle: ${episodeState.lastContextSource}` : '',
+          memoryContext,
           '',
           'Nimm den Podcast kurz wieder auf. Maximal 25 Wörter. Klinge wie ein Moderator, der weiß, dass wir schon mittendrin waren.',
         ].filter(Boolean).join('\n')
@@ -1170,6 +1206,7 @@ async function generatePodcastIntroText(item, episodeState, isResume) {
           `Sendung: ${episodeState.showTitle}`,
           `Episode: ${episodeState.episodeTitle}`,
           episodeState.description ? `Beschreibung: ${String(episodeState.description).slice(0, 600)}` : '',
+          memoryContext,
           '',
           'Moderiere diesen Podcast kurz an. Maximal 30 Wörter. Warm, klar, nicht werblich.',
         ].filter(Boolean).join('\n');
@@ -1196,12 +1233,18 @@ async function generatePodcastIntroText(item, episodeState, isResume) {
 }
 
 async function buildPodcastIntroItem(item, episodeState, isResume) {
-  const text = await generatePodcastIntroText(item, episodeState, isResume);
+  const compiled = memorySafe('podcast intro context', () => buildPodcastIntroContext({ item, episodeState, isResume })) || { promptText: '', callInIds: [] };
+  const text = await generatePodcastIntroText(item, episodeState, isResume, compiled.promptText);
   const fallback = isResume
     ? `Und wir gehen zurück in ${episodeState.showTitle}, ungefähr ab Minute ${Math.max(1, Math.floor(Number(episodeState.positionSeconds || 0) / 60))}.`
     : `Zeit für ${episodeState.showTitle}. Wir hören kurz rein.`;
   const tts = await ttsToTempFile(text || fallback);
   if (!tts?.file) return null;
+  const scriptText = text || fallback;
+  memorySafe('record podcast intro moderation', () => {
+    recordModeration({ purpose: isResume ? 'podcast-resume-intro' : 'podcast-intro', item, scriptText, context: { callInIds: compiled.callInIds } });
+    markCallInsUsed(compiled.callInIds, { purpose: isResume ? 'podcast-resume-intro' : 'podcast-intro' });
+  });
   return {
     kind: 'moderation',
     id: `podcast-intro-${Date.now()}`,
@@ -1211,7 +1254,7 @@ async function buildPodcastIntroItem(item, episodeState, isResume) {
     liveUrl: tts.file,
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,
-    scriptText: text || fallback,
+    scriptText,
   };
 }
 
@@ -1220,6 +1263,9 @@ async function buildPodcastReturnItem(episodeState) {
   const text = `Und wir sind zurück bei ${episodeState.showTitle}. Weiter geht es mit Teil ${part} von ${episodeState.episodeTitle}.`;
   const tts = await ttsToTempFile(text);
   if (!tts?.file) return null;
+  memorySafe('record podcast return moderation', () => {
+    recordModeration({ purpose: 'podcast-return', item: { kind: 'podcast', title: episodeState.episodeTitle, artist: episodeState.showTitle }, scriptText: text });
+  });
   return {
     kind: 'moderation',
     id: `podcast-return-${Date.now()}`,
@@ -1327,6 +1373,17 @@ async function playPodcastSegment(item) {
   currentPodcastPlayback = null;
   podcastState.episodes[episodeKey] = state;
   savePodcastState();
+  if (shouldModerate) {
+    memorySafe('record podcast segment', () => {
+      recordPodcastSegment({
+        episodeKey,
+        item,
+        state,
+        segment: { ...segment, endSeconds: endPosition },
+        context,
+      });
+    });
+  }
   broadcastStatus();
 
   const wasSegmentSkip = podcastSegmentSkipRequested;
@@ -1344,10 +1401,14 @@ async function playPodcastSegment(item) {
 
 // ── Moderation (TTS) ──────────────────────────────────────────────────────────
 
-async function generateModerationText(currentSong) {
+async function generateModerationText(currentSong, memoryContext = '') {
   try {
     const system = 'Du bist ein deutschsprachiger Radiosprecher für einen persönlichen Musiksender. Dein Stil ist warm, locker und authentisch. Antworte NUR mit dem direkt sendefähigen Text — keine Erklärungen, keine Anführungszeichen.';
-    const task   = `Schreibe eine kurze Moderation (1-2 Sätze) für den gerade gespielten Song: "${currentSong.artist} — ${currentSong.title}". Natürlich und spontan, wie ein echter Radiosprecher.`;
+    const task   = [
+      `Schreibe eine kurze Moderation (1-2 Sätze) für den gerade gespielten Song: "${currentSong.artist} — ${currentSong.title}". Natürlich und spontan, wie ein echter Radiosprecher.`,
+      memoryContext,
+      'Nutze Memory nur, wenn es wirklich organisch passt. Nicht jedes Mal sagen, dass du dich erinnerst.',
+    ].filter(Boolean).join('\n\n');
     const body = JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 150,
@@ -1439,10 +1500,15 @@ async function probeAudioDurationSeconds(file) {
 
 async function buildModerationItem(afterSong) {
   console.log('[engine] generating moderation…');
-  const text    = await generateModerationText(afterSong);
+  const compiled = memorySafe('music moderation context', () => buildMusicModerationContext(afterSong)) || { promptText: '', callInIds: [] };
+  const text    = await generateModerationText(afterSong, compiled.promptText);
   if (!text) return null;
   const tts = await ttsToTempFile(text);
   if (!tts?.file) return null;
+  memorySafe('record music moderation', () => {
+    recordModeration({ purpose: 'music', item: afterSong, scriptText: text, context: { callInIds: compiled.callInIds } });
+    markCallInsUsed(compiled.callInIds, { purpose: 'music' });
+  });
   return {
     kind: 'moderation',
     id: `mod-${Date.now()}`,
@@ -1703,6 +1769,12 @@ async function radioLoop() {
     itemWasKilled = false;
 
     console.log(`[engine] PLAY [${nextItem.kind}] ${nextItem.artist} — ${nextItem.title}`);
+    if (nextItem.kind === 'music') {
+      memorySafe('record track started', () => {
+        recordTrackStarted(nextItem);
+        rememberRecentTrack(nextItem, { event: 'started' });
+      });
+    }
     broadcastStatus();
 
     // Pre-generate moderation in background during this song if it will be the
@@ -1781,6 +1853,15 @@ async function radioLoop() {
     if (nextItem.tmpFile) { try { unlinkSync(nextItem.tmpFile); } catch {} }
 
     console.log(`[engine] DONE [${nextItem.kind}] ${nextItem.artist} — ${nextItem.title} (killed=${itemWasKilled})`);
+    if (nextItem.kind === 'music') {
+      memorySafe('record track finished', () => {
+        recordTrackFinished(nextItem, {
+          natural: !itemWasKilled,
+          elapsedSeconds: playbackPositionSeconds(),
+        });
+        rememberRecentTrack(nextItem, { event: itemWasKilled ? 'killed' : 'finished' });
+      });
+    }
     playing = false;
 
     if (nextItem.kind === 'podcast' && podcastSegmentResult?.shouldModerate && !paused) {
@@ -1960,6 +2041,21 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/blocked') {
       return send(res, 200, { blocked: loadBlockedRows() });
     }
+    if (url.pathname === '/api/memory') {
+      const memory = memorySafe('load memory api', () => loadMemory()) || {};
+      return send(res, 200, {
+        updatedAt: memory.updatedAt || null,
+        today: memory.dailyMemory?.[new Date().toISOString().slice(0, 10)] || null,
+        recentTracks: (memory.recentTracks || []).slice(0, 20),
+        recentPodcastSegments: (memory.podcastSegments || []).slice(0, 10),
+        openCallIns: (memory.callIns || []).filter(c => c.status === 'open').slice(0, 20),
+      });
+    }
+    if (url.pathname === '/api/call-ins') {
+      const status = url.searchParams.get('status') || '';
+      const limit = Number(url.searchParams.get('limit') || 50);
+      return send(res, 200, { callIns: memorySafe('list call-ins', () => listCallIns({ status, limit })) || [] });
+    }
     if (url.pathname === '/api/liked/export') {
       const rows = likedToExportRows(await loadLiked());
       const format = url.searchParams.get('format') || 'json';
@@ -2012,6 +2108,10 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST') {
     if (url.pathname === '/api/skip') {
+      const skipped = currentItem;
+      if (skipped?.kind === 'music') {
+        memorySafe('record track skipped', () => recordTrackSkipped(skipped, { reason: 'skip' }));
+      }
       pausedResumeItem = null;
       killAll();
       playing = false;
@@ -2059,6 +2159,7 @@ const server = http.createServer(async (req, res) => {
       const item = currentItem;
       pausedResumeItem = null;
       blockTrack(item);
+      memorySafe('record track banned', () => recordTrackBanned(item));
       const key = `${item.artist} — ${item.title}`;
       queue = queue.filter(t => `${t.artist} — ${t.title}` !== key);
       killAll();
@@ -2070,8 +2171,34 @@ const server = http.createServer(async (req, res) => {
       if (!currentItem) return send(res, 400, { error: 'No current item' });
       if (currentItem.kind !== 'music') return send(res, 400, { error: 'Can only like music tracks' });
       const liked = await saveLiked(currentItem);
+      memorySafe('record track liked', () => recordTrackLiked(currentItem));
       broadcastStatus();
       return send(res, 200, { ok: true, action: 'like', track: currentItem, totalLiked: liked.length });
+    }
+
+    if (url.pathname === '/api/call-in') {
+      const body = await readJsonBody(req);
+      try {
+        const callIn = memorySafe('add call-in', () => addCallIn({
+          text: body.text,
+          mood: body.mood,
+          intent: body.intent,
+          source: body.source || 'remote',
+        }));
+        if (!callIn) throw new Error('Call-in could not be saved');
+        broadcastStatus();
+        return send(res, 200, { ok: true, callIn });
+      } catch (err) {
+        return send(res, 400, { ok: false, error: err.message });
+      }
+    }
+
+    if (url.pathname === '/api/call-ins/archive') {
+      const body = await readJsonBody(req);
+      const row = memorySafe('archive call-in', () => archiveCallIn(String(body.id || ''), body.status || 'archived'));
+      if (!row) return send(res, 404, { ok: false, error: 'Call-in not found' });
+      broadcastStatus();
+      return send(res, 200, { ok: true, callIn: row });
     }
 
     if (url.pathname === '/api/boost-current') {
