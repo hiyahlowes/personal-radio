@@ -17,6 +17,12 @@ function RequireSetup({ children }: { children: React.ReactNode }) {
 
 /** Redirect / to radio if setup is already done, else to setup. */
 function HomeRedirect() {
+  const host = window.location.hostname;
+  const isTailscaleHost = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) || host.endsWith('.ts.net');
+  const isStandalone = window.matchMedia?.('(display-mode: standalone)').matches
+    || ('standalone' in window.navigator && (window.navigator as Navigator & { standalone?: boolean }).standalone === true);
+  if (isTailscaleHost || isStandalone) return <Navigate to="/remote?remote=1" replace />;
+
   const done = localStorage.getItem(SETUP_COMPLETE_KEY) === 'true';
   if (done) {
     const name = getStoredName();
@@ -39,6 +45,11 @@ export function AppRouter() {
         {/* Radio — requires setup */}
         <Route path="/radio" element={
           <RequireSetup><RadioPage /></RequireSetup>
+        } />
+
+        {/* Remote Pi cockpit — same WebPlayer UI, server/engine-backed playback */}
+        <Route path="/remote" element={
+          <RadioPage />
         } />
 
         {/* Settings — always accessible during session */}

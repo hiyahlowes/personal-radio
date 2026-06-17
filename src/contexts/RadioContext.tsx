@@ -13,6 +13,7 @@
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import type { Howl } from 'howler';
+import { isRadioRemoteMode } from '@/hooks/useEngineMode';
 
 // ── RadioItem type (duplicated here to avoid a circular import) ──────────────
 // This is the minimal shape needed by RadioContext. RadioPage casts it properly.
@@ -43,7 +44,13 @@ export interface RadioItemPodcast {
     pubDate: string;
   };
 }
-export type RadioItem = RadioItemMusic | RadioItemPodcast;
+export interface RadioItemModeration {
+  kind: 'moderation';
+  title: string;
+  artist: string;
+  duration: number;
+}
+export type RadioItem = RadioItemMusic | RadioItemPodcast | RadioItemModeration;
 
 export interface RadioContextValue {
   /** Main music <audio> element (currently playing). NO crossOrigin — Wavlake CDN has no CORS. */
@@ -119,6 +126,8 @@ export function RadioProvider({ children }: { children: React.ReactNode }) {
 
   // Create the audio elements exactly once on mount.
   useEffect(() => {
+    if (isRadioRemoteMode()) return;
+
     // Music audio (current) — NO crossOrigin.
     const audio   = new Audio();
     audio.preload = 'metadata';

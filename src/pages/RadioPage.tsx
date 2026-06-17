@@ -25,6 +25,7 @@ import { useMusicHistory } from '@/hooks/useMusicHistory';
 import { useListenerMemory } from '@/hooks/useListenerMemory';
 import { useRadioContext } from '@/contexts/RadioContext';
 import { useV4VContext } from '@/contexts/V4VContext';
+import { isRadioRemoteMode, useEngineMode } from '@/hooks/useEngineMode';
 import { Skeleton } from '@/components/ui/skeleton';
 import { getStoredName } from '@/pages/SetupPage';
 import type { ItemMeta } from '@/types/value4value';
@@ -75,7 +76,10 @@ const TICK_MS        = 40;   // ~25 steps/s — smooth enough
 // ── iOS audio unlock (Blake Kus pattern) ──────────────────────────────────────
 // Warms the audio session on the first touchend anywhere on the page.
 // Based on: https://gist.github.com/kus/3f01d60569eeadefe3a1
+const IS_REMOTE_MODULE = isRadioRemoteMode();
+
 const _warmIOSAudio = () => {
+  if (IS_REMOTE_MODULE) return;
   const AudioCtxCtor = window.AudioContext ?? (window as WindowWithWebkitAudio).webkitAudioContext;
   if (!AudioCtxCtor) return;
   const ctx    = new AudioCtxCtor();
@@ -94,7 +98,9 @@ const _warmIOSAudio = () => {
   console.log('[iOS] AudioContext warmed on first touch');
   console.log('[Howler] iOS unlock triggered');
 };
-document.addEventListener('touchend', _warmIOSAudio);
+if (!IS_REMOTE_MODULE && typeof document !== 'undefined') {
+  document.addEventListener('touchend', _warmIOSAudio);
+}
 
 function rampVolume(
   audio: HTMLAudioElement,
@@ -128,6 +134,9 @@ const MIX_RATIO_KEY = 'pr:mix-ratio';
 function computeBudget(ratio: number): number {
   return Math.round(1 + (ratio / 100) * 8);
 }
+function ratioForBudget(budget: number): number {
+  return Math.max(0, Math.min(100, Math.round(((budget - 1) / 8) * 100)));
+}
 function loadMixRatio(): number {
   try {
     const v = parseInt(localStorage.getItem(MIX_RATIO_KEY) ?? '', 10);
@@ -137,11 +146,11 @@ function loadMixRatio(): number {
 
 // Pre-load jingles as Howl instances — HTMLAudioElement is not gesture-unlocked
 // on iOS; Howler handles the iOS AudioContext unlock internally.
-const _introHowl  = new Howl({ src: ['/podcast-intro.mp3'],  html5: true, preload: true, volume: 1.0 });
-const _returnHowl = new Howl({ src: ['/studio-return.mp3'],  html5: true, preload: true, volume: 1.0 });
-console.log('[Preload] jingles loaded via Howler');
+const _introHowl  = IS_REMOTE_MODULE ? null : new Howl({ src: ['/podcast-intro.mp3'],  html5: true, preload: true, volume: 1.0 });
+const _returnHowl = IS_REMOTE_MODULE ? null : new Howl({ src: ['/studio-return.mp3'],  html5: true, preload: true, volume: 1.0 });
+if (!IS_REMOTE_MODULE) console.log('[Preload] jingles loaded via Howler');
 
-const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const isIOS = typeof navigator !== 'undefined' && /iPhone|iPad|iPod/.test(navigator.userAgent);
 
 /**
  * Play a jingle at full volume and resolve when it ends.
@@ -151,6 +160,7 @@ const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
 function playJingle(src: string): Promise<void> {
   return new Promise<void>(resolve => {
     const howl = src === '/studio-return.mp3' ? _returnHowl : _introHowl;
+    if (!howl) return resolve();
     const id = howl.play();
     howl.once('end',   () => resolve(), id);
     howl.once('playerror', () => resolve(), id);
@@ -309,6 +319,12 @@ export function RadioPage() {
   // can restart streaming with the right recipients.
   const v4vCurrentRef  = useRef<{ meta: ItemMeta } | null>(null);
 
+  // ── Remote / Server Mode ──────────────────────────────────────────────────
+  // When IS_REMOTE the app never starts its local audio loop; instead it polls
+  // the Pi engine for state and proxies all actions via the HTTP API.
+  const engineMode = useEngineMode();
+  const IS_REMOTE  = engineMode.isRemote;
+
   // ── UI state ──────────────────────────────────────────────────────────────
   const [idx, setIdx]         = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -333,6 +349,7 @@ export function RadioPage() {
     return tracks.length > 0 ? fisherYates([...tracks]) : tracks;
   });
   const [orderedEpisodes, setOrderedEpisodes] = useState<PodcastEpisode[]>(() => loadQueue().episodes);
+  const [remotePodcastRefreshing, setRemotePodcastRefreshing] = useState(false);
 
   // ── Episode management panel ──────────────────────────────────────────────
   const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
@@ -364,10 +381,12 @@ export function RadioPage() {
   const ssBurstKey        = radioCtx.ssBurstKey;
   const toggleSuperSaiyan = useCallback(() => {
     setSuperSaiyan(prev => {
-      if (!prev) radioCtx.bumpSsBurst();
-      return !prev;
+      const next = !prev;
+      if (next) radioCtx.bumpSsBurst();
+      if (IS_REMOTE) engineMode.setSatStreaming(next);
+      return next;
     });
-  }, [setSuperSaiyan, radioCtx]);
+  }, [setSuperSaiyan, radioCtx, IS_REMOTE, engineMode]);
 
   // Monster flash celebration — bumped on every successful V4V flush; the
   // FX layer reacts by re-mounting the key'd element (one-shot animation),
@@ -554,9 +573,18 @@ export function RadioPage() {
       const pool  = fresh.length > 0 ? fresh : episodes;
       // Episodes with a transcript URL float to the top — best listening experience.
       const sorted = [...pool].sort((a, b) => (b.transcriptUrl ? 1 : 0) - (a.transcriptUrl ? 1 : 0));
+      if (IS_REMOTE) {
+        const remoteQueue = engineMode.settings?.podcastQueue ?? [];
+        if (engineMode.settings && remoteQueue.length === 0) {
+          setOrderedEpisodes(sorted);
+          episodesRef.current = sorted;
+          engineMode.savePodcastQueue(sorted);
+        }
+        return;
+      }
       setOrderedEpisodes(sorted);
     }
-  }, [episodes]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [episodes, IS_REMOTE, engineMode.settings]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep refs in sync with ordered arrays (so the loop reads the user's order).
   // These are the authoritative refs used by advanceLoop.
@@ -566,8 +594,9 @@ export function RadioPage() {
   // Fetch a small ambient bridge pool once on mount — separate from the main
   // playlist, used only as background music under podcast transition speech.
   useEffect(() => {
+    if (IS_REMOTE) return;
     fetchAmbientBridgePool(5).then(pool => { ambientBridgeRef.current = pool; });
-  }, []);
+  }, [IS_REMOTE]);
 
   // ── Pre-generate greeting ─────────────────────────────────────────────────
   // Fires once on mount — as early as possible, before firstName state may
@@ -575,6 +604,7 @@ export function RadioPage() {
   // getStoredName() synchronously). preGenStartedRef prevents a second run
   // if the effect fires twice in StrictMode.
   useEffect(() => {
+    if (IS_REMOTE) return; // engine handles TTS; don't generate a local greeting
     if (preGenStartedRef.current) return;
     preGenStartedRef.current = true;
     if (greetedRef.current) return; // don't regenerate once the session is live
@@ -590,6 +620,112 @@ export function RadioPage() {
       console.log(`[TTS-Pre] greeting ready — name="${name}" lang="${lang}"`);
     }).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Remote mode: sync engine status → React state ────────────────────────
+  // Runs whenever the polled/SSE engine status changes. Writes directly into
+  // the same state vars the local loop would write, so all JSX stays unchanged.
+  const prevRemoteItemRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!IS_REMOTE) return;
+    const s = engineMode.status;
+    // playing state
+    setPlaying(!!s && s.playing && !s.paused);
+    // nowPlaying
+    const np = engineMode.engineNowPlaying;
+    if (np) {
+      setNowPlaying(np);
+      nowPlayingRef.current = np;
+      // Trigger V4V when track identity changes
+      const itemKey = np.kind === 'music' ? np.track.id : null;
+      if (itemKey && itemKey !== prevRemoteItemRef.current) {
+        prevRemoteItemRef.current = itemKey;
+        const valueTag  = buildWavlakeValueTag(np.track as WavlakeTrack);
+        const meta: ItemMeta = {
+          itemId: np.track.id,
+          itemTitle: np.track.name,
+          feedTitle: np.track.artist,
+          isEpisode: false,
+        };
+        v4vRef.current.onPlay(valueTag, meta);
+        v4vCurrentRef.current = { meta };
+      }
+    } else if (s && !s.currentItem) {
+      setNowPlaying(null);
+      nowPlayingRef.current = null;
+      prevRemoteItemRef.current = null;
+    }
+    if (s && (!s.playing || s.paused || s.currentItem?.kind !== 'music')) {
+      v4vRef.current.onPause();
+    }
+    // progress
+    if (s?.currentItem?.kind === 'podcast' && s.podcastState) {
+      setCT(s.podcastState.currentPositionSeconds || 0);
+      setDur(s.podcastState.durationSeconds || s.currentItem.duration || 0);
+    } else {
+      setCT(s?.elapsedSeconds ?? 0);
+      if (s?.currentItem?.duration) setDur(s.currentItem.duration);
+    }
+  }, [IS_REMOTE, engineMode.status, engineMode.engineNowPlaying]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!IS_REMOTE) return;
+    setOrderedTracks(engineMode.queue);
+    tracksRef.current = engineMode.queue;
+    idxRef.current = 0;
+    setIdx(0);
+  }, [IS_REMOTE, engineMode.queue]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!IS_REMOTE || !engineMode.settings) return;
+    if (Array.isArray(engineMode.settings.podcastFeeds)) {
+      setStoredFeeds(engineMode.settings.podcastFeeds);
+    }
+    if (Array.isArray(engineMode.settings.podcastQueue)) {
+      setOrderedEpisodes(engineMode.settings.podcastQueue);
+      episodesRef.current = engineMode.settings.podcastQueue;
+    }
+    if (typeof engineMode.settings.podcastAfterSongs === 'number') {
+      const nextRatio = ratioForBudget(engineMode.settings.podcastAfterSongs);
+      setMixRatio(nextRatio);
+      mixRatioRef.current = nextRatio;
+      silentBudgetRef.current = engineMode.settings.podcastAfterSongs;
+    }
+  }, [IS_REMOTE, engineMode.settings]);
+
+  const refreshPodcastQueue = useCallback(async () => {
+    if (IS_REMOTE) {
+      setRemotePodcastRefreshing(true);
+      try {
+        const latestFeeds = getStoredFeeds();
+        setStoredFeeds(latestFeeds);
+        if (latestFeeds.length > 0) {
+          await engineMode.saveSettings({
+            podcastFeeds: latestFeeds,
+            podcastFeedUrl: latestFeeds[0]?.url ?? '',
+          });
+        }
+        const refreshed = await engineMode.refreshPodcastQueue();
+        if (Array.isArray(refreshed)) {
+          setOrderedEpisodes(refreshed);
+          episodesRef.current = refreshed;
+        }
+      } finally {
+        setRemotePodcastRefreshing(false);
+      }
+      return;
+    }
+    setStoredFeeds(getStoredFeeds());
+    refetchEpisodes();
+  }, [IS_REMOTE, engineMode, refetchEpisodes]);
+
+  const updatePodcastQueue = useCallback((updater: PodcastEpisode[] | ((prev: PodcastEpisode[]) => PodcastEpisode[])) => {
+    setOrderedEpisodes(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      episodesRef.current = next;
+      if (IS_REMOTE) engineMode.savePodcastQueue(next);
+      return next;
+    });
+  }, [IS_REMOTE, engineMode]);
 
   // Push listener memory context to the AI moderator whenever memory changes.
   useEffect(() => {
@@ -632,6 +768,7 @@ export function RadioPage() {
   // this page's setState callbacks stay fresh. The elements themselves are
   // never paused or destroyed here.
   useEffect(() => {
+    if (IS_REMOTE) return;
     const audio = audioRef.current;
     const pod   = podAudioRef.current;
     if (!audio || !pod) return;
@@ -836,10 +973,11 @@ export function RadioPage() {
       pod.removeEventListener('error',          onPodErr);
       if (podReconnectTimerRef.current) { clearTimeout(podReconnectTimerRef.current); podReconnectTimerRef.current = null; }
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [IS_REMOTE]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Ducking — ramp audio.volume on isSpeaking changes ────────────────────
   useEffect(() => {
+    if (IS_REMOTE) return;
     // The podcast transition sequence owns the volume ramp during its window.
     // Skip this generic duck so we don't cancel or override that fade.
     if (podcastTransitionRef.current) return;
@@ -923,7 +1061,7 @@ export function RadioPage() {
       }
     }
     return () => cancelRampRef.current?.();
-  }, [moderator.isSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [moderator.isSpeaking, IS_REMOTE]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── V4V flush celebration ─────────────────────────────────────────────────
   // On every successful flush (sats actually paid), fire a "monster lightning"
@@ -946,6 +1084,7 @@ export function RadioPage() {
   // Only fires on user volume/mute changes — NOT on isSpeaking changes, so the
   // ducking fade-back ramp started above is not immediately cancelled.
   useEffect(() => {
+    if (IS_REMOTE) return;
     const audio = audioRef.current;
     const pod   = podAudioRef.current;
     if (!audio || moderator.isSpeaking) return;
@@ -960,7 +1099,7 @@ export function RadioPage() {
       cancelNextRampRef.current?.();
       nextAudioRef.current.volume = 0;
     }
-  }, [volume, muted]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [volume, muted, IS_REMOTE]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Core loop — stable, reads everything via refs ─────────────────────────
   // ── Howler.js shadow instance (parallel, not playing yet) ─────────────────
@@ -1882,6 +2021,7 @@ export function RadioPage() {
 
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
+    if (IS_REMOTE) { engineMode.play(); return; }
     console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
 
     // Guard: if the loop is already running and there is no paused podcast waiting
@@ -1950,6 +2090,7 @@ export function RadioPage() {
   }, [startRadio, advanceLoop]);
 
   const handlePause = useCallback(() => {
+    if (IS_REMOTE) { engineMode.pause(); return; }
     console.log('[PlayPause] handlePause — nowPlaying:', nowPlayingRef.current?.kind ?? 'none', '| resumePodcast before:', resumePodcastEpisodeRef.current?.title ?? 'none');
     runningRef.current = false;
     moderatorRef.current.stop();
@@ -1973,6 +2114,7 @@ export function RadioPage() {
   }, []);
 
   const jumpTo = useCallback((newIdx: number, userSkipped = false) => {
+    if (IS_REMOTE) { engineMode.skip(); return; }
     console.log('[JumpTo]', newIdx, userSkipped ? '(user skip)' : '');
     const wasRunning = runningRef.current;
 
@@ -2024,12 +2166,14 @@ export function RadioPage() {
   const handleSelect = useCallback((i: number) => jumpTo(i, false), [jumpTo]);
 
   const handleDislike = useCallback((track: WavlakeTrack) => {
+    if (IS_REMOTE) { engineMode.ban(); return; }
     listenerMemory.recordSongDislike(track.id);
     setOrderedTracks(prev => prev.filter(t => t.id !== track.id));
     handleNext();
-  }, [handleNext, listenerMemory]);
+  }, [handleNext, listenerMemory, IS_REMOTE, engineMode]);
 
   const handlePodSkip = useCallback((deltaSecs: number) => {
+    if (IS_REMOTE) return;
     const pod = podAudioRef.current;
     if (!pod || nowPlayingRef.current?.kind !== 'podcast') return;
     const clamped = Math.max(0, Math.min(pod.duration || 0, pod.currentTime + deltaSecs));
@@ -2079,6 +2223,12 @@ export function RadioPage() {
    * and runs the full podcast transition flow right away.
    */
   const startPodcastFromQueue = useCallback((episode: PodcastEpisode) => {
+    if (IS_REMOTE) {
+      updatePodcastQueue(prev => prev.filter(e => e.id !== episode.id));
+      engineMode.playPodcast(episode);
+      return;
+    }
+
     console.log(`[Queue] manual podcast start: "${episode.title}"`);
 
     // iOS pre-unlock: call pod.play() within this gesture so iOS stamps the
@@ -2117,7 +2267,7 @@ export function RadioPage() {
       greetedRef.current = true; // don't play greeting again
       advanceLoop();
     }
-  }, [advanceLoop]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [advanceLoop, IS_REMOTE, engineMode, updatePodcastQueue]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Drag-and-drop handlers ─────────────────────────────────────────────────
   const handleDragEnd = useCallback((result: DropResult) => {
@@ -2176,7 +2326,7 @@ export function RadioPage() {
         return next;
       });
     } else if (droppableId === 'podcast-queue') {
-      setOrderedEpisodes(prev => {
+      updatePodcastQueue(prev => {
         const next = [...prev];
         const [moved] = next.splice(source.index, 1);
         next.splice(destination.index, 0, moved);
@@ -2187,7 +2337,7 @@ export function RadioPage() {
         return next;
       });
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [updatePodcastQueue]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep durationRef in sync so seekToX always sees the current duration
   // without creating a new function reference every time duration changes.
@@ -2221,6 +2371,7 @@ export function RadioPage() {
   // Attach native (non-passive) touch listeners to the seek bar so touchmove
   // can call preventDefault() to prevent page scroll while dragging on iOS.
   useEffect(() => {
+    if (IS_REMOTE) return;
     const el = seekBarRef.current;
     if (!el) return;
     const onTouchMove = (e: TouchEvent) => {
@@ -2240,9 +2391,10 @@ export function RadioPage() {
       el.removeEventListener('touchstart', onTouchStartOrEnd);
       el.removeEventListener('touchend',   onTouchStartOrEnd);
     };
-  }, [seekToX]);
+  }, [seekToX, IS_REMOTE]);
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (IS_REMOTE) return;
     seekToX(e.clientX, e.currentTarget.getBoundingClientRect());
   };
 
@@ -2271,8 +2423,30 @@ export function RadioPage() {
         : (track?.duration || 0);
   const pct = effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
   const isModerating = moderator.isSpeaking || moderator.isGenerating;
-  const statusLabel  = moderator.isGenerating ? 'WRITING' : moderator.isSpeaking ? 'ON AIR' : buffering ? 'BUFFERING' : playing ? 'LIVE' : 'PAUSED';
-  const statusColor  = isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
+  const remoteKind = engineMode.status?.currentItem?.kind;
+  const statusLabel  = IS_REMOTE
+    ? remoteKind === 'moderation'
+      ? 'MODERATION'
+      : remoteKind === 'podcast'
+        ? 'PODCAST'
+        : playing
+          ? 'PI LIVE'
+          : engineMode.status?.paused
+            ? 'PAUSED'
+            : 'READY'
+    : moderator.isGenerating ? 'WRITING' : moderator.isSpeaking ? 'ON AIR' : buffering ? 'BUFFERING' : playing ? 'LIVE' : 'PAUSED';
+  const statusColor  = IS_REMOTE
+    ? playing ? 'bg-red-500 animate-pulse' : 'bg-white/30'
+    : isModerating ? 'bg-amber-400' : playing ? 'bg-red-500 animate-pulse' : 'bg-white/30';
+  const remotePodcastState = IS_REMOTE ? engineMode.status?.podcastState : null;
+  const remotePodcastActive = !!remotePodcastState
+    && !!remotePodcastState.sessionActive
+    && (remotePodcastState.isPlaying || remotePodcastState.willResume || remotePodcastState.breakSongsRemaining > 0);
+  const remotePodcastBreakTarget = remotePodcastState?.nextBreakTargetSeconds ?? remotePodcastState?.segmentEndSeconds ?? null;
+  const setRemoteAllOutputVolumes = (nextVolume: number) => {
+    const outputs = Object.keys(engineMode.status?.outputs ?? engineMode.volumes ?? {});
+    for (const output of outputs) engineMode.setVolume(output, nextVolume);
+  };
 
   return (
     <div className={`min-h-screen gradient-bg text-white relative overflow-x-hidden ${superSaiyan ? 'super-saiyan' : ''} ${megaActive ? 'ss-mega' : ''}`}>
@@ -2473,7 +2647,7 @@ export function RadioPage() {
         {/* Header */}
         <header className="flex items-center justify-between fade-in-up">
           <div>
-            <button onClick={() => navigate('/settings')} className="text-xs tracking-[0.25em] text-purple-400 uppercase font-semibold hover:text-purple-300 transition-colors flex items-center gap-1.5">
+            <button onClick={() => navigate(IS_REMOTE ? '/settings?remote=1' : '/settings')} className="text-xs tracking-[0.25em] text-purple-400 uppercase font-semibold hover:text-purple-300 transition-colors flex items-center gap-1.5">
               <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 18l-6-6 6-6"/></svg>
               <img src="/PR_logo.png" alt="PR" className="w-5 h-5 object-contain" />
               PR Personal Radio
@@ -2481,7 +2655,7 @@ export function RadioPage() {
             <h2 className="text-2xl font-bold mt-1">Hey, <span className="text-purple-300">{firstName}</span> 👋</h2>
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={() => navigate('/settings')} className="w-9 h-9 rounded-full flex items-center justify-center text-white/30 hover:text-white/70 hover:bg-white/10 transition-all" aria-label="Settings">
+            <button onClick={() => navigate(IS_REMOTE ? '/settings?remote=1' : '/settings')} className="w-9 h-9 rounded-full flex items-center justify-center text-white/30 hover:text-white/70 hover:bg-white/10 transition-all" aria-label="Settings">
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
             </button>
             <div className="flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-2">
@@ -2538,10 +2712,10 @@ export function RadioPage() {
         <div className="fade-in-up-delay-2 glass-card rounded-3xl p-6">
           <div className="flex items-center gap-3 sm:gap-5 mb-6">
             <div className="relative flex-shrink-0">
-              {nowPlaying?.kind === 'podcast' ? (
+              {nowPlaying?.kind === 'podcast' || nowPlaying?.kind === 'moderation' ? (
                 /* Podcast: static icon disc — no spin */
                 <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full overflow-hidden border-4 border-amber-700/60 shadow-2xl bg-amber-900/30 flex items-center justify-center text-4xl select-none">
-                  🎙️
+                  {nowPlaying?.kind === 'moderation' ? '◉' : '🎙️'}
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                     <div className="w-6 h-6 rounded-full bg-black/40 border-2 border-amber-400/20" />
                   </div>
@@ -2567,8 +2741,10 @@ export function RadioPage() {
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
-                <span className={`text-xs font-semibold uppercase tracking-widest ${nowPlaying?.kind === 'podcast' ? 'text-amber-400' : nowPlaying?.kind === 'music' && nowPlaying.track.isTopChart ? 'text-amber-400' : 'text-purple-400'}`}>
-                  {nowPlaying?.kind === 'podcast'
+                <span className={`text-xs font-semibold uppercase tracking-widest ${nowPlaying?.kind === 'podcast' || nowPlaying?.kind === 'moderation' ? 'text-amber-400' : nowPlaying?.kind === 'music' && nowPlaying.track.isTopChart ? 'text-amber-400' : 'text-purple-400'}`}>
+                  {nowPlaying?.kind === 'moderation'
+                    ? 'Now Playing · Moderation'
+                    : nowPlaying?.kind === 'podcast'
                     ? 'Now Playing · Podcast'
                     : nowPlaying?.kind === 'music' && nowPlaying.track.isTopChart
                       ? 'Now Playing · Top Charts'
@@ -2577,7 +2753,7 @@ export function RadioPage() {
                 {nowPlaying?.kind === 'music' && nowPlaying.track && (
                   <>
                     <button
-                      onClick={() => { likedTracks.toggle(nowPlaying.track); listenerMemory.recordSongLike(nowPlaying.track); }}
+                      onClick={() => { likedTracks.toggle(nowPlaying.track); listenerMemory.recordSongLike(nowPlaying.track); if (IS_REMOTE) engineMode.like(); }}
                       aria-label={likedTracks.isLiked(nowPlaying.track.id) ? 'Unlike track' : 'Like track'}
                       className="transition-colors"
                     >
@@ -2603,11 +2779,27 @@ export function RadioPage() {
                 <div className="space-y-2"><Skeleton className="h-5 w-36 bg-white/10"/><Skeleton className="h-3.5 w-24 bg-white/10"/></div>
               ) : isError ? (
                 <p className="text-red-400 text-sm">Couldn't load tracks</p>
+              ) : nowPlaying?.kind === 'moderation' ? (
+                <>
+                  <h3 className="text-base sm:text-xl font-bold truncate">{nowPlaying.title}</h3>
+                  <p className="text-white/60 text-sm truncate">{nowPlaying.artist}</p>
+                  <span className="inline-block mt-2 text-xs text-amber-400/80 bg-amber-900/20 border border-amber-700/30 rounded-full px-3 py-0.5">Pi Audio</span>
+                </>
               ) : nowPlaying?.kind === 'podcast' ? (
                 <>
                   <h3 className="text-base sm:text-xl font-bold truncate">{nowPlaying.episode.title}</h3>
                   <p className="text-white/60 text-sm truncate">{nowPlaying.episode.feedTitle}</p>
                   <span className="inline-block mt-2 text-xs text-amber-400/80 bg-amber-900/20 border border-amber-700/30 rounded-full px-3 py-0.5">🎙️ Podcast</span>
+                  {remotePodcastState && (
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-white/45">
+                      <span>Part {remotePodcastState.part || 1}</span>
+                      <span className="text-right">
+                        {remotePodcastBreakTarget ? `Break ~${fmt(remotePodcastBreakTarget)}` : 'Segment läuft'}
+                      </span>
+                      <span>{remotePodcastState.hasTranscript ? 'Transcript' : remotePodcastState.hasChapters ? 'Chapters' : 'Fallback'}</span>
+                      <span className="text-right">{remotePodcastState.lastSegmentContextSource ?? 'Kontext folgt'}</span>
+                    </div>
+                  )}
                 </>
               ) : nowPlaying?.kind === 'music' ? (
                 <>
@@ -2664,10 +2856,63 @@ export function RadioPage() {
             </div>
           </div>
 
+          {remotePodcastActive && (
+            <div className="mb-5 rounded-2xl border border-amber-500/20 bg-amber-950/20 px-4 py-3 space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-amber-300/80">Podcast Segment</p>
+                  <p className="text-sm font-semibold text-white truncate">{remotePodcastState?.episodeTitle ?? 'Podcast'}</p>
+                  <p className="text-xs text-white/45 truncate">{remotePodcastState?.showTitle ?? 'Resume gespeichert'}</p>
+                </div>
+                <span className="flex-shrink-0 text-xs text-white/45">
+                  {fmt(remotePodcastState?.currentPositionSeconds ?? 0)}
+                  {remotePodcastState?.durationSeconds ? ` / ${fmt(remotePodcastState.durationSeconds)}` : ''}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-white/40">
+                  {remotePodcastState?.isPlaying
+                    ? `Nächster Break ${remotePodcastBreakTarget ? `ca. ${fmt(remotePodcastBreakTarget)}` : 'spätestens nach Segmentende'}`
+                    : remotePodcastState?.breakSongsRemaining
+                      ? `${remotePodcastState.breakSongsRemaining} Musikbreak${remotePodcastState.breakSongsRemaining === 1 ? '' : 's'} bis Resume`
+                      : remotePodcastState?.willResume
+                        ? 'Wird später fortgesetzt'
+                        : 'Kein aktiver Resume'}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => engineMode.skipPodcastSegment()}
+                    disabled={!remotePodcastState?.isPlaying}
+                    className="px-3 py-1.5 rounded-lg bg-white/10 text-xs font-semibold text-white/70 hover:bg-white/15 disabled:opacity-35 disabled:pointer-events-none transition-colors"
+                  >
+                    Segment skip
+                  </button>
+                  <button
+                    onClick={() => engineMode.abandonPodcast()}
+                    disabled={!remotePodcastState?.willResume && !remotePodcastState?.isPlaying}
+                    className="px-3 py-1.5 rounded-lg bg-red-500/10 text-xs font-semibold text-red-200/80 hover:bg-red-500/20 disabled:opacity-35 disabled:pointer-events-none transition-colors"
+                  >
+                    Episode weg
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Controls */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 flex-1">
-              <button onClick={() => setMuted(m => !m)} className="flex-shrink-0 text-white/40 hover:text-white/80 transition-colors" aria-label={muted ? 'Unmute' : 'Mute'}>
+              <button
+                onClick={() => {
+                  const next = !muted;
+                  setMuted(next);
+                  if (IS_REMOTE) {
+                    setRemoteAllOutputVolumes(next ? 0 : volume);
+                  }
+                }}
+                className="flex-shrink-0 text-white/40 hover:text-white/80 transition-colors"
+                aria-label={muted ? 'Unmute' : 'Mute'}
+              >
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
                   {muted
                     ? <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
@@ -2677,7 +2922,14 @@ export function RadioPage() {
               </button>
               {/* Volume slider: hidden on mobile to save space */}
               <input type="range" min={0} max={1} step={0.02} value={muted ? 0 : volume}
-                onChange={e => { setVol(+e.target.value); setMuted(false); }}
+                onChange={e => {
+                  const next = +e.target.value;
+                  setVol(next);
+                  setMuted(false);
+                  if (IS_REMOTE) {
+                    setRemoteAllOutputVolumes(next);
+                  }
+                }}
                 className="hidden sm:block w-20 h-1" aria-label="Volume" />
             </div>
             <div className="flex items-center gap-1.5 sm:gap-3">
@@ -2686,7 +2938,7 @@ export function RadioPage() {
               </button>
               <button
                 onClick={() => handlePodSkip(-30)}
-                disabled={nowPlaying?.kind !== 'podcast'}
+                disabled={IS_REMOTE || nowPlaying?.kind !== 'podcast'}
                 className="w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
                 aria-label="Skip back 30 seconds"
               >
@@ -2707,7 +2959,7 @@ export function RadioPage() {
               </button>
               <button
                 onClick={() => handlePodSkip(30)}
-                disabled={nowPlaying?.kind !== 'podcast'}
+                disabled={IS_REMOTE || nowPlaying?.kind !== 'podcast'}
                 className="w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-20 disabled:pointer-events-none"
                 aria-label="Skip forward 30 seconds"
               >
@@ -2787,6 +3039,7 @@ export function RadioPage() {
               mixRatioRef.current = next;
               silentBudgetRef.current = computeBudget(next);
               try { localStorage.setItem(MIX_RATIO_KEY, String(next)); } catch { /* ignore */ }
+              if (IS_REMOTE) engineMode.saveSettings({ podcastAfterSongs: computeBudget(next) });
               console.log(`[Mix] ratio changed → budget: ${computeBudget(next)} songs before podcast`);
             }}
             className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
@@ -3016,15 +3269,15 @@ export function RadioPage() {
                     <span className="text-xs text-amber-400/60">drag to reorder</span>
                   )}
                   <button
-                    onClick={() => { setStoredFeeds(getStoredFeeds()); refetchEpisodes(); }}
-                    disabled={episodesFetching}
+                    onClick={refreshPodcastQueue}
+                    disabled={IS_REMOTE ? remotePodcastRefreshing : episodesFetching}
                     className="flex items-center gap-1 text-xs text-amber-400/70 hover:text-amber-300 transition-colors disabled:opacity-40"
                     aria-label="Refresh podcast queue"
                   >
-                    <svg className={`w-3 h-3 ${episodesFetching ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <svg className={`w-3 h-3 ${(IS_REMOTE ? remotePodcastRefreshing : episodesFetching) ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                       <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/>
                     </svg>
-                    {episodesFetching ? 'Loading…' : 'Refresh'}
+                    {(IS_REMOTE ? remotePodcastRefreshing : episodesFetching) ? 'Loading…' : 'Refresh'}
                   </button>
                 </div>
               </div>
@@ -3116,7 +3369,7 @@ export function RadioPage() {
                               <button
                                 onClick={e => {
                                   e.stopPropagation();
-                                  setOrderedEpisodes(prev => prev.filter(e => e.id !== ep.id));
+                                  updatePodcastQueue(prev => prev.filter(e => e.id !== ep.id));
                                 }}
                                 aria-label="Remove episode from queue"
                                 className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-white/25 hover:text-red-400 hover:bg-red-900/20 transition-colors"
@@ -3153,8 +3406,8 @@ export function RadioPage() {
                   isExpanded={expandedFeed === feed.url}
                   onToggle={() => setExpandedFeed(prev => prev === feed.url ? null : feed.url)}
                   queuedIds={new Set(orderedEpisodes.map(e => e.id))}
-                  onAdd={ep => setOrderedEpisodes(prev => prev.some(e => e.id === ep.id) ? prev : [...prev, ep])}
-                  onRemove={id => setOrderedEpisodes(prev => prev.filter(e => e.id !== id))}
+                  onAdd={ep => updatePodcastQueue(prev => prev.some(e => e.id === ep.id) ? prev : [...prev, ep])}
+                  onRemove={id => updatePodcastQueue(prev => prev.filter(e => e.id !== id))}
                   fmt={fmt}
                 />
               ))}

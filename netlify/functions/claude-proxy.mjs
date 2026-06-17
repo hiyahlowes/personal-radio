@@ -89,7 +89,18 @@ export default async function handler(req) {
         headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
       });
     } catch (err) {
-      console.warn('[claude-proxy] Via moderation failed, falling back to Anthropic:', err?.message || err);
+      const msg = err?.message || String(err);
+      if (!process.env.ANTHROPIC_API_KEY) {
+        console.error('[claude-proxy] Via moderation failed and ANTHROPIC_API_KEY is not set; no Anthropic fallback available:', msg);
+        return new Response(JSON.stringify({
+          error: 'Via moderator unavailable and ANTHROPIC_API_KEY is not configured',
+          detail: msg,
+        }), {
+          status: 503,
+          headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
+        });
+      }
+      console.warn('[claude-proxy] Via moderation failed, falling back to Anthropic because ANTHROPIC_API_KEY is set:', msg);
     }
   }
 

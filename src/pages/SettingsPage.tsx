@@ -27,6 +27,7 @@ import {
 import { GENRES, ALL_GENRE_IDS, TOP_CHARTS_ID } from '@/hooks/useWavlakeTracks';
 import { useLikedTracks } from '@/hooks/useLikedTracks';
 import { usePodcastHistory } from '@/hooks/usePodcastHistory';
+import { useEngineMode } from '@/hooks/useEngineMode';
 import {
   getStoredName,
   setStoredName,
@@ -43,6 +44,27 @@ const genreEmoji: Record<string, string> = {
   jazz:       '🎷',
   classical:  '🎻',
   hiphop:     '🎤',
+};
+
+const PODCAST_SEARCH_VISIBLE_LIMIT = 10;
+
+type EngineLikedTrack = {
+  id: string;
+  title?: string;
+  name?: string;
+  artist?: string;
+  artworkUrl?: string;
+  liveUrl?: string;
+  duration?: number;
+  likedAt?: string;
+};
+
+type EngineBlockedTrack = {
+  id: string;
+  value: string;
+  title?: string;
+  artist?: string;
+  url?: string;
 };
 
 function loadStoredGenres(): string[] {
@@ -104,6 +126,25 @@ export function SettingsPage() {
   useSeoMeta({ title: 'Settings — PR Personal Radio' });
   const navigate = useNavigate();
   const nostrKey = useNostrKey();
+  const engineMode = useEngineMode();
+  const [remoteVolumeDrafts, setRemoteVolumeDrafts] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    if (!engineMode.isRemote) return;
+    engineMode.refreshSettings();
+    engineMode.refreshVolumes();
+  }, [engineMode.isRemote]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!engineMode.volumes) return;
+    setRemoteVolumeDrafts(prev => {
+      const next = { ...prev };
+      for (const [name, value] of Object.entries(engineMode.volumes ?? {})) {
+        if (typeof value.volume === 'number' && !(name in next)) next[name] = value.volume;
+      }
+      return next;
+    });
+  }, [engineMode.volumes]);
 
   // ── Section open/closed ────────────────────────────────────────────────────
   const [moderatorOpen, setModeratorOpen] = useState(false);
@@ -145,13 +186,41 @@ export function SettingsPage() {
   const [fishVoiceIdDe, setFishVoiceIdDe] = useState(
     () => localStorage.getItem('pr:fish-voice-id-de') ?? ''
   );
+  const [elevenVoiceIdEn, setElevenVoiceIdEn] = useState(
+    () => localStorage.getItem('pr:elevenlabs-voice-id-en') ?? ''
+  );
+  const [elevenVoiceIdDe, setElevenVoiceIdDe] = useState(
+    () => localStorage.getItem('pr:elevenlabs-voice-id-de') ?? ''
+  );
+  const [elevenModelId, setElevenModelId] = useState(
+    () => localStorage.getItem('pr:elevenlabs-model-id') ?? 'eleven_v3'
+  );
   const selectTtsProvider = (p: 'elevenlabs' | 'fish') => {
     setTtsProvider(p);
     localStorage.setItem('pr:tts-provider', p);
+    if (engineMode.isRemote) engineMode.saveSettings({ ttsProvider: p });
+  };
+  const saveElevenVoiceSettings = () => {
+    localStorage.setItem('pr:elevenlabs-voice-id-en', elevenVoiceIdEn.trim());
+    localStorage.setItem('pr:elevenlabs-voice-id-de', elevenVoiceIdDe.trim());
+    localStorage.setItem('pr:elevenlabs-model-id', elevenModelId.trim() || 'eleven_v3');
+    if (engineMode.isRemote) {
+      engineMode.saveSettings({
+        elevenLabsVoiceIdEn: elevenVoiceIdEn.trim(),
+        elevenLabsVoiceIdDe: elevenVoiceIdDe.trim(),
+        elevenLabsModelId: elevenModelId.trim() || 'eleven_v3',
+      });
+    }
   };
   const saveFishVoiceIds = () => {
     localStorage.setItem('pr:fish-voice-id-en', fishVoiceIdEn.trim());
     localStorage.setItem('pr:fish-voice-id-de', fishVoiceIdDe.trim());
+    if (engineMode.isRemote) {
+      engineMode.saveSettings({
+        fishVoiceIdEn: fishVoiceIdEn.trim(),
+        fishVoiceIdDe: fishVoiceIdDe.trim(),
+      });
+    }
   };
 
   // ── Agent (NIP-90) ─────────────────────────────────────────────────────────
@@ -183,6 +252,11 @@ export function SettingsPage() {
   // ── Genre selection ────────────────────────────────────────────────────────
   const [selectedGenres, setSelectedGenres] = useState<string[]>(loadStoredGenres);
   const [genresSaved, setGenresSaved]       = useState(false);
+  const [playlistIdDraft, setPlaylistIdDraft] = useState('');
+  const [playlistPreview, setPlaylistPreview] = useState<{ id: string; title: string; count: number } | null>(null);
+  const [playlistLoading, setPlaylistLoading] = useState(false);
+  const [playlistError, setPlaylistError] = useState('');
+  const [musicSourceSaved, setMusicSourceSaved] = useState(false);
 
   const toggleGenre = (id: string) => {
     setSelectedGenres(prev => {
@@ -214,10 +288,54 @@ export function SettingsPage() {
     setTimeout(() => setGenresSaved(false), 1500);
   };
 
+  const flashMusicSourceSaved = () => {
+    setMusicSourceSaved(true);
+    setTimeout(() => setMusicSourceSaved(false), 1800);
+  };
+
+  const previewWavlakePlaylist = async () => {
+    const id = playlistIdDraft.trim();
+    if (!id) { setPlaylistError('Enter a Wavlake playlist ID.'); return null; }
+    setPlaylistLoading(true);
+    setPlaylistError('');
+    try {
+      const res = await fetch(`/api/wavlake-playlist?id=${encodeURIComponent(id)}`);
+      const data = await res.json() as { id: string; title: string; count: number; error?: string };
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      setPlaylistPreview({ id: data.id, title: data.title, count: data.count });
+      return data;
+    } catch (err) {
+      setPlaylistPreview(null);
+      setPlaylistError(err instanceof Error ? err.message : String(err));
+      return null;
+    } finally {
+      setPlaylistLoading(false);
+    }
+  };
+
+  const setRemoteMusicSource = async (source: 'topCharts' | 'wavlakePlaylist' | 'prLikedSongs') => {
+    if (!engineMode.isRemote) return;
+    if (source === 'wavlakePlaylist') {
+      const preview = playlistPreview?.id === playlistIdDraft.trim() ? playlistPreview : await previewWavlakePlaylist();
+      if (!preview) return;
+      await engineMode.saveSettings({
+        musicSource: source,
+        wavlakePlaylistId: preview.id,
+        wavlakePlaylistTitle: preview.title,
+      });
+    } else {
+      await engineMode.saveSettings({ musicSource: source });
+    }
+    flashMusicSourceSaved();
+  };
+
   // ── Podcast feeds ──────────────────────────────────────────────────────────
   const [feeds, setFeeds]         = useState<PodcastFeed[]>(getStoredFeeds);
   const [error, setError]         = useState('');
   const [feedSaved, setFeedSaved] = useState(false);
+  const [podcastRefreshing, setPodcastRefreshing] = useState(false);
+  const [podcastRefreshError, setPodcastRefreshError] = useState('');
+  const syncedFeedsToEngineRef = useRef(false);
 
   // ── Podcast search / trending ──────────────────────────────────────────────
   const [query, setQuery]                   = useState('');
@@ -257,10 +375,30 @@ export function SettingsPage() {
   const saveFeeds = (next: PodcastFeed[]) => {
     setFeeds(next);
     setStoredFeeds(next);
+    if (engineMode.isRemote) {
+      engineMode.saveSettings({
+        podcastFeeds: next,
+        podcastFeedUrl: next[0]?.url ?? '',
+      });
+    }
     setFeedSaved(true);
     setTimeout(() => setFeedSaved(false), 2000);
     window.dispatchEvent(new Event('pr:feeds-updated'));
   };
+
+  useEffect(() => {
+    if (!engineMode.isRemote || !engineMode.settings || syncedFeedsToEngineRef.current) return;
+    if (feeds.length === 0) return;
+    const remoteFeeds = engineMode.settings.podcastFeeds ?? [];
+    const sameFeeds = remoteFeeds.length === feeds.length
+      && remoteFeeds.every((feed, index) => feed.url === feeds[index]?.url);
+    if (sameFeeds) return;
+    syncedFeedsToEngineRef.current = true;
+    engineMode.saveSettings({
+      podcastFeeds: feeds,
+      podcastFeedUrl: feeds[0]?.url ?? '',
+    });
+  }, [engineMode.isRemote, engineMode.settings, feeds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addFeedByUrl = (url: string, title: string) => {
     setError('');
@@ -276,6 +414,21 @@ export function SettingsPage() {
   };
 
   const removeFeed = (url: string) => saveFeeds(feeds.filter(f => f.url !== url));
+
+  const refreshPodcastQueue = async () => {
+    if (!engineMode.isRemote) return;
+    setPodcastRefreshing(true);
+    setPodcastRefreshError('');
+    try {
+      await engineMode.refreshPodcastQueue();
+      setFeedSaved(true);
+      setTimeout(() => setFeedSaved(false), 2000);
+    } catch (err) {
+      setPodcastRefreshError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPodcastRefreshing(false);
+    }
+  };
 
   // ── Drag-to-reorder feeds ──────────────────────────────────────────────────
   const dragIdx = useRef<number | null>(null);
@@ -294,6 +447,86 @@ export function SettingsPage() {
 
   // ── Liked tracks ───────────────────────────────────────────────────────────
   const { liked, unlike } = useLikedTracks();
+  const [engineLiked, setEngineLiked] = useState<EngineLikedTrack[]>([]);
+  const [engineBlocked, setEngineBlocked] = useState<EngineBlockedTrack[]>([]);
+  const [likedExportText, setLikedExportText] = useState('');
+  const [likedExportCopied, setLikedExportCopied] = useState(false);
+
+  const refreshEngineLiked = async () => {
+    if (!engineMode.isRemote) return;
+    try {
+      const res = await fetch('/api/liked');
+      const data = await res.json() as { liked?: EngineLikedTrack[] };
+      setEngineLiked(Array.isArray(data.liked) ? data.liked : []);
+    } catch {
+      setEngineLiked([]);
+    }
+  };
+
+  const refreshEngineBlocked = async () => {
+    if (!engineMode.isRemote) return;
+    try {
+      const res = await fetch('/api/blocked');
+      const data = await res.json() as { blocked?: EngineBlockedTrack[] };
+      setEngineBlocked(Array.isArray(data.blocked) ? data.blocked : []);
+    } catch {
+      setEngineBlocked([]);
+    }
+  };
+
+  useEffect(() => {
+    refreshEngineLiked();
+    refreshEngineBlocked();
+  }, [engineMode.isRemote]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const exportLikedSongs = async (format: 'txt' | 'csv') => {
+    if (engineMode.isRemote) {
+      const res = await fetch(`/api/liked/export?format=${format}`);
+      const text = await res.text();
+      if (format === 'txt') {
+        setLikedExportText(text);
+        await navigator.clipboard.writeText(text).catch(() => {});
+        setLikedExportCopied(true);
+        setTimeout(() => setLikedExportCopied(false), 1800);
+      } else {
+        const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+        const href = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = href;
+        a.download = 'pr-liked-wavlake-tracks.csv';
+        a.click();
+        URL.revokeObjectURL(href);
+      }
+      return;
+    }
+
+    const rows = liked.map(track => ({
+      id: track.id,
+      title: track.name,
+      artist: track.artist,
+      url: `https://wavlake.com/track/${track.id}`,
+    }));
+    const text = format === 'csv'
+      ? [
+          '"id","title","artist","url"',
+          ...rows.map(r => [r.id, r.title, r.artist, r.url].map(v => `"${String(v).replaceAll('"', '""')}"`).join(',')),
+        ].join('\n')
+      : rows.map(r => `${r.title} — ${r.artist}\n${r.url}\n${r.id}`).join('\n\n');
+    if (format === 'txt') {
+      setLikedExportText(text);
+      await navigator.clipboard.writeText(text).catch(() => {});
+      setLikedExportCopied(true);
+      setTimeout(() => setLikedExportCopied(false), 1800);
+    } else {
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = 'pr-liked-wavlake-tracks.csv';
+      a.click();
+      URL.revokeObjectURL(href);
+    }
+  };
 
   // ── Podcast history ────────────────────────────────────────────────────────
   const { played: playedEpisodes, clearHistory } = usePodcastHistory();
@@ -328,11 +561,44 @@ export function SettingsPage() {
   const [v4vOpen, setV4vOpen]           = useState(false);
   const [nwcInput, setNwcInput]         = useState(v4v.connectionString ?? '');
   const [v4vSaved, setV4vSaved]         = useState(false);
+  const [boostAmountSats, setBoostAmountSats] = useState(100);
+
+  useEffect(() => {
+    if (!engineMode.isRemote || !engineMode.settings) return;
+    const s = engineMode.settings;
+    if (s.ttsProvider) {
+      setTtsProvider(s.ttsProvider);
+      localStorage.setItem('pr:tts-provider', s.ttsProvider);
+    }
+    setFishVoiceIdEn(s.fishVoiceIdEn ?? '');
+    setFishVoiceIdDe(s.fishVoiceIdDe ?? '');
+    setElevenVoiceIdEn(s.elevenLabsVoiceIdEn ?? '');
+    setElevenVoiceIdDe(s.elevenLabsVoiceIdDe ?? '');
+    setElevenModelId(s.elevenLabsModelId ?? 'eleven_v3');
+    setBoostAmountSats(s.boostAmountSats ?? 100);
+    setPlaylistIdDraft(s.wavlakePlaylistId ?? '');
+    if (s.wavlakePlaylistId && s.wavlakePlaylistTitle) {
+      setPlaylistPreview({ id: s.wavlakePlaylistId, title: s.wavlakePlaylistTitle, count: 0 });
+    }
+    if (Array.isArray(s.podcastFeeds)) setFeeds(s.podcastFeeds);
+    if (typeof s.satRatePerMinute === 'number') v4v.setSatRatePerMinute(s.satRatePerMinute);
+    if (typeof s.supportPREnabled === 'boolean') v4v.setSupportPREnabled(s.supportPREnabled);
+    if (typeof s.prSplitPercent === 'number') v4v.setPRSplitPercent(s.prSplitPercent);
+  }, [engineMode.isRemote, engineMode.settings]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveV4VSettings = () => {
     v4v.setSatRatePerMinute(v4v.satRatePerMinute);
     v4v.setSupportPREnabled(v4v.supportPREnabled);
     v4v.setPRSplitPercent(v4v.prSplitPercent);
+    if (engineMode.isRemote) {
+      engineMode.saveSettings({
+        satStreamingEnabled: v4v.isConnected,
+        satRatePerMinute: v4v.satRatePerMinute,
+        supportPREnabled: v4v.supportPREnabled,
+        prSplitPercent: v4v.prSplitPercent,
+        boostAmountSats,
+      });
+    }
     setV4vSaved(true);
     setTimeout(() => setV4vSaved(false), 2000);
   };
@@ -354,6 +620,24 @@ export function SettingsPage() {
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
+  const visibleLikedTracks = engineMode.isRemote ? engineLiked : liked;
+  const visibleBlockedTracks = engineMode.isRemote
+    ? engineBlocked
+    : graveyardMemory.dislikedSongs.map(trackId => {
+        const info = songInfo(trackId);
+        return {
+          id: trackId,
+          value: trackId,
+          title: info?.title ?? trackId,
+          artist: info?.artist ?? '',
+          url: '',
+        };
+      });
+  const remoteOutputNames = Array.from(new Set([
+    ...Object.keys(engineMode.status?.outputs ?? {}),
+    ...Object.keys(engineMode.volumes ?? {}),
+  ]));
+
   return (
     <div className="min-h-screen gradient-bg text-white">
       <div className="max-w-2xl mx-auto px-4 py-8">
@@ -401,6 +685,64 @@ export function SettingsPage() {
             )}
           </div>
         </div>
+
+        {engineMode.isRemote && (
+          <div className="mt-6 border-t border-white/[0.06] pt-6">
+            <p className="text-xs font-bold tracking-[0.2em] uppercase text-white/40 mb-3 px-1">Pi Audio</p>
+            <div className="glass-card rounded-2xl p-4 space-y-4">
+              <div className="rounded-xl border border-emerald-400/15 bg-emerald-500/5 px-3 py-2.5 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-emerald-200">Livestream</p>
+                  <p className="text-xs text-white/35 truncate">Tailscale only · /live.mp3</p>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <a
+                    href="/live.mp3"
+                    className="px-3 py-1.5 rounded-lg bg-emerald-500/15 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 transition-colors"
+                  >
+                    Open
+                  </a>
+                  <a
+                    href="/live.m3u"
+                    className="px-3 py-1.5 rounded-lg bg-white/10 text-xs font-semibold text-white/65 hover:bg-white/15 transition-colors"
+                  >
+                    M3U
+                  </a>
+                </div>
+              </div>
+
+              {remoteOutputNames.map(output => {
+                const current = remoteVolumeDrafts[output] ?? engineMode.volumes?.[output]?.volume ?? 0.8;
+                const active = engineMode.status?.outputs?.[output]?.playing;
+                const error = engineMode.status?.outputs?.[output]?.error;
+                return (
+                  <div key={output} className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full ${error ? 'bg-red-400' : active ? 'bg-green-400' : 'bg-white/25'}`} />
+                        <span className="text-sm font-semibold text-white/70 capitalize">{output}</span>
+                      </div>
+                      <span className="text-xs text-white/35">{Math.round(current * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.02}
+                      value={current}
+                      onChange={e => {
+                        const volume = Number(e.target.value);
+                        setRemoteVolumeDrafts(prev => ({ ...prev, [output]: volume }));
+                        engineMode.setVolume(output, volume);
+                      }}
+                      className="w-full accent-purple-400"
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* ── 2. MODERATOR ─────────────────────────────────────────────────── */}
         <div className="mt-6 border-t border-white/[0.06]">
@@ -453,6 +795,35 @@ export function SettingsPage() {
                   ))}
                 </div>
 
+                {ttsProvider === 'elevenlabs' && (
+                  <div className="space-y-2 pt-1">
+                    <input
+                      type="text"
+                      value={elevenVoiceIdEn}
+                      onChange={e => setElevenVoiceIdEn(e.target.value)}
+                      onBlur={saveElevenVoiceSettings}
+                      placeholder="ElevenLabs Voice ID - English"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+                    />
+                    <input
+                      type="text"
+                      value={elevenVoiceIdDe}
+                      onChange={e => setElevenVoiceIdDe(e.target.value)}
+                      onBlur={saveElevenVoiceSettings}
+                      placeholder="ElevenLabs Voice ID - Deutsch / Otto"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+                    />
+                    <input
+                      type="text"
+                      value={elevenModelId}
+                      onChange={e => setElevenModelId(e.target.value)}
+                      onBlur={saveElevenVoiceSettings}
+                      placeholder="ElevenLabs model"
+                      className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/25 focus:outline-none focus:border-purple-500/50"
+                    />
+                  </div>
+                )}
+
                 {ttsProvider === 'fish' && (
                   <div className="space-y-2 pt-1">
                     <p className="text-xs text-white/35 leading-relaxed">
@@ -479,6 +850,40 @@ export function SettingsPage() {
                 )}
               </div>
             </div>
+
+            {engineMode.isRemote && (
+              <div className="space-y-2">
+                <p className="text-xs text-white/35 px-1">Remote Moderation</p>
+                <div className="glass-card rounded-2xl p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm text-white/70 leading-snug">Moderation</p>
+                      <p className="text-xs text-white/25 leading-relaxed mt-0.5">Generated by Via, spoken by the selected voice provider.</p>
+                    </div>
+                    <button
+                      onClick={() => engineMode.saveSettings({ moderationEnabled: !engineMode.settings?.moderationEnabled })}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${engineMode.settings?.moderationEnabled ? 'bg-purple-500' : 'bg-white/15'}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${engineMode.settings?.moderationEnabled ? 'translate-x-5' : ''}`} />
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold text-white/40 uppercase tracking-widest">Every songs</p>
+                      <span className="text-sm font-bold text-purple-300">{engineMode.settings?.moderationAfterSongs ?? 3}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1}
+                      max={10}
+                      value={engineMode.settings?.moderationAfterSongs ?? 3}
+                      onChange={e => engineMode.saveSettings({ moderationAfterSongs: Number(e.target.value) })}
+                      className="w-full accent-purple-400"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Connect Your Agent */}
             <div className="space-y-2">
@@ -629,52 +1034,163 @@ export function SettingsPage() {
               </div>
             </div>
 
+            {engineMode.isRemote && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between px-1">
+                  <p className="text-xs text-white/35">Radio Music Source</p>
+                  {musicSourceSaved && <SavedBadge />}
+                </div>
+                <div className="glass-card rounded-2xl p-4 space-y-4">
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      onClick={() => setRemoteMusicSource('topCharts')}
+                      className={`px-3 py-2 rounded-xl border text-xs font-semibold transition-all ${engineMode.settings?.musicSource !== 'wavlakePlaylist' && engineMode.settings?.musicSource !== 'prLikedSongs' ? 'bg-amber-500/20 border-amber-400/50 text-amber-200' : 'bg-white/5 border-white/10 text-white/45 hover:text-white/70'}`}
+                    >
+                      Top Charts
+                    </button>
+                    <button
+                      onClick={() => setRemoteMusicSource('prLikedSongs')}
+                      className={`px-3 py-2 rounded-xl border text-xs font-semibold transition-all ${engineMode.settings?.musicSource === 'prLikedSongs' ? 'bg-pink-500/20 border-pink-400/50 text-pink-200' : 'bg-white/5 border-white/10 text-white/45 hover:text-white/70'}`}
+                    >
+                      PR Liked
+                    </button>
+                    <button
+                      onClick={() => setRemoteMusicSource('wavlakePlaylist')}
+                      className={`px-3 py-2 rounded-xl border text-xs font-semibold transition-all ${engineMode.settings?.musicSource === 'wavlakePlaylist' ? 'bg-purple-500/20 border-purple-400/50 text-purple-200' : 'bg-white/5 border-white/10 text-white/45 hover:text-white/70'}`}
+                    >
+                      Playlist
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="text-xs text-white/35 px-1" htmlFor="wavlake-playlist-id">Wavlake Playlist ID</label>
+                    <div className="flex gap-2">
+                      <input
+                        id="wavlake-playlist-id"
+                        type="text"
+                        value={playlistIdDraft}
+                        onChange={e => { setPlaylistIdDraft(e.target.value.trim()); setPlaylistError(''); }}
+                        placeholder="ab0b36aa-abe8-45b8-a0ab-97740d06b26a"
+                        className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white/80 placeholder-white/20 focus:outline-none focus:border-purple-500/50 font-mono"
+                      />
+                      <button
+                        onClick={previewWavlakePlaylist}
+                        disabled={playlistLoading || !playlistIdDraft.trim()}
+                        className="px-3 py-2 rounded-xl text-xs font-semibold bg-white/8 hover:bg-white/12 border border-white/10 text-white/65 hover:text-white disabled:opacity-40 transition-all"
+                      >
+                        {playlistLoading ? 'Loading…' : 'Preview'}
+                      </button>
+                    </div>
+                    {playlistError && <p className="text-xs text-red-400 px-1">{playlistError}</p>}
+                    {playlistPreview && (
+                      <div className="flex items-center justify-between gap-3 px-1">
+                        <p className="text-xs text-white/45 truncate">
+                          {playlistPreview.title} · {playlistPreview.count || 'loaded'} tracks
+                        </p>
+                        <a
+                          href={`https://wavlake.com/playlist/${playlistPreview.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-purple-300/70 hover:text-purple-200 transition-colors"
+                        >
+                          Open
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Liked Songs */}
             <div className="space-y-2">
               <div className="flex items-center justify-between px-1">
                 <p className="text-xs text-white/35">Liked Songs</p>
-                {liked.length > 0 && (
-                  <span className="text-xs text-pink-400/70">{liked.length} track{liked.length !== 1 ? 's' : ''} · 2× priority</span>
+                {visibleLikedTracks.length > 0 && (
+                  <span className="text-xs text-pink-400/70">
+                    {visibleLikedTracks.length} track{visibleLikedTracks.length !== 1 ? 's' : ''}
+                    {engineMode.isRemote ? ' · engine list' : ' · 2× priority'}
+                  </span>
                 )}
               </div>
-              {liked.length === 0 ? (
+              {visibleLikedTracks.length === 0 ? (
                 <div className="glass-card rounded-2xl px-5 py-6 text-center">
                   <p className="text-sm text-white/30">No liked tracks yet.</p>
                   <p className="text-xs text-white/20 mt-1">Tap ♥ on any track while listening.</p>
                 </div>
               ) : (
-                <div className="glass-card rounded-2xl divide-y divide-white/5">
-                  {liked.map(track => (
-                    <div key={track.id} className="flex items-center gap-3 px-4 py-3">
-                      <div className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
-                        <img src={track.artworkUrl} alt={track.name} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-white/80 truncate">{track.name}</p>
-                        <p className="text-xs text-white/40 truncate">{track.artist}</p>
-                      </div>
-                      <a
-                        href={`https://wavlake.com/track/${track.id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex-shrink-0 text-white/20 hover:text-purple-400 transition-colors p-1"
-                        aria-label="Open on Wavlake"
-                      >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
-                        </svg>
-                      </a>
+                <div className="space-y-3">
+                  <div className="glass-card rounded-2xl divide-y divide-white/5">
+                    {visibleLikedTracks.map(track => {
+                      const title = track.name ?? track.title ?? track.id;
+                      return (
+                        <div key={track.id} className="flex items-center gap-3 px-4 py-3">
+                          <div className="w-9 h-9 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
+                            {track.artworkUrl && (
+                              <img src={track.artworkUrl} alt={title} className="w-full h-full object-cover" loading="lazy" onError={e => (e.currentTarget.style.display = 'none')} />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-white/80 truncate">{title}</p>
+                            <p className="text-xs text-white/40 truncate">{track.artist}</p>
+                          </div>
+                          <a
+                            href={`https://wavlake.com/track/${track.id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex-shrink-0 text-white/20 hover:text-purple-400 transition-colors p-1"
+                            aria-label="Open on Wavlake"
+                          >
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                            </svg>
+                          </a>
+                          {!engineMode.isRemote && (
+                            <button
+                              onClick={() => unlike(track.id)}
+                              aria-label="Unlike track"
+                              className="flex-shrink-0 p-1.5 rounded-full text-pink-400 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                            >
+                              <svg className="w-4 h-4 fill-pink-400" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap px-1">
+                    {engineMode.isRemote && (
                       <button
-                        onClick={() => unlike(track.id)}
-                        aria-label="Unlike track"
-                        className="flex-shrink-0 p-1.5 rounded-full text-pink-400 hover:text-red-400 hover:bg-red-900/20 transition-colors"
+                        onClick={refreshEngineLiked}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/10 text-white/45 hover:text-white/70 transition-all"
                       >
-                        <svg className="w-4 h-4 fill-pink-400" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
-                        </svg>
+                        Refresh
                       </button>
-                    </div>
-                  ))}
+                    )}
+                    <button
+                      onClick={() => exportLikedSongs('txt')}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-pink-500/10 border border-pink-400/20 text-pink-200/80 hover:bg-pink-500/15 transition-all"
+                    >
+                      Copy export
+                    </button>
+                    <button
+                      onClick={() => exportLikedSongs('csv')}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/10 text-white/45 hover:text-white/70 transition-all"
+                    >
+                      Download CSV
+                    </button>
+                    {likedExportCopied && <span className="text-xs text-green-400">Copied</span>}
+                  </div>
+                  {likedExportText && (
+                    <textarea
+                      value={likedExportText}
+                      readOnly
+                      rows={5}
+                      className="w-full bg-black/20 border border-white/10 rounded-xl px-3 py-2 text-xs text-white/50 font-mono"
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -683,36 +1199,46 @@ export function SettingsPage() {
             <div className="space-y-2">
               <div className="flex items-center justify-between px-1">
                 <p className="text-xs text-white/35">Song Graveyard</p>
-                {graveyardMemory.dislikedSongs.length > 0 && (
-                  <span className="text-xs text-white/25">{graveyardMemory.dislikedSongs.length} banished</span>
+                {visibleBlockedTracks.length > 0 && (
+                  <span className="text-xs text-white/25">{visibleBlockedTracks.length} banished</span>
                 )}
               </div>
-              {graveyardMemory.dislikedSongs.length === 0 ? (
+              {visibleBlockedTracks.length === 0 ? (
                 <div className="rounded-2xl px-5 py-6 text-center bg-black/20 border border-white/[0.06]">
                   <p className="text-sm text-white/30">No songs banished yet. 🎵</p>
                 </div>
               ) : (
                 <div className="rounded-2xl overflow-hidden divide-y divide-white/[0.05] bg-black/20 border border-white/[0.06]">
-                  {graveyardMemory.dislikedSongs.map(trackId => {
-                    const info = songInfo(trackId);
-                    const justRestored = restoredId === trackId;
+                  {visibleBlockedTracks.map(track => {
+                    const justRestored = restoredId === track.id;
                     return (
-                      <div key={trackId} className="flex items-center gap-3 px-4 py-3">
+                      <div key={track.id} className="flex items-center gap-3 px-4 py-3">
                         <div className="w-9 h-9 rounded-lg bg-white/[0.04] border border-white/[0.07] flex items-center justify-center flex-shrink-0 text-base select-none">
                           🪦
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-white/50 truncate">{info?.title ?? trackId}</p>
-                          {info?.artist && <p className="text-xs text-white/25 truncate">{info.artist}</p>}
+                          <p className="text-sm font-medium text-white/50 truncate">{track.title || track.value}</p>
+                          {track.artist && <p className="text-xs text-white/25 truncate">{track.artist}</p>}
                         </div>
-                        {justRestored ? (
+                        {engineMode.isRemote ? (
+                          track.url ? (
+                            <a
+                              href={track.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/35 border border-white/10 hover:text-white/60 transition-all"
+                            >
+                              URL
+                            </a>
+                          ) : null
+                        ) : justRestored ? (
                           <span className="flex-shrink-0 text-xs text-emerald-400 font-semibold flex items-center gap-1">
                             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
                             Restored
                           </span>
                         ) : (
                           <button
-                            onClick={() => resurrect(trackId)}
+                            onClick={() => resurrect(track.id)}
                             className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/40 border border-white/10 hover:border-emerald-500/40 hover:text-emerald-300 hover:bg-emerald-900/20 transition-all"
                           >
                             🧟 Resurrect
@@ -722,6 +1248,14 @@ export function SettingsPage() {
                     );
                   })}
                 </div>
+              )}
+              {engineMode.isRemote && (
+                <button
+                  onClick={refreshEngineBlocked}
+                  className="mx-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/5 border border-white/10 text-white/45 hover:text-white/70 transition-all"
+                >
+                  Refresh banned list
+                </button>
               )}
             </div>
           </div>
@@ -781,6 +1315,114 @@ export function SettingsPage() {
               </div>
             </div>
 
+            {engineMode.isRemote && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between px-1">
+                  <p className="text-xs text-white/35">Podcast Engine</p>
+                  <button
+                    type="button"
+                    onClick={refreshPodcastQueue}
+                    disabled={podcastRefreshing}
+                    className="text-xs font-semibold text-amber-300 hover:text-amber-200 disabled:opacity-40 disabled:cursor-wait transition-colors"
+                  >
+                    {podcastRefreshing ? 'Refreshing…' : 'Refresh'}
+                  </button>
+                </div>
+                <div className="glass-card rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center justify-between text-xs text-white/35">
+                    <span>{engineMode.podcastQueue.length} queued episode{engineMode.podcastQueue.length === 1 ? '' : 's'}</span>
+                    {engineMode.settings?.podcastQueueRefreshedAt && (
+                      <span>{new Date(engineMode.settings.podcastQueueRefreshedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                    )}
+                  </div>
+                  {podcastRefreshError && (
+                    <p className="text-xs text-red-400">{podcastRefreshError}</p>
+                  )}
+                  <label className="flex items-center justify-between gap-4">
+                    <span className="text-sm text-white/60">Podcasts enabled</span>
+                    <input
+                      type="checkbox"
+                      checked={engineMode.settings?.podcastsEnabled ?? true}
+                      onChange={e => engineMode.saveSettings({ podcastsEnabled: e.target.checked })}
+                      className="accent-amber-400"
+                    />
+                  </label>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-white/60">Songs before podcast</span>
+                    <span className="text-sm font-bold text-amber-300">{engineMode.settings?.podcastAfterSongs ?? 6}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={12}
+                    value={engineMode.settings?.podcastAfterSongs ?? 6}
+                    onChange={e => engineMode.saveSettings({ podcastAfterSongs: Number(e.target.value) })}
+                    className="w-full accent-amber-400"
+                  />
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="space-y-1">
+                      <span className="text-xs text-white/40">Min segment minutes</span>
+                      <input
+                        type="number"
+                        min={8}
+                        max={60}
+                        step={1}
+                        value={engineMode.settings?.podcastSegmentMinMinutes ?? 8}
+                        onChange={e => engineMode.saveSettings({ podcastSegmentMinMinutes: Number(e.target.value) })}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-amber-400/60"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-xs text-white/40">Max segment minutes</span>
+                      <input
+                        type="number"
+                        min={8}
+                        max={60}
+                        step={1}
+                        value={engineMode.settings?.podcastSegmentMaxMinutes ?? 15}
+                        onChange={e => engineMode.saveSettings({ podcastSegmentMaxMinutes: Number(e.target.value) })}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-amber-400/60"
+                      />
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="space-y-1">
+                      <span className="text-xs text-white/40">Music break tracks</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={6}
+                        step={1}
+                        value={engineMode.settings?.musicBreakTracksAfterPodcast ?? 0}
+                        onChange={e => engineMode.saveSettings({ musicBreakTracksAfterPodcast: Number(e.target.value) })}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-amber-400/60"
+                      />
+                    </label>
+                    <div className="space-y-2 pt-5">
+                      <label className="flex items-center justify-between gap-3 text-sm text-white/60">
+                        <span>Transcript/chapters</span>
+                        <input
+                          type="checkbox"
+                          checked={engineMode.settings?.podcastPreferTranscriptChapters ?? true}
+                          onChange={e => engineMode.saveSettings({ podcastPreferTranscriptChapters: e.target.checked })}
+                          className="accent-amber-400"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between gap-3 text-sm text-white/60">
+                        <span>STT fallback</span>
+                        <input
+                          type="checkbox"
+                          checked={engineMode.settings?.podcastSttFallbackEnabled ?? true}
+                          onChange={e => engineMode.saveSettings({ podcastSttFallbackEnabled: e.target.checked })}
+                          className="accent-amber-400"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Search New Podcasts */}
             <div className="space-y-2">
               <p className="text-xs text-white/35 px-1">Search New Podcasts</p>
@@ -808,7 +1450,7 @@ export function SettingsPage() {
 
                 {searchLoading ? (
                   <div className="space-y-3">
-                    {Array.from({ length: 3 }).map((_, i) => (
+                    {Array.from({ length: PODCAST_SEARCH_VISIBLE_LIMIT }).map((_, i) => (
                       <div key={i} className="flex items-center gap-3 animate-pulse">
                         <div className="w-10 h-10 rounded-xl bg-white/10 flex-shrink-0" />
                         <div className="flex-1 space-y-2">
@@ -821,7 +1463,7 @@ export function SettingsPage() {
                   </div>
                 ) : (
                   <div className="space-y-1">
-                    {(query.trim() ? results : trending).slice(0, 3).map(feed => {
+                    {(query.trim() ? results : trending).slice(0, PODCAST_SEARCH_VISIBLE_LIMIT).map(feed => {
                       const alreadyAdded = addedIds.has(feed.id) || !!feeds.find(f => f.url === feed.url);
                       return (
                         <div key={feed.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors">
@@ -969,7 +1611,11 @@ export function SettingsPage() {
                 type="range"
                 min={1} max={100}
                 value={v4v.satRatePerMinute}
-                onChange={e => v4v.setSatRatePerMinute(parseInt(e.target.value, 10))}
+                onChange={e => {
+                  const next = parseInt(e.target.value, 10);
+                  v4v.setSatRatePerMinute(next);
+                  if (engineMode.isRemote) engineMode.saveSettings({ satRatePerMinute: next });
+                }}
                 className="w-full accent-yellow-400"
               />
               <div className="flex justify-between text-xs text-white/25">
@@ -986,7 +1632,11 @@ export function SettingsPage() {
                   <p className="text-xs text-white/30">Split a portion of your sats with PR</p>
                 </div>
                 <button
-                  onClick={() => v4v.setSupportPREnabled(!v4v.supportPREnabled)}
+                  onClick={() => {
+                    const next = !v4v.supportPREnabled;
+                    v4v.setSupportPREnabled(next);
+                    if (engineMode.isRemote) engineMode.saveSettings({ supportPREnabled: next });
+                  }}
                   className={`relative w-10 h-5 rounded-full transition-colors ${v4v.supportPREnabled ? 'bg-yellow-500' : 'bg-white/15'}`}
                 >
                   <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${v4v.supportPREnabled ? 'translate-x-5' : ''}`} />
@@ -1003,12 +1653,38 @@ export function SettingsPage() {
                     type="range"
                     min={1} max={50}
                     value={v4v.prSplitPercent}
-                    onChange={e => v4v.setPRSplitPercent(parseInt(e.target.value, 10))}
+                    onChange={e => {
+                      const next = parseInt(e.target.value, 10);
+                      v4v.setPRSplitPercent(next);
+                      if (engineMode.isRemote) engineMode.saveSettings({ prSplitPercent: next });
+                    }}
                     className="w-full accent-yellow-400"
                   />
                 </div>
               )}
             </div>
+
+            {engineMode.isRemote && (
+              <div className="rounded-2xl bg-white/[0.03] border border-white/[0.06] p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-white/50 uppercase tracking-widest">Boost Amount</p>
+                  <span className="text-sm font-bold text-yellow-400">{boostAmountSats} sats</span>
+                </div>
+                <input
+                  type="range"
+                  min={10}
+                  max={1000}
+                  step={10}
+                  value={boostAmountSats}
+                  onChange={e => {
+                    const next = Number(e.target.value);
+                    setBoostAmountSats(next);
+                    engineMode.saveSettings({ boostAmountSats: next });
+                  }}
+                  className="w-full accent-yellow-400"
+                />
+              </div>
+            )}
 
             {/* Save button */}
             <div className="flex items-center gap-3">

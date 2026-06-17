@@ -1,7 +1,8 @@
 {
   "name": "Personal Radio",
   "short_name": "PR",
-  "start_url": "/",
+  "start_url": "/remote?remote=1",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0f0f1a",
   "theme_color": "#7c3aed",

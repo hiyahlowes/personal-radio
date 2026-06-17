@@ -77,6 +77,20 @@ The internet radio of the future is personal, open, and fair. PR is a bet on wha
 
 ---
 
+## Choose your setup
+
+PR can run in two supported shapes:
+
+- **WebPlayer**: clone the repo, run the React app, and let the browser play audio locally.
+- **Self-hosted radio**: run the central engine on a Raspberry Pi or mini PC, then use the same React UI as a remote cockpit over LAN/Tailscale. In this mode the browser does not play the radio audio.
+
+For the self-hosted path, start here:
+
+- [Self-hosted Pi/mini-PC guide](docs/self-hosted-pi-mini-pc.md)
+- [WebPlayer → engine parity checklist](docs/webplayer-engine-parity.md)
+
+---
+
 ## Getting Started
 
 ### Prerequisites

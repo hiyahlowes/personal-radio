@@ -3,8 +3,8 @@
 // On activation, claims all clients and signals them to reload so users
 // always get the latest version without restarting the PWA.
 
-const CACHE   = 'pr-shell-v2';
-const VERSION = 'v2';
+const CACHE   = 'pr-shell-v3';
+const VERSION = 'v3';
 
 // App-shell assets to pre-cache on install
 const SHELL = [

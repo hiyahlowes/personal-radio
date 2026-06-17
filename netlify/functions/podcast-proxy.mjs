@@ -441,8 +441,8 @@ async function handleTts(event) {
     };
   }
 
-  const { text, voice_id, voice_settings: clientSettings } = parsed;
-  const model_id = 'eleven_v3'; // expressive model; supports emotional tags and wider vocal dynamics
+  const { text, voice_id, model_id: clientModelId, voice_settings: clientSettings } = parsed;
+  const model_id = clientModelId || 'eleven_v3'; // expressive model; supports emotional tags and wider vocal dynamics
   // Client may override specific voice settings (e.g. language-specific expressiveness).
   // Voice settings are not secrets.
   const voice_settings = {
