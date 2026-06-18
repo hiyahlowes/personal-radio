@@ -776,15 +776,16 @@ function parsePodcastItemsFromXml(xml, feedUrl, maxItems = 5) {
   }).filter(Boolean);
 }
 
-function roundRobinPodcastQueue(perFeed) {
+function roundRobinPodcastQueue(perFeed, maxTotal = 5) {
   if (perFeed.length === 0) return [];
-  if (perFeed.length === 1) return perFeed[0];
+  if (perFeed.length === 1) return perFeed[0].slice(0, maxTotal);
   const capped = perFeed.map(episodes => episodes.slice(0, 2));
   const cursors = new Array(capped.length).fill(0);
   const result = [];
   let remaining = capped.reduce((sum, episodes) => sum + episodes.length, 0);
-  while (remaining > 0) {
+  while (remaining > 0 && result.length < maxTotal) {
     for (let i = 0; i < capped.length; i++) {
+      if (result.length >= maxTotal) break;
       if (cursors[i] < capped[i].length) {
         result.push(capped[i][cursors[i]++]);
         remaining--;
@@ -820,7 +821,7 @@ async function refreshPodcastQueueFromFeeds() {
     if (result.status === 'fulfilled') perFeed.push(result.value);
     else errors.push(result.reason?.message || String(result.reason));
   }
-  const queue = roundRobinPodcastQueue(perFeed).filter(ep => ep.audioUrl);
+  const queue = roundRobinPodcastQueue(perFeed, 5).filter(ep => ep.audioUrl);
   if (queue.length === 0) throw new Error(`Podcast refresh yielded no playable episodes${errors.length ? ` (${errors.join('; ')})` : ''}`);
 
   engineSettings = {
@@ -1013,7 +1014,24 @@ function extractTranscriptWindow(raw = '', fromSecs, toSecs) {
       .trim();
     if (text) return text;
   }
-  return raw.slice(-1600).replace(/\s+/g, ' ').trim();
+  return '';
+}
+
+function plainTranscriptText(raw = '') {
+  const trimmed = String(raw || '').trimStart();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('{')) {
+    try {
+      const data = JSON.parse(trimmed);
+      return String(data.text || '')
+        || (Array.isArray(data.words) ? data.words.map(w => w.text || w.word || '').join(' ') : '')
+        || (Array.isArray(data.segments) ? data.segments.map(s => s.text || s.body || '').join(' ') : '');
+    } catch {}
+  }
+  if (trimmed.includes('-->')) {
+    return parseCueEntries(trimmed).map(e => e.text).join(' ');
+  }
+  return trimmed;
 }
 
 const transcriptCache = new Map();
@@ -1071,6 +1089,64 @@ function transcriptRecordToRaw(record) {
 }
 
 const activeTranscriptPrefetches = new Set();
+
+async function summarizeTranscriptForIntro(episode, record) {
+  if (!record) return '';
+  if (record.introSummary) return String(record.introSummary);
+  const text = plainTranscriptText(transcriptRecordToRaw(record)).replace(/\s+/g, ' ').trim();
+  if (text.length < 200) return '';
+  const sample = [
+    text.slice(0, 1800),
+    text.length > 3600 ? text.slice(Math.max(0, Math.floor(text.length / 2) - 900), Math.floor(text.length / 2) + 900) : '',
+    text.length > 2200 ? text.slice(-1200) : '',
+  ].filter(Boolean).join('\n...\n');
+  try {
+    const res = await fetch(CLAUDE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 120,
+        purpose: 'radio-moderation',
+        system: 'Fasse einen Podcast fuer eine sehr kurze Radio-Anmoderation zusammen. Sachlich, konkret, nicht werblich. Antworte nur mit der Zusammenfassung.',
+        messages: [{
+          role: 'user',
+          content: [
+            `Podcast: ${episode.feedTitle || ''} — ${episode.title || ''}`,
+            'Erstelle eine konkrete Zusammenfassung in 1-2 Saetzen.',
+            sample,
+          ].filter(Boolean).join('\n\n'),
+        }],
+      }),
+      signal: AbortSignal.timeout(110_000),
+    });
+    if (!res.ok) throw new Error(`claude-proxy HTTP ${res.status}`);
+    const json = await res.json();
+    const summary = String(json?.content?.[0]?.text || '').trim();
+    if (!summary) return '';
+    writeCachedPodcastTranscript(episode, { ...record, introSummary: summary });
+    return summary;
+  } catch (err) {
+    console.warn(`[engine] podcast transcript intro summary failed for "${episode.title}": ${err.message}`);
+    return '';
+  }
+}
+
+async function getPodcastIntroContextText(item, episodeState) {
+  const description = String(episodeState.description || '').replace(/\s+/g, ' ').trim();
+  if (description.length >= 80) return { source: 'description', text: description.slice(0, 900) };
+  const episode = item.episode || {
+    id: episodeState.guid || item.id,
+    feedTitle: episodeState.showTitle,
+    title: episodeState.episodeTitle,
+    audioUrl: episodeState.episodeUrl || item.liveUrl,
+    transcriptUrl: episodeState.transcriptUrl,
+  };
+  const record = readCachedPodcastTranscript(episode);
+  if (record?.status !== 'completed') return { source: 'none', text: '' };
+  const summary = await summarizeTranscriptForIntro(episode, record);
+  return summary ? { source: 'transcriptSummary', text: summary } : { source: 'none', text: '' };
+}
 
 async function submitAssemblyAiTranscript(episode) {
   if (!ASSEMBLYAI_API_KEY) throw new Error('ASSEMBLYAI_API_KEY missing');
@@ -1419,6 +1495,7 @@ async function generatePodcastModerationText(item, episodeState, segment, contex
       'Erzeuge eine kurze, persönliche Radio-Moderation auf Deutsch.',
       'Fasse zusammen, was im gerade gehörten Podcast-Abschnitt wirklich vorkam.',
       'Kein generisches "spannendes Gespräch". Nutze den Transcript-/STT-/Kapitel-Kontext.',
+      'Wichtig: Verwende nur den Kontext des angegebenen Segment-Zeitfensters, nicht das gesamte Podcast-Transkript.',
       'Dann leite organisch in Musik über.',
       'Ton: warm, klar, intelligent, nicht werblich.',
       'Wenn kein brauchbarer Kontext vorhanden ist, sag das ehrlich und knapp. Nicht halluzinieren.',
@@ -1482,7 +1559,7 @@ async function buildPodcastModerationItem(item, episodeState, segment, context) 
   };
 }
 
-async function generatePodcastIntroText(item, episodeState, isResume, memoryContext = '') {
+async function generatePodcastIntroText(item, episodeState, isResume, memoryContext = '', introContext = null) {
   try {
     const system = [
       'Du bist ein deutschsprachiger Radiosprecher für ein persönliches Radio.',
@@ -1505,7 +1582,7 @@ async function generatePodcastIntroText(item, episodeState, isResume, memoryCont
       : [
           `Sendung: ${episodeState.showTitle}`,
           `Episode: ${episodeState.episodeTitle}`,
-          episodeState.description ? `Beschreibung: ${String(episodeState.description).slice(0, 600)}` : '',
+          introContext?.text ? `Podcast-Kontext (${introContext.source}): ${String(introContext.text).slice(0, 900)}` : '',
           memoryContext,
           '',
           'Moderiere diesen Podcast kurz an. Maximal 30 Wörter. Warm, klar, nicht werblich.',
@@ -1534,7 +1611,8 @@ async function generatePodcastIntroText(item, episodeState, isResume, memoryCont
 
 async function buildPodcastIntroItem(item, episodeState, isResume) {
   const compiled = memorySafe('podcast intro context', () => buildPodcastIntroContext({ item, episodeState, isResume })) || { promptText: '', callInIds: [] };
-  const text = await generatePodcastIntroText(item, episodeState, isResume, compiled.promptText);
+  const introContext = isResume ? null : await getPodcastIntroContextText(item, episodeState);
+  const text = await generatePodcastIntroText(item, episodeState, isResume, compiled.promptText, introContext);
   const fallback = isResume
     ? `Und wir gehen zurück in ${episodeState.showTitle}, ungefähr ab Minute ${Math.max(1, Math.floor(Number(episodeState.positionSeconds || 0) / 60))}.`
     : `Zeit für ${episodeState.showTitle}. Wir hören kurz rein.`;
