@@ -131,6 +131,7 @@ export interface EngineSettings {
   musicSource: 'topCharts' | 'wavlakePlaylist' | 'prLikedSongs';
   wavlakePlaylistId: string;
   wavlakePlaylistTitle: string;
+  wavlakePlaylists: Array<{ id: string; title?: string }>;
   podcastAfterSongs: number;
   podcastFeedUrl: string;
   podcastFeeds: PodcastFeed[];
@@ -141,6 +142,9 @@ export interface EngineSettings {
   podcastSegmentMaxMinutes: number;
   podcastSttFallbackEnabled: boolean;
   podcastPreferTranscriptChapters: boolean;
+  podcastTranscriptPrefetchEnabled: boolean;
+  podcastTranscriptPrefetchLimit: number;
+  podcastTranscriptProvider: 'assemblyai' | 'elevenlabs' | string;
   musicBreakTracksAfterPodcast: number;
   ttsProvider: 'elevenlabs' | 'fish';
   elevenLabsVoiceIdEn: string;

@@ -26,6 +26,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import process from 'node:process';
+import { createHash } from 'node:crypto';
 import {
   addCallIn,
   archiveCallIn,
@@ -72,6 +73,7 @@ const BLOCKLIST_FILE = process.env.PERSONAL_RADIO_BLOCKLIST || path.join(DATA_DI
 const LIKED_FILE     = path.join(DATA_DIR, 'liked-tracks.json');
 const SETTINGS_FILE  = path.join(DATA_DIR, 'settings.json');
 const PODCAST_STATE_FILE = path.join(DATA_DIR, 'podcast-state.json');
+const PODCAST_TRANSCRIPT_DIR = path.join(DATA_DIR, 'podcast-transcripts');
 const TMP_DIR        = path.join(tmpdir(), 'personal-radio');
 const PUBLIC_DIR     = path.join(process.cwd(), 'public');
 
@@ -94,6 +96,7 @@ const CLAUDE_URL = `http://127.0.0.1:${APP_PORT}/.netlify/functions/claude-proxy
 
 const TTS_LANG     = process.env.TTS_LANG    || 'de';
 const PODCAST_URL  = process.env.PODCAST_FEED_URL || 'https://feeds.fountain.fm/UZSKQcrOnhqYS1JopxGg';
+const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY || process.env.ASSEMBLY_AI_API_KEY || '';
 
 const MODERATION_AFTER_SONGS = Number(process.env.MODERATION_AFTER_SONGS || 3);
 const PODCAST_AFTER_SONGS    = Number(process.env.PODCAST_AFTER_SONGS    || 6);
@@ -124,6 +127,7 @@ const DEFAULT_SETTINGS = {
   musicSource: 'topCharts',
   wavlakePlaylistId: '',
   wavlakePlaylistTitle: '',
+  wavlakePlaylists: [],
   podcastAfterSongs: PODCAST_AFTER_SONGS,
   podcastFeedUrl: PODCAST_URL,
   podcastFeeds: [],
@@ -133,6 +137,9 @@ const DEFAULT_SETTINGS = {
   podcastSegmentMaxMinutes: 15,
   podcastSttFallbackEnabled: true,
   podcastPreferTranscriptChapters: true,
+  podcastTranscriptPrefetchEnabled: true,
+  podcastTranscriptPrefetchLimit: 5,
+  podcastTranscriptProvider: 'assemblyai',
   musicBreakTracksAfterPodcast: 0,
   ttsProvider: (process.env.ELEVENLABS_API_KEY && (process.env.VITE_ELEVENLABS_VOICE_ID_DE || process.env.VITE_ELEVENLABS_VOICE_ID)) ? 'elevenlabs' : 'fish',
   elevenLabsVoiceIdEn: process.env.VITE_ELEVENLABS_VOICE_ID || '',
@@ -173,6 +180,24 @@ function loadSettings() {
 function saveSettings(next) {
   mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
   writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2));
+}
+
+function normalizeWavlakePlaylists(settings = engineSettings) {
+  const rows = Array.isArray(settings.wavlakePlaylists) ? settings.wavlakePlaylists : [];
+  const normalized = rows
+    .map(row => typeof row === 'string' ? { id: row } : row)
+    .map(row => ({
+      id: String(row?.id || '').trim(),
+      title: String(row?.title || '').trim(),
+    }))
+    .filter(row => row.id);
+  if (normalized.length === 0 && settings.wavlakePlaylistId) {
+    normalized.push({
+      id: String(settings.wavlakePlaylistId).trim(),
+      title: String(settings.wavlakePlaylistTitle || '').trim(),
+    });
+  }
+  return [...new Map(normalized.map(row => [row.id, row])).values()];
 }
 
 function loadPodcastState() {
@@ -245,6 +270,8 @@ const listenerState = {
 
 // Pre-generated moderation ready to play: Promise<ModerationItem|null>|null
 let pendingModerationPromise = null;
+let pendingPodcastIntroPromise = null;
+let pendingPodcastIntroKey = null;
 
 // Per-output state
 const outputState = {};
@@ -494,7 +521,7 @@ function buildPodcastStatus() {
     segmentEndSeconds: active?.segmentEndSeconds ?? (lastSegmentIsCurrent ? podcastState.lastSegment?.endSeconds : null) ?? null,
     nextBreakTargetSeconds: active?.segmentEndSeconds ?? null,
     breakReason: active?.breakReason || (lastSegmentIsCurrent ? podcastState.lastSegment?.breakReason : null) || null,
-    hasTranscript: !!(active?.hasTranscript ?? episodeState?.transcriptUrl),
+    hasTranscript: !!(active?.hasTranscript ?? episodeState?.transcriptUrl) || !!readCachedPodcastTranscript({ id: episodeState?.guid || currentEpisodeKey, audioUrl: episodeState?.episodeUrl, title: episodeState?.episodeTitle })?.text,
     hasChapters: !!(active?.hasChapters ?? (Array.isArray(episodeState?.chapters) && episodeState.chapters.length > 0)),
     lastSegmentContextSource: lastSegmentIsCurrent ? (podcastState.lastSegment?.contextSource || null) : null,
     willResume: hasCurrentPodcast && !!episodeState && !episodeState.completed,
@@ -595,12 +622,29 @@ function shuffle(arr) {
 async function refillQueue() {
   let tracks;
   try {
-    if (engineSettings.musicSource === 'wavlakePlaylist' && engineSettings.wavlakePlaylistId) {
-      const playlist = await fetchWavlakePlaylist(engineSettings.wavlakePlaylistId);
-      engineSettings = { ...engineSettings, wavlakePlaylistTitle: playlist.title };
+    if (engineSettings.musicSource === 'wavlakePlaylist' && normalizeWavlakePlaylists().length > 0) {
+      const configuredPlaylists = normalizeWavlakePlaylists();
+      const playlistResults = await Promise.allSettled(configuredPlaylists.map(row => fetchWavlakePlaylist(row.id)));
+      const playlists = playlistResults
+        .filter(result => result.status === 'fulfilled')
+        .map(result => result.value);
+      const errors = playlistResults
+        .filter(result => result.status === 'rejected')
+        .map(result => result.reason?.message || String(result.reason));
+      if (playlists.length === 0) throw new Error(`No Wavlake playlist could be loaded${errors.length ? ` (${errors.join('; ')})` : ''}`);
+      engineSettings = {
+        ...engineSettings,
+        wavlakePlaylistId: playlists[0].id,
+        wavlakePlaylistTitle: playlists[0].title,
+        wavlakePlaylists: playlists.map(p => ({ id: p.id, title: p.title })),
+      };
       saveSettings(engineSettings);
-      tracks = playlist.tracks;
-      console.log(`[engine] queue refilled from Wavlake playlist "${playlist.title}": ${tracks.length} tracks`);
+      tracks = playlists.flatMap(playlist => playlist.tracks.map(track => ({
+        ...track,
+        sourcePlaylistId: playlist.id,
+        sourcePlaylistTitle: playlist.title,
+      })));
+      console.log(`[engine] queue refilled from ${playlists.length} Wavlake playlist(s): ${tracks.length} tracks${errors.length ? `, ${errors.length} failed` : ''}`);
     } else if (engineSettings.musicSource === 'prLikedSongs') {
       tracks = await fetchLikedTracks();
       console.log(`[engine] queue refilled from PR Liked Songs: ${tracks.length} tracks`);
@@ -788,6 +832,7 @@ async function refreshPodcastQueueFromFeeds() {
   };
   saveSettings(engineSettings);
   console.log(`[engine] podcast queue refreshed: ${queue.length} episodes from ${uniqueFeeds.length} feed(s)${errors.length ? `, ${errors.length} failed` : ''}`);
+  prefetchPodcastTranscripts(queue, 'queue-refresh');
   return { queue, feeds: uniqueFeeds, errors, refreshedAt: engineSettings.podcastQueueRefreshedAt };
 }
 
@@ -810,7 +855,10 @@ function shiftQueuedPodcastEpisode() {
     const episode = queued.shift();
     engineSettings = { ...engineSettings, podcastQueue: queued };
     saveSettings(engineSettings);
-    if (episode?.audioUrl || episode?.liveUrl) return podcastEpisodeToItem(episode);
+    if (episode?.audioUrl || episode?.liveUrl) {
+      prefetchPodcastTranscripts(queued, 'queue-shift');
+      return podcastEpisodeToItem(episode);
+    }
   }
   return null;
 }
@@ -899,6 +947,27 @@ function parseCueEntries(raw = '') {
   if (trimmed.startsWith('{')) {
     try {
       const data = JSON.parse(trimmed);
+      if (Array.isArray(data.words) && data.words.length > 0) {
+        const entries = [];
+        let current = null;
+        for (const word of data.words) {
+          const start = Number(word.start ?? 0) / (Number(word.start ?? 0) > 10_000 ? 1000 : 1);
+          const end = Number(word.end ?? word.start ?? 0) / (Number(word.end ?? word.start ?? 0) > 10_000 ? 1000 : 1);
+          const text = String(word.text || word.word || '').trim();
+          if (!text) continue;
+          if (!current) current = { start, end, text };
+          else {
+            current.end = end;
+            current.text += `${/^[,.;:!?]/.test(text) ? '' : ' '}${text}`;
+          }
+          if (/[.!?…]$/.test(text) || current.end - current.start >= 20) {
+            entries.push(current);
+            current = null;
+          }
+        }
+        if (current) entries.push(current);
+        return entries;
+      }
       const segs = Array.isArray(data.segments) ? data.segments : [];
       return segs
         .map(s => ({
@@ -949,6 +1018,169 @@ function extractTranscriptWindow(raw = '', fromSecs, toSecs) {
 
 const transcriptCache = new Map();
 
+function podcastTranscriptCacheKey(episodeOrItem) {
+  const episode = episodeOrItem?.episode || episodeOrItem || {};
+  const seed = [
+    episode.id,
+    episode.guid,
+    episode.audioUrl,
+    episode.liveUrl,
+    episode.episodeUrl,
+    episode.title,
+  ].filter(Boolean).join('|');
+  return createHash('sha1').update(seed || JSON.stringify(episode)).digest('hex');
+}
+
+function podcastTranscriptCacheFile(episodeOrItem) {
+  return path.join(PODCAST_TRANSCRIPT_DIR, `${podcastTranscriptCacheKey(episodeOrItem)}.json`);
+}
+
+function readCachedPodcastTranscript(episodeOrItem) {
+  try {
+    const file = podcastTranscriptCacheFile(episodeOrItem);
+    if (!existsSync(file)) return null;
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedPodcastTranscript(episodeOrItem, data) {
+  mkdirSync(PODCAST_TRANSCRIPT_DIR, { recursive: true });
+  const file = podcastTranscriptCacheFile(episodeOrItem);
+  writeFileSync(file, JSON.stringify({
+    ...data,
+    cacheKey: podcastTranscriptCacheKey(episodeOrItem),
+    savedAt: new Date().toISOString(),
+  }, null, 2));
+  return file;
+}
+
+function transcriptRecordToRaw(record) {
+  if (!record) return '';
+  if (Array.isArray(record.words) && record.words.length > 0) {
+    return JSON.stringify({
+      provider: record.provider || 'cached',
+      text: record.text || '',
+      words: record.words,
+    });
+  }
+  return String(record.raw || record.text || '');
+}
+
+const activeTranscriptPrefetches = new Set();
+
+async function submitAssemblyAiTranscript(episode) {
+  if (!ASSEMBLYAI_API_KEY) throw new Error('ASSEMBLYAI_API_KEY missing');
+  const audioUrl = episode.audioUrl || episode.liveUrl;
+  if (!audioUrl) throw new Error('episode has no audio URL');
+  const res = await fetch('https://api.assemblyai.com/v2/transcript', {
+    method: 'POST',
+    headers: {
+      authorization: ASSEMBLYAI_API_KEY,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      audio_url: audioUrl,
+      language_detection: true,
+      punctuate: true,
+      format_text: true,
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`AssemblyAI submit HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+  return res.json();
+}
+
+async function pollAssemblyAiTranscript(transcriptId, timeoutMs = 30 * 60_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const res = await fetch(`https://api.assemblyai.com/v2/transcript/${encodeURIComponent(transcriptId)}`, {
+      headers: { authorization: ASSEMBLYAI_API_KEY },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) throw new Error(`AssemblyAI poll HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+    const json = await res.json();
+    if (json.status === 'completed') return json;
+    if (json.status === 'error') throw new Error(json.error || 'AssemblyAI transcript failed');
+    await sleep(20_000);
+  }
+  throw new Error('AssemblyAI transcript timed out');
+}
+
+async function ensurePodcastTranscriptCached(episode, options = {}) {
+  if (!episode?.audioUrl && !episode?.liveUrl) return null;
+  const existing = readCachedPodcastTranscript(episode);
+  if (existing?.status === 'completed' && (existing.text || existing.raw || existing.words?.length)) return existing;
+  if (existing?.status === 'processing' && !options.resumeProcessing) return existing;
+
+  if (episode.transcriptUrl) {
+    const raw = await fetchTranscriptRaw(episode.transcriptUrl);
+    const file = writeCachedPodcastTranscript(episode, {
+      provider: 'feed',
+      status: 'completed',
+      feedTitle: episode.feedTitle || '',
+      episodeTitle: episode.title || '',
+      audioUrl: episode.audioUrl || episode.liveUrl,
+      transcriptUrl: episode.transcriptUrl,
+      raw,
+      text: raw.replace(/\s+/g, ' ').trim(),
+    });
+    console.log(`[engine] cached feed transcript for "${episode.title}" -> ${file}`);
+    return readCachedPodcastTranscript(episode);
+  }
+
+  if (!ASSEMBLYAI_API_KEY) {
+    console.warn(`[engine] podcast transcript cache skipped for "${episode.title}": ASSEMBLYAI_API_KEY missing`);
+    return null;
+  }
+
+  const submitted = existing?.assemblyTranscriptId
+    ? { id: existing.assemblyTranscriptId }
+    : await submitAssemblyAiTranscript(episode);
+  writeCachedPodcastTranscript(episode, {
+    provider: 'assemblyai',
+    status: 'processing',
+    assemblyTranscriptId: submitted.id,
+    feedTitle: episode.feedTitle || '',
+    episodeTitle: episode.title || '',
+    audioUrl: episode.audioUrl || episode.liveUrl,
+  });
+  console.log(`[engine] AssemblyAI transcript queued for "${episode.title}": ${submitted.id}`);
+  const completed = await pollAssemblyAiTranscript(submitted.id);
+  const file = writeCachedPodcastTranscript(episode, {
+    provider: 'assemblyai',
+    status: 'completed',
+    assemblyTranscriptId: completed.id,
+    feedTitle: episode.feedTitle || '',
+    episodeTitle: episode.title || '',
+    audioUrl: episode.audioUrl || episode.liveUrl,
+    languageCode: completed.language_code || '',
+    text: completed.text || '',
+    words: Array.isArray(completed.words) ? completed.words : [],
+  });
+  console.log(`[engine] AssemblyAI transcript cached for "${episode.title}" -> ${file}`);
+  return readCachedPodcastTranscript(episode);
+}
+
+function prefetchPodcastTranscripts(episodes, reason = 'queue-refresh') {
+  if (engineSettings.podcastTranscriptPrefetchEnabled === false) return;
+  const limit = Math.max(0, Number(engineSettings.podcastTranscriptPrefetchLimit ?? 5));
+  const selected = (Array.isArray(episodes) ? episodes : []).filter(Boolean).slice(0, limit);
+  for (const episode of selected) {
+    const key = podcastTranscriptCacheKey(episode);
+    const existing = readCachedPodcastTranscript(episode);
+    if (existing?.status === 'completed') continue;
+    if (activeTranscriptPrefetches.has(key)) continue;
+    activeTranscriptPrefetches.add(key);
+    ensurePodcastTranscriptCached(episode, { resumeProcessing: true })
+      .catch(err => console.warn(`[engine] podcast transcript prefetch failed (${reason}) for "${episode.title}": ${err.message}`))
+      .finally(() => activeTranscriptPrefetches.delete(key));
+  }
+}
+
 async function fetchTranscriptRaw(transcriptUrl) {
   if (!transcriptUrl) return '';
   if (transcriptCache.has(transcriptUrl)) return transcriptCache.get(transcriptUrl);
@@ -990,6 +1222,20 @@ function findTranscriptCut(raw, startSeconds, minSeconds, maxSeconds) {
   }
   const firstAfterMin = entries.find(e => e.end >= minTarget && e.end <= maxTarget);
   return firstAfterMin ? { seconds: firstAfterMin.end, title: '', source: 'transcriptCue' } : null;
+}
+
+async function fetchTranscriptRawForEpisode(item, episodeState) {
+  const episode = item.episode || {
+    id: episodeState.guid || item.id,
+    feedTitle: episodeState.showTitle,
+    title: episodeState.episodeTitle,
+    audioUrl: episodeState.episodeUrl || item.liveUrl,
+    transcriptUrl: episodeState.transcriptUrl,
+  };
+  const cached = readCachedPodcastTranscript(episode);
+  if (cached?.status === 'completed') return transcriptRecordToRaw(cached);
+  if (episodeState.transcriptUrl) return fetchTranscriptRaw(episodeState.transcriptUrl);
+  return '';
 }
 
 function parseSilenceCut(stderr, startSeconds, minSeconds, maxSeconds) {
@@ -1047,9 +1293,9 @@ async function choosePodcastSegment(item, episodeState) {
 
   if (engineSettings.podcastPreferTranscriptChapters !== false) {
     cut = findChapterCut(episodeState.chapters, startSeconds, minSeconds, maxSeconds);
-    if (!cut && episodeState.transcriptUrl) {
+    if (!cut && (episodeState.transcriptUrl || readCachedPodcastTranscript(item.episode || item)?.status === 'completed')) {
       try {
-        transcriptRaw = await fetchTranscriptRaw(episodeState.transcriptUrl);
+        transcriptRaw = await fetchTranscriptRawForEpisode(item, episodeState);
         cut = findTranscriptCut(transcriptRaw, startSeconds, minSeconds, maxSeconds);
       } catch(e) {
         console.warn('[engine] podcast transcript cut failed:', e.message);
@@ -1112,6 +1358,8 @@ async function extractSttExcerpt(item, startSeconds, endSeconds) {
     if (buf.length < 1000) throw new Error(`STT extract tiny file (${buf.length} bytes)`);
     const form = new FormData();
     form.append('file', new Blob([buf], { type: 'audio/mpeg' }), 'segment.mp3');
+    form.append('model_id', 'scribe_v2');
+    form.append('word_timestamps', 'true');
     const res = await fetch(PODCAST_STT_URL, { method: 'POST', body: form, signal: AbortSignal.timeout(120_000) });
     if (!res.ok) throw new Error(`STT HTTP ${res.status}: ${await res.text().catch(() => '')}`);
     const json = await res.json();
@@ -1129,9 +1377,9 @@ async function buildPodcastSegmentContext(item, episodeState, segment) {
   let excerpt = '';
   let transcriptRaw = segment.transcriptRaw || '';
 
-  if (episodeState.transcriptUrl) {
+  if (episodeState.transcriptUrl || readCachedPodcastTranscript(item.episode || item)?.status === 'completed') {
     try {
-      if (!transcriptRaw) transcriptRaw = await fetchTranscriptRaw(episodeState.transcriptUrl);
+      if (!transcriptRaw) transcriptRaw = await fetchTranscriptRawForEpisode(item, episodeState);
       excerpt = extractTranscriptWindow(transcriptRaw, segment.startSeconds, segment.endSeconds);
       if (excerpt.length > 40) source = 'transcript';
     } catch(e) {
@@ -1369,7 +1617,7 @@ async function playPodcastSegment(item) {
     segmentStartSeconds: segment.startSeconds,
     segmentEndSeconds: segment.endSeconds,
     breakReason: segment.cutSource,
-    hasTranscript: !!state.transcriptUrl,
+    hasTranscript: !!state.transcriptUrl || !!readCachedPodcastTranscript(item.episode || item)?.text,
     hasChapters: Array.isArray(state.chapters) && state.chapters.length > 0,
   };
   podcastState.active = currentPodcastPlayback;
@@ -1453,11 +1701,54 @@ async function playPodcastSegment(item) {
 
 // ── Moderation (TTS) ──────────────────────────────────────────────────────────
 
-async function generateModerationText(currentSong, memoryContext = '') {
+function describeUpcomingItem(item) {
+  if (!item) return 'Noch nicht festgelegt.';
+  if (item.kind === 'podcast') return `Podcast als Nächstes: "${item.artist} — ${item.title}".`;
+  if (item.kind === 'music') return `Nächster Song: "${item.artist} — ${item.title}".`;
+  if (item.kind === 'moderation') return `Als Nächstes kommt eine weitere Moderation.`;
+  return `Als Nächstes: "${item.artist || item.kind} — ${item.title}".`;
+}
+
+function peekNextMusicItem() {
+  const item = queue.find(t => !isBlocked(t));
+  return item ? { ...item } : null;
+}
+
+async function peekNextPodcastEpisode() {
+  const queued = Array.isArray(engineSettings.podcastQueue) ? engineSettings.podcastQueue : [];
+  const episode = queued.find(ep => ep?.audioUrl || ep?.liveUrl);
+  if (episode) return podcastEpisodeToItem(episode);
+  return fetchLatestPodcastEpisode();
+}
+
+function isPodcastDueAfterCurrentMusic() {
+  const podcastAfterSongs = Number(engineSettings.podcastAfterSongs);
+  return engineSettings.podcastsEnabled !== false
+    && podcastBreakSongsRemaining <= 0
+    && Number.isFinite(podcastAfterSongs)
+    && podcastAfterSongs > 0
+    && (podcastCount + 1) >= podcastAfterSongs;
+}
+
+async function planUpcomingAfterCurrentMusic() {
+  if (isPodcastDueAfterCurrentMusic()) {
+    try {
+      return await peekNextPodcastEpisode();
+    } catch (err) {
+      console.warn('[engine] podcast preview for moderation failed:', err.message);
+    }
+  }
+  return peekNextMusicItem();
+}
+
+async function generateModerationText(currentSong, nextItem = null, memoryContext = '') {
   try {
     const system = 'Du bist ein deutschsprachiger Radiosprecher für einen persönlichen Musiksender. Dein Stil ist warm, locker und authentisch. Antworte NUR mit dem direkt sendefähigen Text — keine Erklärungen, keine Anführungszeichen.';
     const task   = [
-      `Schreibe eine kurze Moderation (1-2 Sätze) für den gerade gespielten Song: "${currentSong.artist} — ${currentSong.title}". Natürlich und spontan, wie ein echter Radiosprecher.`,
+      `Schreibe eine kurze Übergangsmoderation (1-2 Sätze).`,
+      `Gerade lief: "${currentSong.artist} — ${currentSong.title}".`,
+      describeUpcomingItem(nextItem),
+      'Moderiere den gelaufenen Song kurz ab und den nächsten Inhalt organisch an. Wenn als Nächstes ein Podcast kommt, leite klar aber nicht langatmig in den Podcast über.',
       memoryContext,
       'Nutze Memory nur, wenn es wirklich organisch passt. Nicht jedes Mal sagen, dass du dich erinnerst.',
     ].filter(Boolean).join('\n\n');
@@ -1550,15 +1841,15 @@ async function probeAudioDurationSeconds(file) {
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-async function buildModerationItem(afterSong) {
+async function buildModerationItem(afterSong, nextItem = null) {
   console.log('[engine] generating moderation…');
   const compiled = memorySafe('music moderation context', () => buildMusicModerationContext(afterSong)) || { promptText: '', callInIds: [] };
-  const text    = await generateModerationText(afterSong, compiled.promptText);
+  const text    = await generateModerationText(afterSong, nextItem, compiled.promptText);
   if (!text) return null;
   const tts = await ttsToTempFile(text);
   if (!tts?.file) return null;
   memorySafe('record music moderation', () => {
-    recordModeration({ purpose: 'music', item: afterSong, scriptText: text, context: { callInIds: compiled.callInIds } });
+    recordModeration({ purpose: 'music-transition', item: afterSong, scriptText: text, context: { callInIds: compiled.callInIds, nextItem } });
     markCallInsUsed(compiled.callInIds, { purpose: 'music' });
   });
   return {
@@ -1858,9 +2149,41 @@ async function radioLoop() {
         && (songCount + 1) >= moderationAfterSongs
         && pendingModerationPromise === null) {
       const songForMod = nextItem;
-      pendingModerationPromise = buildModerationItem(songForMod)
+      const upcomingPromise = planUpcomingAfterCurrentMusic();
+      pendingModerationPromise = upcomingPromise
+        .then(upcoming => {
+          if (upcoming?.kind === 'podcast' && pendingPodcastIntroPromise === null) {
+            const { state } = getEpisodeState(upcoming);
+            const key = podcastEpisodeKey(upcoming);
+            const isResume = Number(state.positionSeconds || 0) > 60 || Number(state.part || 1) > 1;
+            pendingPodcastIntroKey = key;
+            pendingPodcastIntroPromise = buildPodcastIntroItem(upcoming, state, isResume)
+              .then(item => { if (item) console.log('[engine] podcast intro pre-generated, ready'); return item; })
+              .catch(err => { console.warn('[engine] podcast intro pre-gen error:', err.message); return null; });
+          }
+          return buildModerationItem(songForMod, upcoming);
+        })
         .then(item => { if (item) console.log('[engine] moderation pre-generated, ready'); return item; })
         .catch(err  => { console.warn('[engine] moderation pre-gen error:', err.message); return null; });
+    }
+
+    if (nextItem.kind === 'music'
+        && !sessionIntroRequest
+        && pendingPodcastIntroPromise === null
+        && isPodcastDueAfterCurrentMusic()) {
+      planUpcomingAfterCurrentMusic()
+        .then(upcoming => {
+          if (upcoming?.kind !== 'podcast' || pendingPodcastIntroPromise !== null) return null;
+          const { state } = getEpisodeState(upcoming);
+          const key = podcastEpisodeKey(upcoming);
+          const isResume = Number(state.positionSeconds || 0) > 60 || Number(state.part || 1) > 1;
+          pendingPodcastIntroKey = key;
+          pendingPodcastIntroPromise = buildPodcastIntroItem(upcoming, state, isResume)
+            .then(item => { if (item) console.log('[engine] podcast intro pre-generated, ready'); return item; })
+            .catch(err => { console.warn('[engine] podcast intro pre-gen error:', err.message); return null; });
+          return null;
+        })
+        .catch(err => console.warn('[engine] podcast intro preview failed:', err.message));
     }
 
     let podcastSegmentResult = null;
@@ -1883,7 +2206,20 @@ async function radioLoop() {
       } else if (!resumedFromPause) {
         const { state } = getEpisodeState(nextItem);
         const isResume = Number(state.positionSeconds || 0) > 60 || Number(state.part || 1) > 1;
-        const introItem = await buildPodcastIntroItem(nextItem, state, isResume);
+        const key = podcastEpisodeKey(nextItem);
+        let introItem = null;
+        if (pendingPodcastIntroPromise && pendingPodcastIntroKey === key) {
+          introItem = await Promise.race([
+            pendingPodcastIntroPromise,
+            sleep(2_000).then(() => null),
+          ]);
+          pendingPodcastIntroPromise = null;
+          pendingPodcastIntroKey = null;
+        } else {
+          pendingPodcastIntroPromise = null;
+          pendingPodcastIntroKey = null;
+        }
+        if (!introItem) introItem = await buildPodcastIntroItem(nextItem, state, isResume);
         if (introItem && !paused && !shuttingDown) {
           currentItem = introItem;
           startedAt = Date.now();
@@ -2318,6 +2654,8 @@ function suspendForNoListeners(snapshot) {
     pausedResumeItem = null;
   }
   pendingModerationPromise = null;
+  pendingPodcastIntroPromise = null;
+  pendingPodcastIntroKey = null;
   pendingSessionIntroPromise = null;
   sessionIntroSongKey = null;
   paused = true;
@@ -2453,6 +2791,24 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/podcast-state') {
       return send(res, 200, buildPodcastStatus());
+    }
+    if (url.pathname === '/api/podcast-transcripts') {
+      const limit = Math.max(1, Number(engineSettings.podcastTranscriptPrefetchLimit || 5));
+      const transcripts = (Array.isArray(engineSettings.podcastQueue) ? engineSettings.podcastQueue : [])
+        .slice(0, limit)
+        .map(episode => {
+          const cached = readCachedPodcastTranscript(episode);
+          return {
+            id: episode.id || episode.audioUrl,
+            title: episode.title,
+            feedTitle: episode.feedTitle,
+            provider: cached?.provider || null,
+            status: cached?.status || null,
+            hasTranscript: cached?.status === 'completed',
+            savedAt: cached?.savedAt || null,
+          };
+        });
+      return send(res, 200, { transcripts });
     }
     if (url.pathname === '/api/liked') {
       return send(res, 200, { liked: await loadLiked() });
@@ -2658,6 +3014,7 @@ const server = http.createServer(async (req, res) => {
         'musicSource',
         'wavlakePlaylistId',
         'wavlakePlaylistTitle',
+        'wavlakePlaylists',
         'podcastAfterSongs',
         'podcastFeedUrl',
         'podcastFeeds',
@@ -2668,6 +3025,9 @@ const server = http.createServer(async (req, res) => {
         'podcastSegmentMaxMinutes',
         'podcastSttFallbackEnabled',
         'podcastPreferTranscriptChapters',
+        'podcastTranscriptPrefetchEnabled',
+        'podcastTranscriptPrefetchLimit',
+        'podcastTranscriptProvider',
         'musicBreakTracksAfterPodcast',
         'ttsProvider',
         'elevenLabsVoiceIdEn',
@@ -2686,7 +3046,12 @@ const server = http.createServer(async (req, res) => {
       }
       engineSettings = { ...engineSettings, ...allowed };
       if (Object.prototype.hasOwnProperty.call(allowed, 'musicSource')
-          || Object.prototype.hasOwnProperty.call(allowed, 'wavlakePlaylistId')) {
+          || Object.prototype.hasOwnProperty.call(allowed, 'wavlakePlaylistId')
+          || Object.prototype.hasOwnProperty.call(allowed, 'wavlakePlaylists')) {
+        if (Array.isArray(allowed.wavlakePlaylists) && allowed.wavlakePlaylists.length > 0) {
+          allowed.wavlakePlaylistId = allowed.wavlakePlaylists[0]?.id || allowed.wavlakePlaylistId || '';
+          allowed.wavlakePlaylistTitle = allowed.wavlakePlaylists[0]?.title || allowed.wavlakePlaylistTitle || '';
+        }
         queue = [];
       }
       saveSettings(engineSettings);
@@ -2699,8 +3064,17 @@ const server = http.createServer(async (req, res) => {
       const nextQueue = Array.isArray(body.queue) ? body.queue : [];
       engineSettings = { ...engineSettings, podcastQueue: nextQueue };
       saveSettings(engineSettings);
+      prefetchPodcastTranscripts(nextQueue, 'queue-save');
       broadcastStatus();
       return send(res, 200, { ok: true, queue: engineSettings.podcastQueue });
+    }
+
+    if (url.pathname === '/api/podcast-transcripts/prefetch') {
+      const limit = Math.max(1, Number(engineSettings.podcastTranscriptPrefetchLimit || 5));
+      const episodes = (Array.isArray(engineSettings.podcastQueue) ? engineSettings.podcastQueue : []).slice(0, limit);
+      prefetchPodcastTranscripts(episodes, 'api-prefetch');
+      broadcastStatus();
+      return send(res, 200, { ok: true, queued: episodes.length });
     }
 
     if (url.pathname === '/api/podcast-refresh') {

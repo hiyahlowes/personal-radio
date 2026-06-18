@@ -294,7 +294,7 @@ export function SettingsPage() {
   };
 
   const previewWavlakePlaylist = async () => {
-    const id = playlistIdDraft.trim();
+    const id = parsePlaylistDraft(playlistIdDraft)[0];
     if (!id) { setPlaylistError('Enter a Wavlake playlist ID.'); return null; }
     setPlaylistLoading(true);
     setPlaylistError('');
@@ -313,15 +313,31 @@ export function SettingsPage() {
     }
   };
 
+  function parsePlaylistDraft(raw: string): string[] {
+    return [...new Set(String(raw || '')
+      .split(/[\n,;\s]+/)
+      .map(id => id.trim())
+      .filter(Boolean))];
+  }
+
   const setRemoteMusicSource = async (source: 'topCharts' | 'wavlakePlaylist' | 'prLikedSongs') => {
     if (!engineMode.isRemote) return;
     if (source === 'wavlakePlaylist') {
-      const preview = playlistPreview?.id === playlistIdDraft.trim() ? playlistPreview : await previewWavlakePlaylist();
-      if (!preview) return;
+      const ids = parsePlaylistDraft(playlistIdDraft);
+      if (ids.length === 0) {
+        setPlaylistError('Enter at least one Wavlake playlist ID.');
+        return;
+      }
+      const firstId = ids[0];
+      const preview = playlistPreview?.id === firstId ? playlistPreview : await previewWavlakePlaylist();
       await engineMode.saveSettings({
         musicSource: source,
-        wavlakePlaylistId: preview.id,
-        wavlakePlaylistTitle: preview.title,
+        wavlakePlaylistId: firstId,
+        wavlakePlaylistTitle: preview?.title || firstId,
+        wavlakePlaylists: ids.map((id, index) => ({
+          id,
+          title: index === 0 ? (preview?.title || '') : '',
+        })),
       });
     } else {
       await engineMode.saveSettings({ musicSource: source });
@@ -576,9 +592,12 @@ export function SettingsPage() {
     setElevenVoiceIdDe(s.elevenLabsVoiceIdDe ?? '');
     setElevenModelId(s.elevenLabsModelId ?? 'eleven_v3');
     setBoostAmountSats(s.boostAmountSats ?? 100);
-    setPlaylistIdDraft(s.wavlakePlaylistId ?? '');
-    if (s.wavlakePlaylistId && s.wavlakePlaylistTitle) {
-      setPlaylistPreview({ id: s.wavlakePlaylistId, title: s.wavlakePlaylistTitle, count: 0 });
+    const remotePlaylists = Array.isArray(s.wavlakePlaylists) && s.wavlakePlaylists.length > 0
+      ? s.wavlakePlaylists
+      : (s.wavlakePlaylistId ? [{ id: s.wavlakePlaylistId, title: s.wavlakePlaylistTitle }] : []);
+    setPlaylistIdDraft(remotePlaylists.map(p => p.id).filter(Boolean).join('\n'));
+    if (remotePlaylists[0]?.id && (remotePlaylists[0]?.title || s.wavlakePlaylistTitle)) {
+      setPlaylistPreview({ id: remotePlaylists[0].id, title: remotePlaylists[0].title || s.wavlakePlaylistTitle, count: 0 });
     }
     if (Array.isArray(s.podcastFeeds)) setFeeds(s.podcastFeeds);
     if (typeof s.satRatePerMinute === 'number') v4v.setSatRatePerMinute(s.satRatePerMinute);
@@ -1129,15 +1148,15 @@ export function SettingsPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <label className="text-xs text-white/35 px-1" htmlFor="wavlake-playlist-id">Wavlake Playlist ID</label>
+                    <label className="text-xs text-white/35 px-1" htmlFor="wavlake-playlist-id">Wavlake Playlist IDs</label>
                     <div className="flex gap-2">
-                      <input
+                      <textarea
                         id="wavlake-playlist-id"
-                        type="text"
                         value={playlistIdDraft}
-                        onChange={e => { setPlaylistIdDraft(e.target.value.trim()); setPlaylistError(''); }}
-                        placeholder="ab0b36aa-abe8-45b8-a0ab-97740d06b26a"
-                        className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white/80 placeholder-white/20 focus:outline-none focus:border-purple-500/50 font-mono"
+                        onChange={e => { setPlaylistIdDraft(e.target.value); setPlaylistError(''); }}
+                        placeholder={'ab0b36aa-abe8-45b8-a0ab-97740d06b26a\nanother-playlist-id'}
+                        rows={3}
+                        className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white/80 placeholder-white/20 focus:outline-none focus:border-purple-500/50 font-mono resize-none"
                       />
                       <button
                         onClick={previewWavlakePlaylist}
@@ -1147,6 +1166,9 @@ export function SettingsPage() {
                         {playlistLoading ? 'Loading…' : 'Preview'}
                       </button>
                     </div>
+                    <p className="text-[11px] text-white/25 px-1">
+                      One per line. The engine shuffles tracks from all saved playlists.
+                    </p>
                     {playlistError && <p className="text-xs text-red-400 px-1">{playlistError}</p>}
                     {playlistPreview && (
                       <div className="flex items-center justify-between gap-3 px-1">
@@ -1485,6 +1507,32 @@ export function SettingsPage() {
                       </label>
                     </div>
                   </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="flex items-center justify-between gap-3 text-sm text-white/60 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">
+                      <span>Transcript prefetch</span>
+                      <input
+                        type="checkbox"
+                        checked={engineMode.settings?.podcastTranscriptPrefetchEnabled ?? true}
+                        onChange={e => engineMode.saveSettings({ podcastTranscriptPrefetchEnabled: e.target.checked })}
+                        className="accent-amber-400"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-xs text-white/40">Prefetch first episodes</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        step={1}
+                        value={engineMode.settings?.podcastTranscriptPrefetchLimit ?? 5}
+                        onChange={e => engineMode.saveSettings({ podcastTranscriptPrefetchLimit: Number(e.target.value) })}
+                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-amber-400/60"
+                      />
+                    </label>
+                  </div>
+                  <p className="text-[11px] text-white/25">
+                    Full episode transcripts are cached locally for the first queued episodes when a transcript provider key is available.
+                  </p>
                 </div>
               </div>
             )}
