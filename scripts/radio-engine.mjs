@@ -90,6 +90,7 @@ const TTS_ELEVEN_URL = `http://127.0.0.1:${APP_PORT}/.netlify/functions/podcast-
 const TTS_FISH_URL   = `http://127.0.0.1:${APP_PORT}/.netlify/functions/podcast-proxy?action=tts-fish`;
 const PODCAST_TEXT_URL = `http://127.0.0.1:${APP_PORT}/.netlify/functions/podcast-proxy?action=text`;
 const PODCAST_STT_URL  = `http://127.0.0.1:${APP_PORT}/.netlify/functions/podcast-proxy?action=stt`;
+const PODCAST_AUDIO_RESOLVER_URL = `http://127.0.0.1:${APP_PORT}/.netlify/functions/podcast-proxy?action=audioresolver`;
 // Moderation text via claude-proxy (direct Anthropic API, fast ~2-3s).
 // Falls back to via-moderator only if PERSONAL_RADIO_USE_VIA=true is set.
 const CLAUDE_URL = `http://127.0.0.1:${APP_PORT}/.netlify/functions/claude-proxy`;
@@ -108,6 +109,8 @@ const FFPLAY_AUDIO_FILTER     = process.env.PERSONAL_RADIO_FFPLAY_AUDIO_FILTER |
 const TTS_TAIL_PAD_SECONDS    = Number(process.env.PERSONAL_RADIO_TTS_TAIL_PAD_SECONDS || 0.6);
 const PODCAST_INTRO_JINGLE    = process.env.PERSONAL_RADIO_PODCAST_INTRO_JINGLE || path.join(PUBLIC_DIR, 'podcast-intro.mp3');
 const PODCAST_RETURN_JINGLE   = process.env.PERSONAL_RADIO_PODCAST_RETURN_JINGLE || path.join(PUBLIC_DIR, 'studio-return.mp3');
+const PODCAST_RESOLVED_URL_TTL_MS = Number(process.env.PERSONAL_RADIO_PODCAST_RESOLVED_URL_TTL_MS || 45 * 60_000);
+const PODCAST_SEGMENT_CACHE_ENABLED = envFlag('PERSONAL_RADIO_PODCAST_SEGMENT_CACHE', true);
 
 // Two independent outputs — each gets its own ffplay process per track.
 // Override with: RADIO_OUTPUTS='[{"name":"cleo","sink":"bluez_output.EC_81_93_4A_9D_E7.1"},{"name":"deck","sink":"via_pi2_living_combined"}]'
@@ -908,6 +911,9 @@ function getEpisodeState(item) {
   const next = {
     feedUrl: episode.feedUrl || engineSettings.podcastFeedUrl || '',
     episodeUrl: item.liveUrl,
+    originalEpisodeUrl: existing.originalEpisodeUrl || episode.audioUrl || item.liveUrl,
+    resolvedEpisodeUrl: existing.resolvedEpisodeUrl || '',
+    resolvedEpisodeUrlAt: existing.resolvedEpisodeUrlAt || '',
     guid: episode.id || item.id || item.liveUrl,
     showTitle: episode.feedTitle || item.artist || 'Podcast',
     episodeTitle: episode.title || item.title || 'Podcast',
@@ -925,6 +931,65 @@ function getEpisodeState(item) {
   podcastState.episodes[episodeKey] = next;
   podcastState.currentEpisodeKey = episodeKey;
   return { episodeKey, state: next };
+}
+
+async function resolvePodcastAudioUrl(item, episodeState) {
+  const originalUrl = episodeState.originalEpisodeUrl || episodeState.episodeUrl || item.liveUrl;
+  const resolvedAtMs = episodeState.resolvedEpisodeUrlAt ? Date.parse(episodeState.resolvedEpisodeUrlAt) : 0;
+  if (episodeState.resolvedEpisodeUrl
+      && resolvedAtMs
+      && Date.now() - resolvedAtMs < PODCAST_RESOLVED_URL_TTL_MS) {
+    return episodeState.resolvedEpisodeUrl;
+  }
+
+  try {
+    const res = await fetch(`${PODCAST_AUDIO_RESOLVER_URL}&url=${encodeURIComponent(originalUrl)}`, {
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) throw new Error(`audioresolver HTTP ${res.status}: ${await res.text().catch(() => '')}`);
+    const finalUrl = String(await res.text()).trim();
+    if (!/^https?:\/\//i.test(finalUrl)) throw new Error('audioresolver returned invalid URL');
+    episodeState.resolvedEpisodeUrl = finalUrl;
+    episodeState.resolvedEpisodeUrlAt = new Date().toISOString();
+    console.log(`[engine] resolved podcast audio URL for "${episodeState.episodeTitle}": ${new URL(finalUrl).host}`);
+    return finalUrl;
+  } catch (err) {
+    console.warn(`[engine] podcast audio URL resolve failed for "${episodeState.episodeTitle}": ${err.message}`);
+    return originalUrl;
+  }
+}
+
+async function buildPodcastSegmentPlaybackFile(segment, resolvedUrl) {
+  if (!PODCAST_SEGMENT_CACHE_ENABLED) return null;
+  mkdirSync(TMP_DIR, { recursive: true });
+  const tmpFile = path.join(TMP_DIR, `podcast-segment-${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`);
+  const result = await runCommand('ffmpeg', [
+    '-nostdin',
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-ss', String(Math.max(0, Math.floor(segment.startSeconds))),
+    '-t', String(Math.max(1, Math.ceil(segment.durationSeconds))),
+    '-i', resolvedUrl,
+    '-vn',
+    '-codec:a', 'libmp3lame',
+    '-b:a', '128k',
+    '-ar', '44100',
+    '-ac', '2',
+    '-y',
+    tmpFile,
+  ], Math.ceil((segment.durationSeconds + 180) * 1000));
+
+  if (!result.ok) {
+    try { unlinkSync(tmpFile); } catch {}
+    throw new Error(result.stderr || 'ffmpeg segment extract failed');
+  }
+  const duration = await probeAudioDurationSeconds(tmpFile);
+  if (!duration || duration < Math.min(5, segment.durationSeconds * 0.5)) {
+    try { unlinkSync(tmpFile); } catch {}
+    throw new Error(`segment extract duration invalid (${duration || 0}s)`);
+  }
+  console.log(`[engine] cached podcast segment for stable playback: ${tmpFile} (${duration.toFixed(1)}s)`);
+  return tmpFile;
 }
 
 function normalizePodcastSegmentSettings() {
@@ -1684,7 +1749,17 @@ async function playPodcastSegment(item) {
     state.completed = false;
     state.part = 1;
   }
-  const segment = await choosePodcastSegment(item, state);
+  const resolvedAudioUrl = await resolvePodcastAudioUrl(item, state);
+  const resolvedItem = { ...item, liveUrl: resolvedAudioUrl };
+  const segment = await choosePodcastSegment(resolvedItem, state);
+  let segmentPlaybackFile = null;
+  let segmentPlaybackSource = 'resolvedUrl';
+  try {
+    segmentPlaybackFile = await buildPodcastSegmentPlaybackFile(segment, resolvedAudioUrl);
+    if (segmentPlaybackFile) segmentPlaybackSource = 'segmentCache';
+  } catch (err) {
+    console.warn(`[engine] podcast segment cache failed, falling back to resolved URL: ${err.message}`);
+  }
   currentPodcastPlayback = {
     episodeKey,
     showTitle: state.showTitle,
@@ -1695,6 +1770,7 @@ async function playPodcastSegment(item) {
     segmentStartSeconds: segment.startSeconds,
     segmentEndSeconds: segment.endSeconds,
     breakReason: segment.cutSource,
+    playbackSource: segmentPlaybackSource,
     hasTranscript: !!state.transcriptUrl || !!readCachedPodcastTranscript(item.episode || item)?.text,
     hasChapters: Array.isArray(state.chapters) && state.chapters.length > 0,
   };
@@ -1702,15 +1778,18 @@ async function playPodcastSegment(item) {
   podcastState.currentEpisodeKey = episodeKey;
   savePodcastState();
 
-  console.log(`[engine] podcast segment part ${state.part}: ${Math.round(segment.startSeconds)}s → ${Math.round(segment.endSeconds)}s breakReason=${segment.cutSource}`);
+  console.log(`[engine] podcast segment part ${state.part}: ${Math.round(segment.startSeconds)}s → ${Math.round(segment.endSeconds)}s breakReason=${segment.cutSource} playback=${segmentPlaybackSource}`);
   broadcastStatus();
 
   const startedMs = Date.now();
-  await playItemOnAllOutputs(item, {
-    startSeconds: segment.startSeconds,
-    durationSeconds: segment.durationSeconds,
+  const playbackItem = { ...item, liveUrl: segmentPlaybackFile || resolvedAudioUrl };
+  await playItemOnAllOutputs(playbackItem, {
+    startSeconds: segmentPlaybackFile ? 0 : segment.startSeconds,
+    durationSeconds: segmentPlaybackFile ? 0 : segment.durationSeconds,
     hardStopMs: Math.ceil((segment.durationSeconds + 5) * 1000),
+    cacheHttpAudio: false,
   });
+  if (segmentPlaybackFile) { try { unlinkSync(segmentPlaybackFile); } catch {} }
 
   const actualElapsed = Math.max(0, Math.min(segment.durationSeconds, (Date.now() - startedMs) / 1000));
   const endPosition = itemWasKilled
@@ -1728,7 +1807,7 @@ async function playPodcastSegment(item) {
   let context = { source: 'fallback', excerpt: '', chapterTitle: '' };
   const shouldModerate = (!itemWasKilled || podcastSegmentSkipRequested) && actualElapsed >= 1;
   if (shouldModerate) {
-    context = await buildPodcastSegmentContext(item, state, { ...segment, endSeconds: endPosition });
+    context = await buildPodcastSegmentContext(resolvedItem, state, { ...segment, endSeconds: endPosition });
     state.lastContextSource = context.source;
   }
 
@@ -1741,6 +1820,7 @@ async function playPodcastSegment(item) {
     endSeconds: endPosition,
     plannedEndSeconds: segment.endSeconds,
     breakReason: segment.cutSource,
+    playbackSource: segmentPlaybackSource,
     contextSource: context.source,
     chapterTitle: context.chapterTitle,
     completed: reachedEpisodeEnd,
