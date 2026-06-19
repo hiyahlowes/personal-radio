@@ -109,6 +109,7 @@ const FFPLAY_PROBE_SIZE       = process.env.PERSONAL_RADIO_FFPLAY_PROBE_SIZE || 
 const FFPLAY_AUDIO_FILTER     = process.env.PERSONAL_RADIO_FFPLAY_AUDIO_FILTER || 'aresample=async=1000:first_pts=0';
 const TTS_TAIL_PAD_SECONDS    = Number(process.env.PERSONAL_RADIO_TTS_TAIL_PAD_SECONDS || 0.6);
 const DEFAULT_CROSSFADE_SECONDS = Number(process.env.PERSONAL_RADIO_CROSSFADE_SECONDS || 5);
+const DEFAULT_MODERATION_DUCK_SECONDS = Number(process.env.PERSONAL_RADIO_MODERATION_DUCK_SECONDS || 4);
 const PODCAST_INTRO_JINGLE    = process.env.PERSONAL_RADIO_PODCAST_INTRO_JINGLE || path.join(PUBLIC_DIR, 'podcast-intro.mp3');
 const PODCAST_RETURN_JINGLE   = process.env.PERSONAL_RADIO_PODCAST_RETURN_JINGLE || path.join(PUBLIC_DIR, 'studio-return.mp3');
 const PODCAST_RESOLVED_URL_TTL_MS = Number(process.env.PERSONAL_RADIO_PODCAST_RESOLVED_URL_TTL_MS || 45 * 60_000);
@@ -131,6 +132,8 @@ const DEFAULT_SETTINGS = {
   moderationAfterSongs: MODERATION_AFTER_SONGS,
   crossfadeEnabled: true,
   crossfadeSeconds: Number.isFinite(DEFAULT_CROSSFADE_SECONDS) && DEFAULT_CROSSFADE_SECONDS > 0 ? DEFAULT_CROSSFADE_SECONDS : 5,
+  moderationDuckingEnabled: true,
+  moderationDuckSeconds: Number.isFinite(DEFAULT_MODERATION_DUCK_SECONDS) && DEFAULT_MODERATION_DUCK_SECONDS > 0 ? DEFAULT_MODERATION_DUCK_SECONDS : 4,
   musicSource: 'topCharts',
   wavlakePlaylistId: '',
   wavlakePlaylistTitle: '',
@@ -1704,6 +1707,7 @@ async function buildPodcastModerationItem(item, episodeState, segment, context) 
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,
     scriptText,
+    plannedNextKind: 'music',
   };
 }
 
@@ -1780,6 +1784,7 @@ async function buildPodcastIntroItem(item, episodeState, isResume) {
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,
     scriptText,
+    plannedNextKind: 'podcast',
   };
 }
 
@@ -1801,6 +1806,7 @@ async function buildPodcastReturnItem(episodeState) {
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,
     scriptText: text,
+    plannedNextKind: 'podcast',
   };
 }
 
@@ -1966,6 +1972,11 @@ function crossfadeSeconds() {
   return Number.isFinite(seconds) && seconds > 0 ? Math.min(12, Math.max(1, seconds)) : 5;
 }
 
+function moderationDuckSeconds() {
+  const seconds = Number(engineSettings.moderationDuckSeconds ?? 4);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(10, Math.max(1, seconds)) : 4;
+}
+
 function moderationDueAfterCurrentMusic() {
   const moderationAfterSongs = Number(engineSettings.moderationAfterSongs);
   return engineSettings.moderationEnabled
@@ -1986,7 +1997,31 @@ function musicCanCrossfade(item, resumeStartSeconds = 0) {
   return Number.isFinite(duration) && duration > fade * 2 + 8 && peekNextMusicItem();
 }
 
+function musicCanDuckIntoModeration(item, resumeStartSeconds = 0) {
+  if (engineSettings.moderationDuckingEnabled === false) return false;
+  if (item?.kind !== 'music') return false;
+  if (resumeStartSeconds > 0) return false;
+  if (sessionIntroRequest) return false;
+  if (!moderationDueAfterCurrentMusic()) return false;
+  if (pendingModerationPromise === null) return false;
+  const duration = Number(item.duration || 0);
+  const fade = moderationDuckSeconds();
+  return Number.isFinite(duration) && duration > fade + 8;
+}
+
 function musicCrossfadeOptions(item, resumeStartSeconds = 0) {
+  if (musicCanDuckIntoModeration(item, resumeStartSeconds)) {
+    const fade = moderationDuckSeconds();
+    const duration = Number(item.duration || 0);
+    const fadeOutStartSeconds = Math.max(0, duration - fade);
+    return {
+      fadeOutStartSeconds,
+      fadeOutSeconds: fade,
+      resolveEarlyAfterMs: Math.max(1000, fadeOutStartSeconds * 1000),
+      allowOverlapTail: true,
+      transitionReason: 'music-to-moderation-duck',
+    };
+  }
   if (!musicCanCrossfade(item, resumeStartSeconds)) return {};
   const fade = crossfadeSeconds();
   const duration = Number(item.duration || 0);
@@ -1996,6 +2031,22 @@ function musicCrossfadeOptions(item, resumeStartSeconds = 0) {
     fadeOutSeconds: fade,
     resolveEarlyAfterMs: Math.max(1000, fadeOutStartSeconds * 1000),
     allowOverlapTail: true,
+    transitionReason: 'music-crossfade',
+  };
+}
+
+function moderationToMusicOptions(item) {
+  if (engineSettings.moderationDuckingEnabled === false) return {};
+  if (item?.kind !== 'moderation') return {};
+  if (item.plannedNextKind !== 'music') return {};
+  const fade = moderationDuckSeconds();
+  const duration = Number(item.duration || 0);
+  if (!Number.isFinite(duration) || duration <= fade + 1) return {};
+  return {
+    resolveEarlyAfterMs: Math.max(1000, (duration - fade) * 1000),
+    allowOverlapTail: true,
+    transitionReason: 'moderation-to-music-duck',
+    nextMusicFadeInSeconds: fade,
   };
 }
 
@@ -2169,6 +2220,7 @@ async function buildModerationItem(afterSong, nextItem = null) {
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,      // track temp file for cleanup
     scriptText: text,
+    plannedNextKind: nextItem?.kind || 'music',
   };
 }
 
@@ -2279,8 +2331,9 @@ async function playOnOutput(url, output, token, options = {}) {
     }
     if (Number.isFinite(options.resolveEarlyAfterMs) && options.resolveEarlyAfterMs > 1000) {
       earlyResolve = setTimeout(() => {
-        console.log(`[engine] crossfade handoff on ${output.name}`);
-        finish({ output: output.name, code: 0, reason: 'crossfade-overlap' });
+        const reason = options.transitionReason || 'crossfade-overlap';
+        console.log(`[engine] ${reason} handoff on ${output.name}`);
+        finish({ output: output.name, code: 0, reason });
       }, options.resolveEarlyAfterMs);
     }
 
@@ -2614,13 +2667,18 @@ async function radioLoop() {
           nextMusicFadeInSeconds = 0;
         }
         Object.assign(playOptions, musicCrossfadeOptions(nextItem, resumeStartSeconds));
+      } else if (nextItem.kind === 'moderation') {
+        Object.assign(playOptions, moderationToMusicOptions(nextItem));
       } else {
         nextMusicFadeInSeconds = 0;
       }
       const playResults = await playItemOnAllOutputs(nextItem, playOptions);
-      if (nextItem.kind === 'music' && playResults.some(result => result?.reason === 'crossfade-overlap')) {
+      if (nextItem.kind === 'music' && playResults.some(result => result?.reason === 'music-crossfade')) {
         nextMusicFadeInSeconds = crossfadeSeconds();
         console.log(`[engine] crossfade overlap armed for next music (${nextMusicFadeInSeconds}s)`);
+      } else if (nextItem.kind === 'moderation' && playResults.some(result => result?.reason === 'moderation-to-music-duck')) {
+        nextMusicFadeInSeconds = Number(playOptions.nextMusicFadeInSeconds || moderationDuckSeconds());
+        console.log(`[engine] moderation ducking armed for next music (${nextMusicFadeInSeconds}s)`);
       }
     }
 
@@ -3020,6 +3078,7 @@ async function buildSessionIntroItem(request, starterSong) {
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,
     scriptText,
+    plannedNextKind: request.deferredResumeKind || 'music',
   };
 }
 
@@ -3414,6 +3473,8 @@ const server = http.createServer(async (req, res) => {
         'moderationAfterSongs',
         'crossfadeEnabled',
         'crossfadeSeconds',
+        'moderationDuckingEnabled',
+        'moderationDuckSeconds',
         'musicSource',
         'wavlakePlaylistId',
         'wavlakePlaylistTitle',
