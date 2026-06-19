@@ -18,6 +18,10 @@ const host = process.env.HOST || '0.0.0.0';
 const LIVE_STREAM_SOURCE = process.env.PERSONAL_RADIO_STREAM_SOURCE || 'personal_radio_stream.monitor';
 const LIVE_STREAM_BITRATE = process.env.PERSONAL_RADIO_STREAM_BITRATE || '128k';
 const LIVE_STREAM_REQUIRE_TAILSCALE = !/^(0|false|no|off)$/i.test(process.env.PERSONAL_RADIO_STREAM_REQUIRE_TAILSCALE || 'true');
+const configuredLiveStreamClientMaxMs = Number(process.env.PERSONAL_RADIO_STREAM_CLIENT_MAX_MS);
+const LIVE_STREAM_CLIENT_MAX_MS = Number.isFinite(configuredLiveStreamClientMaxMs) && configuredLiveStreamClientMaxMs > 0
+  ? Math.max(60_000, configuredLiveStreamClientMaxMs)
+  : 3 * 60 * 60_000;
 
 // Load a simple KEY=VALUE .env file without printing secrets.
 try {
@@ -50,7 +54,8 @@ const mime = {
   '.wav': 'audio/wav',
 };
 
-const liveClients = new Set();
+const liveClients = new Map();
+let liveClientSeq = 0;
 let liveEncoder = null;
 let liveEncoderStartedAt = null;
 let liveBytes = 0;
@@ -71,6 +76,44 @@ function isTailscaleOrLocalAddress(address) {
 function streamClientAllowed(req) {
   if (!LIVE_STREAM_REQUIRE_TAILSCALE) return true;
   return isTailscaleOrLocalAddress(normalizeRemoteAddress(req));
+}
+
+function liveClientDetails() {
+  const now = Date.now();
+  return Array.from(liveClients.values()).map(client => ({
+    id: client.id,
+    remoteAddress: client.remoteAddress,
+    userAgent: client.userAgent,
+    connectedAt: client.connectedAt.toISOString(),
+    ageSeconds: Math.max(0, Math.floor((now - client.connectedAt.getTime()) / 1000)),
+    bytesWritten: client.bytesWritten,
+    lastWriteAt: client.lastWriteAt?.toISOString() || null,
+    backpressureCount: client.backpressureCount,
+  }));
+}
+
+function removeLiveClient(id, reason = 'removed') {
+  const client = liveClients.get(id);
+  if (!client) return;
+  liveClients.delete(id);
+  try {
+    if (!client.res.destroyed && !client.res.writableEnded) client.res.end();
+  } catch {}
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - client.connectedAt.getTime()) / 1000));
+  console.log(`[live-stream] client #${id} closed (${reason}) after ${ageSeconds}s, ${client.bytesWritten} bytes`);
+  scheduleLiveEncoderStop();
+}
+
+function pruneLiveClients(reason = 'prune') {
+  const now = Date.now();
+  for (const client of liveClients.values()) {
+    const ageMs = now - client.connectedAt.getTime();
+    if (client.res.destroyed || client.res.writableEnded) {
+      removeLiveClient(client.id, `${reason}:closed`);
+    } else if (ageMs > LIVE_STREAM_CLIENT_MAX_MS) {
+      removeLiveClient(client.id, `${reason}:max-age`);
+    }
+  }
 }
 
 function startLiveEncoder() {
@@ -102,8 +145,21 @@ function startLiveEncoder() {
 
   liveEncoder.stdout.on('data', chunk => {
     liveBytes += chunk.length;
-    for (const res of liveClients) {
-      if (!res.destroyed) res.write(chunk);
+    pruneLiveClients('write');
+    for (const client of liveClients.values()) {
+      try {
+        if (client.res.destroyed || client.res.writableEnded) {
+          removeLiveClient(client.id, 'write:closed');
+          continue;
+        }
+        const ok = client.res.write(chunk);
+        client.bytesWritten += chunk.length;
+        client.lastWriteAt = new Date();
+        if (!ok) client.backpressureCount += 1;
+      } catch (err) {
+        liveLastError = err.message;
+        removeLiveClient(client.id, `write-error:${err.message}`);
+      }
     }
   });
   liveEncoder.stderr.on('data', chunk => {
@@ -121,8 +177,10 @@ function startLiveEncoder() {
     console.warn(`[live-stream] ffmpeg stopped with code ${code}`);
     liveEncoder = null;
     liveEncoderStartedAt = null;
-    for (const res of liveClients) {
-      if (!res.destroyed) res.end();
+    for (const client of liveClients.values()) {
+      try {
+        if (!client.res.destroyed && !client.res.writableEnded) client.res.end();
+      } catch {}
     }
     liveClients.clear();
   });
@@ -141,12 +199,15 @@ function scheduleLiveEncoderStop() {
 }
 
 function liveStreamStatus() {
+  pruneLiveClients('status');
   return {
     ok: true,
     source: LIVE_STREAM_SOURCE,
     bitrate: LIVE_STREAM_BITRATE,
     requireTailscale: LIVE_STREAM_REQUIRE_TAILSCALE,
+    maxClientAgeSeconds: Math.floor(LIVE_STREAM_CLIENT_MAX_MS / 1000),
     clients: liveClients.size,
+    clientDetails: liveClientDetails(),
     encoderRunning: !!liveEncoder,
     startedAt: liveEncoderStartedAt?.toISOString() || null,
     bytes: liveBytes,
@@ -182,12 +243,26 @@ function handleLiveMp3(req, res) {
     'icy-name': 'PR Personal Radio',
     'icy-metaint': '0',
   });
-  liveClients.add(res);
+  const id = ++liveClientSeq;
+  const client = {
+    id,
+    res,
+    remoteAddress: normalizeRemoteAddress(req),
+    userAgent: String(req.headers['user-agent'] || '').slice(0, 160),
+    connectedAt: new Date(),
+    bytesWritten: 0,
+    lastWriteAt: null,
+    backpressureCount: 0,
+  };
+  liveClients.set(id, client);
+  console.log(`[live-stream] client #${id} connected from ${client.remoteAddress} ${client.userAgent}`);
   startLiveEncoder();
-  req.on('close', () => {
-    liveClients.delete(res);
-    scheduleLiveEncoderStop();
-  });
+  const cleanup = reason => removeLiveClient(id, reason);
+  req.on('close', () => cleanup('request-close'));
+  req.on('aborted', () => cleanup('request-aborted'));
+  req.on('error', err => cleanup(`request-error:${err.message}`));
+  res.on('close', () => cleanup('response-close'));
+  res.on('error', err => cleanup(`response-error:${err.message}`));
 }
 
 function send(res, status, headers, body = '') {

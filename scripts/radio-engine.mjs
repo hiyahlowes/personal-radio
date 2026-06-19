@@ -158,6 +158,7 @@ const DEFAULT_SETTINGS = {
   fishVoiceIdDe: process.env.FISH_AUDIO_VOICE_ID_DE || process.env.FISH_AUDIO_VOICE_ID || '',
   autoSuspendWhenNoListeners: true,
   noListenerGraceSeconds: 30,
+  streamListenerMaxAgeMinutes: 180,
   newSessionAfterMinutes: 180,
   resumeWithLikedSong: true,
   sessionIntroAfterFirstSong: true,
@@ -260,6 +261,7 @@ const listenerState = {
   activeOutputs: [],
   outputDetails: [],
   liveStreamClients: null,
+  freshLiveStreamClients: null,
   lastCheckedAt: null,
   lastHeardAt: null,
   graceStartedAt: null,
@@ -501,6 +503,7 @@ function buildListenerStatus() {
     silenceDurationSeconds,
     autoSuspendWhenNoListeners: engineSettings.autoSuspendWhenNoListeners !== false,
     noListenerGraceSeconds: Math.max(0, Number(engineSettings.noListenerGraceSeconds ?? 30)),
+    streamListenerMaxAgeMinutes: Math.max(1, streamListenerMaxAgeMinutes()),
     newSessionAfterMinutes: Number(engineSettings.newSessionAfterMinutes ?? 180),
     resumeWillStartNewSession: listenerState.mode === 'suspended'
       ? silenceDurationSeconds >= thresholdSeconds
@@ -2635,6 +2638,11 @@ function isStreamOutput(output) {
   return /stream/i.test(output.name || '') || /personal_radio_stream/i.test(output.sink || '');
 }
 
+function streamListenerMaxAgeMinutes() {
+  const minutes = Number(engineSettings.streamListenerMaxAgeMinutes ?? 180);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : 180;
+}
+
 async function fetchLiveStreamStatus() {
   try {
     const res = await fetch(`http://127.0.0.1:${APP_PORT}/api/live-stream/status`, {
@@ -2656,19 +2664,26 @@ async function inspectActiveListeners() {
   );
   const hasStreamOutput = OUTPUTS.some(isStreamOutput);
   const liveStatus = hasStreamOutput ? await fetchLiveStreamStatus() : null;
+  const streamMaxAgeSeconds = Math.max(60, streamListenerMaxAgeMinutes() * 60);
   const details = OUTPUTS.map(output => {
     const sinkAvailable = sinkNames.has(output.sink);
     if (isStreamOutput(output)) {
       const clients = Number(liveStatus?.clients || 0);
+      const clientDetails = Array.isArray(liveStatus?.clientDetails) ? liveStatus.clientDetails : [];
+      const freshClients = clientDetails.length > 0
+        ? clientDetails.filter(client => Number(client.ageSeconds || 0) <= streamMaxAgeSeconds).length
+        : clients;
       return {
         name: output.name,
         sink: output.sink,
         kind: 'stream',
         sinkAvailable,
         clients,
-        active: sinkAvailable && clients > 0,
+        freshClients,
+        maxClientAgeSeconds: streamMaxAgeSeconds,
+        active: sinkAvailable && freshClients > 0,
         reason: sinkAvailable
-          ? clients > 0 ? 'stream-client' : 'no-stream-clients'
+          ? freshClients > 0 ? 'stream-client' : clients > 0 ? 'stale-stream-clients' : 'no-stream-clients'
           : 'sink-unavailable',
       };
     }
@@ -2688,6 +2703,9 @@ async function inspectActiveListeners() {
     activeOutputs,
     outputDetails: details,
     liveStreamClients: hasStreamOutput ? Number(liveStatus?.clients || 0) : null,
+    freshLiveStreamClients: hasStreamOutput
+      ? details.filter(d => d.kind === 'stream').reduce((sum, d) => sum + Number(d.freshClients || 0), 0)
+      : null,
     liveStreamStatus: liveStatus,
   };
 }
@@ -2698,6 +2716,7 @@ function applyListenerSnapshot(snapshot) {
   listenerState.activeOutputs = snapshot.activeOutputs;
   listenerState.outputDetails = snapshot.outputDetails;
   listenerState.liveStreamClients = snapshot.liveStreamClients;
+  listenerState.freshLiveStreamClients = snapshot.freshLiveStreamClients;
 
   if (snapshot.activeListeners > 0) {
     listenerState.lastHeardAt = snapshot.checkedAt;
@@ -3243,6 +3262,7 @@ const server = http.createServer(async (req, res) => {
         'fishVoiceIdDe',
         'autoSuspendWhenNoListeners',
         'noListenerGraceSeconds',
+        'streamListenerMaxAgeMinutes',
         'newSessionAfterMinutes',
         'resumeWithLikedSong',
         'sessionIntroAfterFirstSong',
