@@ -3391,6 +3391,68 @@ async function buildSessionIntroItem(request, starterSong) {
   };
 }
 
+function clearPendingPlaybackPlans() {
+  pausedResumeItem = null;
+  deferredResumeItem = null;
+  pendingModerationPromise = null;
+  pendingModerationPlan = null;
+  pendingPodcastIntroPromise = null;
+  pendingPodcastIntroKey = null;
+  pendingSessionIntroPromise = null;
+  sessionIntroSongKey = null;
+}
+
+async function startFreshRadioSession(reason = 'manual') {
+  const nowIso = new Date().toISOString();
+  clearPendingPlaybackPlans();
+  killAll();
+
+  currentItem = null;
+  startedAt = null;
+  currentPlaybackStartSeconds = 0;
+  playing = false;
+  paused = false;
+  itemWasKilled = true;
+  forcedNextItem = null;
+  nextMusicFadeInSeconds = 0;
+  songCount = 0;
+  podcastCount = 0;
+  podcastBreakSongsRemaining = 0;
+  podcastSessionActive = false;
+  podcastState.breakSongsRemaining = 0;
+  savePodcastState();
+
+  let starter = await pickSessionStarterSong();
+  if (!starter) {
+    if (queue.length === 0) await refillQueue();
+    const idx = queue.findIndex(t => !isBlocked(t));
+    if (idx >= 0) starter = queue.splice(idx, 1)[0];
+  } else {
+    queue = queue.filter(t => itemKey(t) !== itemKey(starter));
+  }
+  if (starter) forcedNextItem = { ...starter, sessionStarter: true };
+
+  sessionIntroRequest = {
+    suspendedAt: listenerState.suspendedAt,
+    resumedAt: nowIso,
+    suspendedSeconds: listenerState.silenceDurationSeconds || 0,
+    deferredResumeKind: null,
+    freshStart: true,
+    reason,
+  };
+
+  listenerState.mode = 'active';
+  listenerState.lastResumedAt = nowIso;
+  listenerState.lastSuspendDurationSeconds = 0;
+  listenerState.silenceDurationSeconds = 0;
+  listenerState.resumeWillStartNewSession = false;
+  listenerState.reason = null;
+
+  console.log(`[engine] fresh radio session requested (${reason})${starter ? ` with starter: ${starter.artist} — ${starter.title}` : ''}`);
+  broadcastStatus();
+  return starter;
+}
+
 function suspendForNoListeners(snapshot) {
   if (engineSettings.autoSuspendWhenNoListeners === false) return;
   if (paused || !playing || !currentItem) return;
@@ -3660,6 +3722,11 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/play') {
       if (paused) { paused = false; broadcastStatus(); }
       return send(res, 200, { ok: true, action: 'play', resume: pausedResumeItem });
+    }
+
+    if (url.pathname === '/api/restart') {
+      const starter = await startFreshRadioSession('remote-restart');
+      return send(res, 200, { ok: true, action: 'restart', starter });
     }
 
     if (url.pathname === '/api/toggle') {

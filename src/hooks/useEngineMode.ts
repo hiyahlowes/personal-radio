@@ -312,12 +312,17 @@ export function useEngineMode() {
     };
   }, [isRemote]);
 
-  const apiPost = useCallback((path: string, body?: unknown) => {
-    fetch(path, {
-      method: 'POST',
-      headers: body ? { 'content-type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-    }).catch(() => {});
+  const apiPost = useCallback(async (path: string, body?: unknown) => {
+    try {
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: body ? { 'content-type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      return response.json().catch(() => null);
+    } catch {
+      return null;
+    }
   }, []);
 
   const refreshSettings = useCallback(async () => {
@@ -420,6 +425,7 @@ export function useEngineMode() {
     engineNowPlaying: engineItemToRadioItem(status?.currentItem),
     skip:   () => apiPost('/api/skip'),
     play:   () => apiPost('/api/play'),
+    restart: () => apiPost('/api/restart'),
     pause:  () => apiPost('/api/pause'),
     toggle: () => apiPost('/api/toggle'),
     like:   () => apiPost('/api/like-current'),

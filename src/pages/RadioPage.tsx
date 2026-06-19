@@ -2038,7 +2038,7 @@ export function RadioPage() {
     remoteStreamAudioRef.current = null;
   }, []);
 
-  const startRemoteLivestream = useCallback(() => {
+  const ensureRemoteStreamAudio = useCallback(() => {
     let audio = remoteStreamAudioRef.current;
     if (!audio) {
       audio = new Audio();
@@ -2060,9 +2060,30 @@ export function RadioPage() {
       });
       remoteStreamAudioRef.current = audio;
     }
+    return audio;
+  }, []);
+
+  const unlockRemoteStreamAudio = useCallback(() => {
+    const audio = ensureRemoteStreamAudio();
+    const silent = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+    audio.src = silent;
+    audio.muted = true;
+    void audio.play().catch(() => {}).finally(() => {
+      audio.pause();
+      audio.muted = muted;
+      audio.removeAttribute('src');
+      audio.load();
+    });
+  }, [ensureRemoteStreamAudio, muted]);
+
+  const startRemoteLivestream = useCallback((options: { forceReload?: boolean } = {}) => {
+    const audio = ensureRemoteStreamAudio();
     audio.volume = muted ? 0 : volume;
     audio.muted = muted;
-    if (!audio.src || audio.ended) {
+    if (options.forceReload || !audio.src || audio.ended) {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
       audio.src = `/live.mp3?ts=${Date.now()}`;
     }
     setBuf(true);
@@ -2072,7 +2093,36 @@ export function RadioPage() {
       setRemoteStreamPlaying(false);
       setRemoteStreamError(err instanceof Error ? err.message : 'Livestream konnte nicht gestartet werden.');
     });
-  }, [muted, volume]);
+  }, [ensureRemoteStreamAudio, muted, volume]);
+
+  const primeRemoteStreamListener = useCallback(() => {
+    const controller = new AbortController();
+    fetch(`/live.mp3?prime=${Date.now()}`, { signal: controller.signal })
+      .then(async response => {
+        const reader = response.body?.getReader();
+        if (!reader) return;
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  const waitForRemoteOutput = useCallback(async () => {
+    const deadline = Date.now() + 18_000;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch('/api/status');
+        const status = await response.json();
+        const outputs = Object.values(status?.outputs || {}) as Array<{ playing?: boolean }>;
+        if (outputs.some(output => output?.playing)) return true;
+      } catch {}
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return false;
+  }, []);
 
   useEffect(() => {
     if (!IS_REMOTE) return;
@@ -2090,8 +2140,18 @@ export function RadioPage() {
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
     if (IS_REMOTE) {
-      startRemoteLivestream();
-      engineMode.play();
+      unlockRemoteStreamAudio();
+      const stopPrime = primeRemoteStreamListener();
+      setBuf(true);
+      void (async () => {
+        try {
+          await engineMode.play();
+          await waitForRemoteOutput();
+          startRemoteLivestream({ forceReload: true });
+        } finally {
+          stopPrime();
+        }
+      })();
       return;
     }
     console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
@@ -2159,7 +2219,24 @@ export function RadioPage() {
         advanceLoop();
       }
     }
-  }, [IS_REMOTE, engineMode, startRemoteLivestream, startRadio, advanceLoop]);
+  }, [IS_REMOTE, engineMode, unlockRemoteStreamAudio, primeRemoteStreamListener, waitForRemoteOutput, startRemoteLivestream, startRadio, advanceLoop]);
+
+  const handleFreshRestart = useCallback(() => {
+    if (!IS_REMOTE) return;
+    unlockRemoteStreamAudio();
+    stopRemoteLivestream();
+    const stopPrime = primeRemoteStreamListener();
+    setBuf(true);
+    void (async () => {
+      try {
+        await engineMode.restart();
+        await waitForRemoteOutput();
+        startRemoteLivestream({ forceReload: true });
+      } finally {
+        stopPrime();
+      }
+    })();
+  }, [IS_REMOTE, engineMode, unlockRemoteStreamAudio, stopRemoteLivestream, primeRemoteStreamListener, waitForRemoteOutput, startRemoteLivestream]);
 
   const handlePause = useCallback(() => {
     if (IS_REMOTE) {
@@ -3046,6 +3123,20 @@ export function RadioPage() {
                 className="hidden sm:block w-20 h-1" aria-label="Volume" />
             </div>
             <div className="flex items-center gap-1.5 sm:gap-3">
+              {IS_REMOTE && (
+                <button
+                  onClick={handleFreshRestart}
+                  disabled={isLoading}
+                  className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30"
+                  aria-label="Neu starten"
+                  title="Neu starten"
+                >
+                  <svg className="w-4 h-4 sm:w-5 sm:h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                    <path d="M21 3v6h-6"/>
+                  </svg>
+                </button>
+              )}
               <button onClick={handlePrev} disabled={isLoading} className="w-8 h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30" aria-label="Previous">
                 <svg className="w-4 h-4 sm:w-5 sm:h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
               </button>
