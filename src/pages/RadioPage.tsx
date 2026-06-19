@@ -2140,18 +2140,9 @@ export function RadioPage() {
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
     if (IS_REMOTE) {
-      unlockRemoteStreamAudio();
-      const stopPrime = primeRemoteStreamListener();
       setBuf(true);
-      void (async () => {
-        try {
-          await engineMode.play();
-          await waitForRemoteOutput();
-          startRemoteLivestream({ forceReload: true });
-        } finally {
-          stopPrime();
-        }
-      })();
+      startRemoteLivestream({ forceReload: true });
+      void engineMode.play();
       return;
     }
     console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
@@ -2219,24 +2210,15 @@ export function RadioPage() {
         advanceLoop();
       }
     }
-  }, [IS_REMOTE, engineMode, unlockRemoteStreamAudio, primeRemoteStreamListener, waitForRemoteOutput, startRemoteLivestream, startRadio, advanceLoop]);
+  }, [IS_REMOTE, engineMode, startRemoteLivestream, startRadio, advanceLoop]);
 
   const handleFreshRestart = useCallback(() => {
     if (!IS_REMOTE) return;
-    unlockRemoteStreamAudio();
     stopRemoteLivestream();
-    const stopPrime = primeRemoteStreamListener();
     setBuf(true);
-    void (async () => {
-      try {
-        await engineMode.restart();
-        await waitForRemoteOutput();
-        startRemoteLivestream({ forceReload: true });
-      } finally {
-        stopPrime();
-      }
-    })();
-  }, [IS_REMOTE, engineMode, unlockRemoteStreamAudio, stopRemoteLivestream, primeRemoteStreamListener, waitForRemoteOutput, startRemoteLivestream]);
+    startRemoteLivestream({ forceReload: true });
+    void engineMode.restart();
+  }, [IS_REMOTE, engineMode, stopRemoteLivestream, startRemoteLivestream]);
 
   const handlePause = useCallback(() => {
     if (IS_REMOTE) {
