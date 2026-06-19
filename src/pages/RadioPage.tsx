@@ -355,6 +355,7 @@ export function RadioPage() {
   const [callInMood, setCallInMood] = useState('');
   const [callInSending, setCallInSending] = useState(false);
   const [callInMessage, setCallInMessage] = useState('');
+  const [confirmBanTrackId, setConfirmBanTrackId] = useState<string | null>(null);
 
   // ── Episode management panel ──────────────────────────────────────────────
   const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
@@ -2171,11 +2172,22 @@ export function RadioPage() {
   const handleSelect = useCallback((i: number) => jumpTo(i, false), [jumpTo]);
 
   const handleDislike = useCallback((track: WavlakeTrack) => {
-    if (IS_REMOTE) { engineMode.ban(); return; }
+    if (IS_REMOTE) {
+      if (confirmBanTrackId !== track.id) {
+        setConfirmBanTrackId(track.id);
+        setTimeout(() => {
+          setConfirmBanTrackId(current => current === track.id ? null : current);
+        }, 3500);
+        return;
+      }
+      setConfirmBanTrackId(null);
+      engineMode.ban();
+      return;
+    }
     listenerMemory.recordSongDislike(track.id);
     setOrderedTracks(prev => prev.filter(t => t.id !== track.id));
     handleNext();
-  }, [handleNext, listenerMemory, IS_REMOTE, engineMode]);
+  }, [handleNext, listenerMemory, IS_REMOTE, engineMode, confirmBanTrackId]);
 
   const handlePodSkip = useCallback((deltaSecs: number) => {
     if (IS_REMOTE) return;
@@ -2766,7 +2778,7 @@ export function RadioPage() {
               )}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1">
+              <div className="flex items-center gap-2 sm:gap-3 mb-1">
                 <span className={`text-xs font-semibold uppercase tracking-widest ${nowPlaying?.kind === 'podcast' || nowPlaying?.kind === 'moderation' ? 'text-amber-400' : nowPlaying?.kind === 'music' && nowPlaying.track.isTopChart ? 'text-amber-400' : 'text-purple-400'}`}>
                   {nowPlaying?.kind === 'moderation'
                     ? 'Now Playing · Moderation'
@@ -2781,19 +2793,23 @@ export function RadioPage() {
                     <button
                       onClick={() => { likedTracks.toggle(nowPlaying.track); listenerMemory.recordSongLike(nowPlaying.track); if (IS_REMOTE) engineMode.like(); }}
                       aria-label={likedTracks.isLiked(nowPlaying.track.id) ? 'Unlike track' : 'Like track'}
-                      className="transition-colors"
+                      className="w-9 h-9 sm:w-8 sm:h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center transition-colors hover:bg-pink-500/10 hover:border-pink-400/30"
                     >
-                      <svg className={`w-3.5 h-3.5 transition-colors ${likedTracks.isLiked(nowPlaying.track.id) ? 'text-pink-400 fill-pink-400' : 'text-white/25 fill-none stroke-white/25'}`} viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                      <svg className={`w-4 h-4 transition-colors ${likedTracks.isLiked(nowPlaying.track.id) ? 'text-pink-400 fill-pink-400' : 'text-white/35 fill-none stroke-white/35'}`} viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                         <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
                       </svg>
                     </button>
                     <button
                       onClick={() => handleDislike(nowPlaying.track)}
-                      aria-label="Never play this track again"
-                      title="Never play this track again"
-                      className="text-white/20 hover:text-red-400 transition-colors"
+                      aria-label={confirmBanTrackId === nowPlaying.track.id ? 'Confirm ban track' : 'Send track to graveyard'}
+                      title={confirmBanTrackId === nowPlaying.track.id ? 'Tap again to send to graveyard' : 'Send to graveyard'}
+                      className={`h-9 sm:h-8 px-3 rounded-full border text-xs font-semibold transition-colors ${
+                        confirmBanTrackId === nowPlaying.track.id
+                          ? 'bg-red-500/20 border-red-400/50 text-red-200'
+                          : 'bg-white/5 border-white/10 text-white/35 hover:text-red-300 hover:border-red-400/30 hover:bg-red-500/10'
+                      }`}
                     >
-                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      {confirmBanTrackId === nowPlaying.track.id ? 'Confirm' : 'Graveyard'}
                     </button>
                     <a href={`https://wavlake.com/track/${nowPlaying.track.id}`} target="_blank" rel="noopener noreferrer" className="text-white/20 hover:text-purple-400 transition-colors">
                       <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>

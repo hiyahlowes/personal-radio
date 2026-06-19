@@ -569,6 +569,31 @@ export function SettingsPage() {
     setTimeout(() => setRestoredId(null), 2000);
   };
 
+  const unlikeVisibleTrack = async (trackId: string) => {
+    if (engineMode.isRemote) {
+      engineMode.unlikeTrack(trackId);
+      setEngineLiked(prev => prev.filter(track => track.id !== trackId));
+      setTimeout(refreshEngineLiked, 500);
+      return;
+    }
+    unlike(trackId);
+  };
+
+  const resurrectVisibleTrack = async (track: EngineBlockedTrack) => {
+    if (engineMode.isRemote) {
+      const value = track.value || track.id;
+      engineMode.unblockTrack(value);
+      setEngineBlocked(prev => prev.filter(row => row.id !== track.id && row.value !== value));
+      setRestoredId(track.id);
+      setTimeout(() => {
+        setRestoredId(null);
+        refreshEngineBlocked();
+      }, 900);
+      return;
+    }
+    resurrect(track.id);
+  };
+
   const songInfo = (trackId: string) =>
     [...graveyardMemory.playedSongs].reverse().find(s => s.id === trackId);
 
@@ -1233,17 +1258,13 @@ export function SettingsPage() {
                               <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
                             </svg>
                           </a>
-                          {!engineMode.isRemote && (
-                            <button
-                              onClick={() => unlike(track.id)}
-                              aria-label="Unlike track"
-                              className="flex-shrink-0 p-1.5 rounded-full text-pink-400 hover:text-red-400 hover:bg-red-900/20 transition-colors"
-                            >
-                              <svg className="w-4 h-4 fill-pink-400" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                                <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
-                              </svg>
-                            </button>
-                          )}
+                          <button
+                            onClick={() => unlikeVisibleTrack(track.id)}
+                            aria-label="Remove from liked songs"
+                            className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-pink-300 border border-pink-400/20 hover:text-red-300 hover:border-red-400/35 hover:bg-red-900/20 transition-colors"
+                          >
+                            Dislike
+                          </button>
                         </div>
                       );
                     })}
@@ -1308,30 +1329,31 @@ export function SettingsPage() {
                           <p className="text-sm font-medium text-white/50 truncate">{track.title || track.value}</p>
                           {track.artist && <p className="text-xs text-white/25 truncate">{track.artist}</p>}
                         </div>
-                        {engineMode.isRemote ? (
-                          track.url ? (
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          {track.url && (
                             <a
                               href={track.url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/35 border border-white/10 hover:text-white/60 transition-all"
+                              className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white/35 border border-white/10 hover:text-white/60 transition-all"
                             >
                               URL
                             </a>
-                          ) : null
-                        ) : justRestored ? (
+                          )}
+                          {justRestored ? (
                           <span className="flex-shrink-0 text-xs text-emerald-400 font-semibold flex items-center gap-1">
                             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
                             Restored
                           </span>
-                        ) : (
+                          ) : (
                           <button
-                            onClick={() => resurrect(track.id)}
+                            onClick={() => resurrectVisibleTrack(track)}
                             className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-white/40 border border-white/10 hover:border-emerald-500/40 hover:text-emerald-300 hover:bg-emerald-900/20 transition-all"
                           >
-                            🧟 Resurrect
+                            Resurrect
                           </button>
-                        )}
+                          )}
+                        </div>
                       </div>
                     );
                   })}

@@ -312,6 +312,24 @@ function blockTrack(item) {
   } catch(e) { console.error('[engine] blockTrack:', e.message); }
 }
 
+function unblockTrack(value) {
+  try {
+    const needle = String(value || '').trim();
+    if (!needle || !existsSync(BLOCKLIST_FILE)) return loadBlockedRows();
+    const rows = readFileSync(BLOCKLIST_FILE, 'utf8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+    const next = rows.filter(row => row !== needle);
+    mkdirSync(path.dirname(BLOCKLIST_FILE), { recursive: true });
+    writeFileSync(BLOCKLIST_FILE, next.length ? `${next.join('\n')}\n` : '');
+    return loadBlockedRows();
+  } catch(e) {
+    console.error('[engine] unblockTrack:', e.message);
+    return loadBlockedRows();
+  }
+}
+
 function loadBlockedRows() {
   try {
     if (!existsSync(BLOCKLIST_FILE)) return [];
@@ -366,6 +384,16 @@ async function saveLiked(item) {
     await writeFile(LIKED_FILE, JSON.stringify(liked, null, 2));
   }
   return liked;
+}
+
+async function removeLikedTrack(trackId) {
+  const id = String(trackId || '').trim();
+  if (!id) return loadLiked();
+  const liked = await loadLiked();
+  const next = liked.filter(t => String(t.id || '') !== id);
+  await mkdir(path.dirname(LIKED_FILE), { recursive: true });
+  await writeFile(LIKED_FILE, JSON.stringify(next, null, 2));
+  return next;
 }
 
 function likedToExportRows(liked) {
@@ -3107,6 +3135,25 @@ const server = http.createServer(async (req, res) => {
       memorySafe('record track liked', () => recordTrackLiked(currentItem));
       broadcastStatus();
       return send(res, 200, { ok: true, action: 'like', track: currentItem, totalLiked: liked.length });
+    }
+
+    if (url.pathname === '/api/unlike-track') {
+      const body = await readJsonBody(req);
+      const id = String(body.id || body.trackId || '').trim();
+      if (!id) return send(res, 400, { error: 'Missing track id' });
+      const liked = await removeLikedTrack(id);
+      if (engineSettings.musicSource === 'prLikedSongs') queue = queue.filter(t => String(t.id || '') !== id);
+      broadcastStatus();
+      return send(res, 200, { ok: true, action: 'unlike-track', id, liked });
+    }
+
+    if (url.pathname === '/api/unblock-track') {
+      const body = await readJsonBody(req);
+      const value = String(body.value || body.id || '').trim();
+      if (!value) return send(res, 400, { error: 'Missing blocklist value' });
+      const blocked = unblockTrack(value);
+      broadcastStatus();
+      return send(res, 200, { ok: true, action: 'unblock-track', value, blocked });
     }
 
     if (url.pathname === '/api/call-in') {

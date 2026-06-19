@@ -424,6 +424,8 @@ export function useEngineMode() {
     toggle: () => apiPost('/api/toggle'),
     like:   () => apiPost('/api/like-current'),
     ban:    () => apiPost('/api/ban-current'),
+    unlikeTrack: (id: string) => apiPost('/api/unlike-track', { id }),
+    unblockTrack: (value: string) => apiPost('/api/unblock-track', { value }),
     boost:  (amountSats?: number) => apiPost('/api/boost-current', { amountSats }),
     setSatStreaming: (enabled: boolean) => apiPost('/api/sat-streaming', { enabled }),
     setVolume: (output: string, volume: number) => apiPost('/api/volume', { output, volume }),
