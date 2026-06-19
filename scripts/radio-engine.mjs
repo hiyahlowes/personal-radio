@@ -74,6 +74,7 @@ const LIKED_FILE     = path.join(DATA_DIR, 'liked-tracks.json');
 const SETTINGS_FILE  = path.join(DATA_DIR, 'settings.json');
 const PODCAST_STATE_FILE = path.join(DATA_DIR, 'podcast-state.json');
 const PODCAST_TRANSCRIPT_DIR = path.join(DATA_DIR, 'podcast-transcripts');
+const AUDIO_ANALYSIS_FILE = path.join(DATA_DIR, 'audio-analysis.json');
 const TMP_DIR        = path.join(tmpdir(), 'personal-radio');
 const PUBLIC_DIR     = path.join(process.cwd(), 'public');
 const MODERATOR_SOUL_FILE = process.env.PERSONAL_RADIO_MODERATOR_SOUL || path.join(process.cwd(), 'config', 'moderator-soul.md');
@@ -110,6 +111,9 @@ const FFPLAY_AUDIO_FILTER     = process.env.PERSONAL_RADIO_FFPLAY_AUDIO_FILTER |
 const TTS_TAIL_PAD_SECONDS    = Number(process.env.PERSONAL_RADIO_TTS_TAIL_PAD_SECONDS || 0.6);
 const DEFAULT_CROSSFADE_SECONDS = Number(process.env.PERSONAL_RADIO_CROSSFADE_SECONDS || 5);
 const DEFAULT_MODERATION_DUCK_SECONDS = Number(process.env.PERSONAL_RADIO_MODERATION_DUCK_SECONDS || 4);
+const AUDIO_ANALYSIS_VERSION = 1;
+const DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS = Number(process.env.PERSONAL_RADIO_AUDIO_ANALYSIS_WINDOW_SECONDS || 45);
+const AUDIO_ANALYSIS_PREFETCH_LIMIT = Number(process.env.PERSONAL_RADIO_AUDIO_ANALYSIS_PREFETCH_LIMIT || 4);
 const PODCAST_INTRO_JINGLE    = process.env.PERSONAL_RADIO_PODCAST_INTRO_JINGLE || path.join(PUBLIC_DIR, 'podcast-intro.mp3');
 const PODCAST_RETURN_JINGLE   = process.env.PERSONAL_RADIO_PODCAST_RETURN_JINGLE || path.join(PUBLIC_DIR, 'studio-return.mp3');
 const PODCAST_RESOLVED_URL_TTL_MS = Number(process.env.PERSONAL_RADIO_PODCAST_RESOLVED_URL_TTL_MS || 45 * 60_000);
@@ -134,6 +138,8 @@ const DEFAULT_SETTINGS = {
   crossfadeSeconds: Number.isFinite(DEFAULT_CROSSFADE_SECONDS) && DEFAULT_CROSSFADE_SECONDS > 0 ? DEFAULT_CROSSFADE_SECONDS : 5,
   moderationDuckingEnabled: true,
   moderationDuckSeconds: Number.isFinite(DEFAULT_MODERATION_DUCK_SECONDS) && DEFAULT_MODERATION_DUCK_SECONDS > 0 ? DEFAULT_MODERATION_DUCK_SECONDS : 4,
+  audioAnalysisEnabled: true,
+  audioAnalysisWindowSeconds: Number.isFinite(DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS) && DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS > 0 ? DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS : 45,
   musicSource: 'topCharts',
   wavlakePlaylistId: '',
   wavlakePlaylistTitle: '',
@@ -191,6 +197,28 @@ function loadSettings() {
 function saveSettings(next) {
   mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
   writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2));
+}
+
+function loadAudioAnalysisCache() {
+  try {
+    if (!existsSync(AUDIO_ANALYSIS_FILE)) return { version: AUDIO_ANALYSIS_VERSION, tracks: {} };
+    const parsed = JSON.parse(readFileSync(AUDIO_ANALYSIS_FILE, 'utf8'));
+    if (parsed?.version !== AUDIO_ANALYSIS_VERSION || !parsed.tracks || typeof parsed.tracks !== 'object') {
+      return { version: AUDIO_ANALYSIS_VERSION, tracks: {} };
+    }
+    return parsed;
+  } catch {
+    return { version: AUDIO_ANALYSIS_VERSION, tracks: {} };
+  }
+}
+
+function saveAudioAnalysisCache() {
+  try {
+    mkdirSync(path.dirname(AUDIO_ANALYSIS_FILE), { recursive: true });
+    writeFileSync(AUDIO_ANALYSIS_FILE, JSON.stringify(audioAnalysisCache, null, 2));
+  } catch (err) {
+    console.warn(`[engine] audio analysis cache save failed: ${err.message}`);
+  }
 }
 
 function loadModeratorSoul() {
@@ -277,6 +305,8 @@ let podcastCount = 0;   // naturally completed songs since last podcast
 let podcastBreakSongsRemaining = 0; // music tracks required after a podcast segment
 let itemWasKilled = false; // true when current item was skip/ban/pause-killed
 let engineSettings = loadSettings();
+let audioAnalysisCache = loadAudioAnalysisCache();
+const audioAnalysisInFlight = new Map();
 let forcedNextItem = null;
 let podcastState = loadPodcastState();
 podcastBreakSongsRemaining = Number(podcastState.breakSongsRemaining || 0);
@@ -710,6 +740,199 @@ function shuffle(arr) {
   return a;
 }
 
+function audioAnalysisWindowSeconds() {
+  const seconds = Number(engineSettings.audioAnalysisWindowSeconds ?? 45);
+  return Number.isFinite(seconds) && seconds > 5 ? Math.min(120, Math.max(15, seconds)) : 45;
+}
+
+function audioAnalysisKey(item) {
+  const raw = [
+    item?.id || '',
+    item?.liveUrl || '',
+    item?.artist || '',
+    item?.title || '',
+    Number(item?.duration || 0) || '',
+  ].join('|');
+  return createHash('sha1').update(raw).digest('hex');
+}
+
+function getAudioAnalysis(item) {
+  const key = audioAnalysisKey(item);
+  const row = audioAnalysisCache.tracks?.[key];
+  if (!row || row.version !== AUDIO_ANALYSIS_VERSION) return null;
+  return row;
+}
+
+function normalizeAnalysisTime(value, duration, windowSeconds) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (Number.isFinite(duration) && duration > 0 && n > Math.max(windowSeconds + 5, duration - windowSeconds - 2)) {
+    return Math.min(duration, n);
+  }
+  const base = Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - windowSeconds) : 0;
+  return base + n;
+}
+
+function parseSilenceStart(text, duration, windowSeconds) {
+  const matches = [...String(text || '').matchAll(/silence_start:\s*([0-9.]+)/g)]
+    .map(m => normalizeAnalysisTime(Number(m[1]), duration, windowSeconds))
+    .filter(n => Number.isFinite(n));
+  return matches.length ? Math.min(...matches) : null;
+}
+
+function parseRmsPoints(text, duration, windowSeconds) {
+  const lines = String(text || '').split(/\r?\n/);
+  const points = [];
+  let currentTime = null;
+  for (const line of lines) {
+    const timeMatch = line.match(/pts_time:([0-9.]+)/);
+    if (timeMatch) currentTime = normalizeAnalysisTime(Number(timeMatch[1]), duration, windowSeconds);
+    const rmsMatch = line.match(/lavfi\.astats\.Overall\.RMS_level=(-?(?:inf|[0-9.]+))/i);
+    if (rmsMatch && Number.isFinite(currentTime)) {
+      const rms = /^-?inf$/i.test(rmsMatch[1]) ? -120 : Number(rmsMatch[1]);
+      if (Number.isFinite(rms)) points.push({ time: currentTime, rms });
+    }
+  }
+  return points;
+}
+
+function detectFadeStart(points, duration) {
+  if (!points.length || !Number.isFinite(duration) || duration <= 0) return null;
+  const usable = points.filter(p => Number.isFinite(p.rms) && p.rms > -90);
+  if (usable.length < 6) return null;
+  const loud = usable
+    .slice(0, Math.max(3, Math.floor(usable.length * 0.45)))
+    .map(p => p.rms)
+    .sort((a, b) => b - a);
+  const reference = loud[Math.floor(Math.min(loud.length - 1, loud.length * 0.35))] ?? -24;
+  const threshold = Math.min(-32, reference - 10);
+  const tailLow = [];
+  for (let i = usable.length - 1; i >= 0; i--) {
+    if (usable[i].rms <= threshold) tailLow.unshift(usable[i]);
+    else if (tailLow.length >= 3) break;
+    else tailLow.length = 0;
+  }
+  if (tailLow.length >= 3) return tailLow[0].time;
+
+  const last = usable[usable.length - 1];
+  if (last.rms <= reference - 14) {
+    const candidate = usable.find(p => p.time >= duration - 18 && p.rms <= reference - 8);
+    if (candidate) return candidate.time;
+  }
+  return null;
+}
+
+function buildOutroRecommendation({ item, silenceStartSeconds, fadeStartSeconds }) {
+  const duration = Number(item?.duration || 0);
+  const fade = crossfadeSeconds();
+  if (!Number.isFinite(duration) || duration <= fade + 8) return null;
+  const fallback = Math.max(0, duration - fade);
+  let recommended = fallback;
+  let reason = 'duration';
+  if (Number.isFinite(silenceStartSeconds)) {
+    recommended = Math.min(recommended, Math.max(0, silenceStartSeconds - Math.min(fade, 3)));
+    reason = 'silence';
+  }
+  if (Number.isFinite(fadeStartSeconds)) {
+    const fadeCandidate = Math.max(duration - 14, Math.min(duration - fade, fadeStartSeconds + 2));
+    if (fadeCandidate < recommended) {
+      recommended = fadeCandidate;
+      reason = 'fade';
+    }
+  }
+  recommended = Math.max(duration - 16, Math.min(duration - 1.5, recommended));
+  return {
+    transitionStartSeconds: recommended,
+    reason,
+  };
+}
+
+async function analyzeTrackOutro(item, sourceUrl = item?.liveUrl) {
+  if (engineSettings.audioAnalysisEnabled === false) return null;
+  if (!sourceUrl || item?.kind !== 'music') return null;
+  // Remote HTTP seeking is often slow or unsupported. The production music path
+  // caches tracks locally before playback, so analyse that local file instead.
+  if (/^https?:\/\//i.test(sourceUrl) && CACHE_HTTP_AUDIO) return null;
+  const key = audioAnalysisKey(item);
+  const cached = getAudioAnalysis(item);
+  if (cached) return cached;
+  if (audioAnalysisInFlight.has(key)) return audioAnalysisInFlight.get(key);
+
+  const promise = (async () => {
+    const duration = Number(item.duration || 0);
+    if (!Number.isFinite(duration) || duration < 30) return null;
+    const windowSeconds = Math.min(audioAnalysisWindowSeconds(), Math.max(15, duration - 1));
+    const input = sourceUrl;
+    try {
+      const silence = await runCommand('ffmpeg', [
+        '-hide_banner',
+        '-nostdin',
+        '-sseof', `-${Math.round(windowSeconds)}`,
+        '-i', input,
+        '-vn',
+        '-af', 'silencedetect=n=-42dB:d=0.8',
+        '-f', 'null',
+        '-',
+      ], 18_000);
+      const silenceText = `${silence.stdout || ''}\n${silence.stderr || ''}`;
+      const silenceStartSeconds = parseSilenceStart(silenceText, duration, windowSeconds);
+
+      const rms = await runCommand('ffmpeg', [
+        '-hide_banner',
+        '-nostdin',
+        '-sseof', `-${Math.round(windowSeconds)}`,
+        '-i', input,
+        '-vn',
+        '-af', 'aresample=8000,asetnsamples=n=8000,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level',
+        '-f', 'null',
+        '-',
+      ], 22_000);
+      if (!silence.ok && !rms.ok) {
+        throw new Error(`ffmpeg analysis failed: ${(rms.stderr || silence.stderr || '').slice(0, 240)}`);
+      }
+      const rmsText = `${rms.stdout || ''}\n${rms.stderr || ''}`;
+      const rmsPoints = parseRmsPoints(rmsText, duration, windowSeconds);
+      const fadeStartSeconds = detectFadeStart(rmsPoints, duration);
+      const recommendation = buildOutroRecommendation({ item, silenceStartSeconds, fadeStartSeconds });
+      const row = {
+        version: AUDIO_ANALYSIS_VERSION,
+        key,
+        trackId: item.id || '',
+        title: item.title || '',
+        artist: item.artist || '',
+        durationSeconds: duration,
+        windowSeconds,
+        silenceStartSeconds,
+        fadeStartSeconds,
+        transitionStartSeconds: recommendation?.transitionStartSeconds ?? Math.max(0, duration - crossfadeSeconds()),
+        transitionReason: recommendation?.reason || 'duration',
+        analyzedAt: new Date().toISOString(),
+      };
+      audioAnalysisCache.tracks[key] = row;
+      saveAudioAnalysisCache();
+      console.log(`[engine] audio analysis cached: ${item.artist} — ${item.title} transition=${Math.round(row.transitionStartSeconds)}s reason=${row.transitionReason}`);
+      return row;
+    } catch (err) {
+      console.warn(`[engine] audio analysis failed for ${item.artist} — ${item.title}: ${err.message}`);
+      return null;
+    } finally {
+      audioAnalysisInFlight.delete(key);
+    }
+  })();
+  audioAnalysisInFlight.set(key, promise);
+  return promise;
+}
+
+function prefetchAudioAnalysis(items = []) {
+  if (engineSettings.audioAnalysisEnabled === false) return;
+  const limit = Number.isFinite(AUDIO_ANALYSIS_PREFETCH_LIMIT) && AUDIO_ANALYSIS_PREFETCH_LIMIT > 0 ? AUDIO_ANALYSIS_PREFETCH_LIMIT : 4;
+  for (const item of items.filter(t => t?.kind === 'music').slice(0, limit)) {
+    if (!getAudioAnalysis(item) && item.liveUrl && !/^https?:\/\//i.test(item.liveUrl)) {
+      analyzeTrackOutro(item).catch(() => {});
+    }
+  }
+}
+
 async function refillQueue() {
   let tracks;
   try {
@@ -751,6 +974,7 @@ async function refillQueue() {
   catch(e) { console.error('[engine] music source fetch failed permanently:', e.message); return false; }
   queue = shuffle(tracks).filter(t => !isBlocked(t));
   console.log(`[engine] queue ready: ${queue.length} music tracks`);
+  prefetchAudioAnalysis(queue);
   return queue.length > 0;
 }
 
@@ -2009,29 +2233,50 @@ function musicCanDuckIntoModeration(item, resumeStartSeconds = 0) {
   return Number.isFinite(duration) && duration > fade + 8;
 }
 
+function transitionStartFromAnalysis(item, fadeSeconds) {
+  const duration = Number(item?.duration || 0);
+  const fallback = Math.max(0, duration - fadeSeconds);
+  if (!Number.isFinite(duration) || duration <= fadeSeconds + 8) return { startSeconds: fallback, reason: 'duration' };
+  const analysis = getAudioAnalysis(item);
+  if (!analysis) {
+    return { startSeconds: fallback, reason: 'duration' };
+  }
+  const analyzedStart = Number(analysis.transitionStartSeconds);
+  if (!Number.isFinite(analyzedStart)) return { startSeconds: fallback, reason: 'duration' };
+  const clamped = Math.max(duration - 16, Math.min(duration - 1.5, analyzedStart));
+  return {
+    startSeconds: clamped,
+    reason: analysis.transitionReason || 'analysis',
+  };
+}
+
 function musicCrossfadeOptions(item, resumeStartSeconds = 0) {
   if (musicCanDuckIntoModeration(item, resumeStartSeconds)) {
     const fade = moderationDuckSeconds();
-    const duration = Number(item.duration || 0);
-    const fadeOutStartSeconds = Math.max(0, duration - fade);
+    const transition = transitionStartFromAnalysis(item, fade);
     return {
-      fadeOutStartSeconds,
+      fadeOutStartSeconds: transition.startSeconds,
       fadeOutSeconds: fade,
-      resolveEarlyAfterMs: Math.max(1000, fadeOutStartSeconds * 1000),
+      resolveEarlyAfterMs: Math.max(1000, transition.startSeconds * 1000),
       allowOverlapTail: true,
       transitionReason: 'music-to-moderation-duck',
+      transitionDetail: transition.reason,
+      useOutroAnalysis: true,
+      analysisItem: item,
     };
   }
   if (!musicCanCrossfade(item, resumeStartSeconds)) return {};
   const fade = crossfadeSeconds();
-  const duration = Number(item.duration || 0);
-  const fadeOutStartSeconds = Math.max(0, duration - fade);
+  const transition = transitionStartFromAnalysis(item, fade);
   return {
-    fadeOutStartSeconds,
+    fadeOutStartSeconds: transition.startSeconds,
     fadeOutSeconds: fade,
-    resolveEarlyAfterMs: Math.max(1000, fadeOutStartSeconds * 1000),
+    resolveEarlyAfterMs: Math.max(1000, transition.startSeconds * 1000),
     allowOverlapTail: true,
     transitionReason: 'music-crossfade',
+    transitionDetail: transition.reason,
+    useOutroAnalysis: true,
+    analysisItem: item,
   };
 }
 
@@ -2273,6 +2518,29 @@ async function playOnOutput(url, output, token, options = {}) {
   }
 
   const { playUrl, tmpFile: playbackTmpFile } = await cacheHttpAudioForStablePlayback(url, options);
+  if (token.cancelled) {
+    if (playbackTmpFile) { try { unlinkSync(playbackTmpFile); } catch {} }
+    outputState[output.name].playing = false;
+    outputState[output.name].pid = null;
+    return { output: output.name, code: -1, reason: 'cancelled' };
+  }
+
+  if (options.useOutroAnalysis
+      && options.analysisItem?.kind === 'music'
+      && Number.isFinite(options.fadeOutSeconds)
+      && Number.isFinite(options.fadeOutStartSeconds)) {
+    await analyzeTrackOutro(options.analysisItem, playUrl);
+    if (token.cancelled) {
+      if (playbackTmpFile) { try { unlinkSync(playbackTmpFile); } catch {} }
+      outputState[output.name].playing = false;
+      outputState[output.name].pid = null;
+      return { output: output.name, code: -1, reason: 'cancelled' };
+    }
+    const transition = transitionStartFromAnalysis(options.analysisItem, options.fadeOutSeconds);
+    options.fadeOutStartSeconds = transition.startSeconds;
+    options.resolveEarlyAfterMs = Math.max(1000, transition.startSeconds * 1000);
+    options.transitionDetail = transition.reason;
+  }
 
   return new Promise(resolve => {
     const env = {
@@ -2332,7 +2600,8 @@ async function playOnOutput(url, output, token, options = {}) {
     if (Number.isFinite(options.resolveEarlyAfterMs) && options.resolveEarlyAfterMs > 1000) {
       earlyResolve = setTimeout(() => {
         const reason = options.transitionReason || 'crossfade-overlap';
-        console.log(`[engine] ${reason} handoff on ${output.name}`);
+        const detail = options.transitionDetail ? ` (${options.transitionDetail})` : '';
+        console.log(`[engine] ${reason}${detail} handoff on ${output.name}`);
         finish({ output: output.name, code: 0, reason });
       }, options.resolveEarlyAfterMs);
     }
@@ -2526,6 +2795,7 @@ async function radioLoop() {
 
     console.log(`[engine] PLAY [${nextItem.kind}] ${nextItem.artist} — ${nextItem.title}`);
     if (nextItem.kind === 'music') {
+      prefetchAudioAnalysis([nextItem, ...queue]);
       memorySafe('record track started', () => {
         recordTrackStarted(nextItem);
         rememberRecentTrack(nextItem, { event: 'started' });
@@ -3475,6 +3745,8 @@ const server = http.createServer(async (req, res) => {
         'crossfadeSeconds',
         'moderationDuckingEnabled',
         'moderationDuckSeconds',
+        'audioAnalysisEnabled',
+        'audioAnalysisWindowSeconds',
         'musicSource',
         'wavlakePlaylistId',
         'wavlakePlaylistTitle',
