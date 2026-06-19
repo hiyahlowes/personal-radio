@@ -358,6 +358,7 @@ export function RadioPage() {
   const [confirmBanTrackId, setConfirmBanTrackId] = useState<string | null>(null);
   const remoteStreamAudioRef = useRef<HTMLAudioElement | null>(null);
   const [remoteStreamError, setRemoteStreamError] = useState('');
+  const [remoteStreamPlaying, setRemoteStreamPlaying] = useState(false);
 
   // ── Episode management panel ──────────────────────────────────────────────
   const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
@@ -2029,6 +2030,7 @@ export function RadioPage() {
 
   const stopRemoteLivestream = useCallback(() => {
     const audio = remoteStreamAudioRef.current;
+    setRemoteStreamPlaying(false);
     if (!audio) return;
     audio.pause();
     audio.removeAttribute('src');
@@ -2045,11 +2047,15 @@ export function RadioPage() {
       audio.addEventListener('playing', () => {
         setBuf(false);
         setRemoteStreamError('');
+        setRemoteStreamPlaying(true);
       });
       audio.addEventListener('waiting', () => setBuf(true));
       audio.addEventListener('stalled', () => setBuf(true));
+      audio.addEventListener('pause', () => setRemoteStreamPlaying(false));
+      audio.addEventListener('ended', () => setRemoteStreamPlaying(false));
       audio.addEventListener('error', () => {
         setBuf(false);
+        setRemoteStreamPlaying(false);
         setRemoteStreamError('Livestream konnte nicht gestartet werden.');
       });
       remoteStreamAudioRef.current = audio;
@@ -2063,6 +2069,7 @@ export function RadioPage() {
     setRemoteStreamError('');
     void audio.play().catch(err => {
       setBuf(false);
+      setRemoteStreamPlaying(false);
       setRemoteStreamError(err instanceof Error ? err.message : 'Livestream konnte nicht gestartet werden.');
     });
   }, [muted, volume]);
@@ -2528,6 +2535,7 @@ export function RadioPage() {
     for (const output of outputs) engineMode.setVolume(output, nextVolume);
   };
   const openCallInCount = engineMode.callIns?.filter(c => c.status === 'open').length ?? 0;
+  const mainControlIsPlaying = IS_REMOTE ? remoteStreamPlaying : playing;
   const submitCallIn = async () => {
     const text = callInText.trim();
     if (!text || callInSending) return;
@@ -3052,12 +3060,12 @@ export function RadioPage() {
                   <text x="12" y="14.5" textAnchor="middle" fontSize="5.5" fontWeight="bold" fill="currentColor">30</text>
                 </svg>
               </button>
-              <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || (!IS_REMOTE && orderedTracks.length === 0 && tracks.length === 0)}
+              <button onClick={mainControlIsPlaying ? handlePause : handlePlay} disabled={isLoading || (!IS_REMOTE && orderedTracks.length === 0 && tracks.length === 0)}
                 className="w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40"
-                aria-label={playing ? 'Pause' : 'Play'}>
+                aria-label={mainControlIsPlaying ? 'Pause' : 'Play'}>
                 {buffering && !isModerating
                   ? <svg className="w-5 h-5 text-white animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-                  : playing
+                  : mainControlIsPlaying
                     ? <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
                     : <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                 }

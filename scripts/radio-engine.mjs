@@ -323,6 +323,8 @@ let sessionIntroSongKey = null;
 let listenerResumeInProgress = false;
 let nextMusicFadeInSeconds = 0;
 
+const RESUME_END_GUARD_SECONDS = 5;
+
 const listenerState = {
   mode: 'unknown',
   activeListeners: 0,
@@ -516,10 +518,44 @@ function memorySafe(label, fn) {
   }
 }
 
-function playbackPositionSeconds() {
-  if (!startedAt) return Math.max(0, Math.floor(currentPlaybackStartSeconds || 0));
+function itemDurationSeconds(item) {
+  const duration = Number(item?.duration ?? item?.durationSeconds ?? item?.duration_seconds);
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+function clampPlaybackPosition(item, positionSeconds) {
+  const position = Math.max(0, Math.floor(Number(positionSeconds || 0)));
+  const duration = itemDurationSeconds(item);
+  if (!duration) return position;
+  return Math.min(position, Math.floor(duration));
+}
+
+function playbackPositionSeconds(item = currentItem) {
+  if (!startedAt) return clampPlaybackPosition(item, currentPlaybackStartSeconds || 0);
   const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
-  return Math.max(0, Math.floor((currentPlaybackStartSeconds || 0) + elapsed));
+  return clampPlaybackPosition(item, (currentPlaybackStartSeconds || 0) + elapsed);
+}
+
+function normalizeResumeSnapshot(snapshot, reason = 'resume') {
+  if (!snapshot?.item) return null;
+  const item = { ...snapshot.item };
+  delete item.tmpFile;
+
+  const positionSeconds = clampPlaybackPosition(item, snapshot.positionSeconds || 0);
+  const duration = itemDurationSeconds(item);
+  if (duration && (item.kind === 'music' || item.kind === 'podcast')) {
+    const maxUsefulStart = Math.max(0, duration - RESUME_END_GUARD_SECONDS);
+    if (positionSeconds >= maxUsefulStart) {
+      console.warn(`[engine] dropping stale ${item.kind} resume at ${Math.round(positionSeconds)}s/${Math.round(duration)}s (${reason})`);
+      return null;
+    }
+  }
+
+  return {
+    ...snapshot,
+    item,
+    positionSeconds,
+  };
 }
 
 function snapshotCurrentForPause() {
@@ -527,11 +563,11 @@ function snapshotCurrentForPause() {
   const positionSeconds = playbackPositionSeconds();
   const item = { ...currentItem };
   delete item.tmpFile;
-  return {
+  return normalizeResumeSnapshot({
     item,
     positionSeconds,
     savedAt: new Date().toISOString(),
-  };
+  }, 'pause-snapshot');
 }
 
 function persistPodcastPausePosition(snapshot) {
@@ -2480,7 +2516,7 @@ async function cacheHttpAudioForStablePlayback(url, options = {}) {
   if (!CACHE_HTTP_AUDIO || options.cacheHttpAudio !== true) return { playUrl: url, tmpFile: null };
   // Do not download full podcast episodes; segmented podcast playback uses -ss/-t.
   if (!/^https?:\/\//i.test(url)) return { playUrl: url, tmpFile: null };
-  if (Number.isFinite(options.startSeconds) || Number.isFinite(options.durationSeconds)) return { playUrl: url, tmpFile: null };
+  if (Number.isFinite(options.durationSeconds)) return { playUrl: url, tmpFile: null };
 
   try {
     mkdirSync(TMP_DIR, { recursive: true });
@@ -2710,11 +2746,14 @@ async function radioLoop() {
     let resumedAfterPodcastBreak = false;
 
     if (pausedResumeItem) {
-      nextItem = pausedResumeItem.item;
-      resumeStartSeconds = Math.max(0, Number(pausedResumeItem.positionSeconds || 0));
-      resumedFromPause = true;
+      const resume = normalizeResumeSnapshot(pausedResumeItem, 'radio-loop');
       pausedResumeItem = null;
-      console.log(`[engine] resuming paused ${nextItem.kind}: ${nextItem.artist} — ${nextItem.title} at ${Math.round(resumeStartSeconds)}s`);
+      if (resume) {
+        nextItem = resume.item;
+        resumeStartSeconds = Math.max(0, Number(resume.positionSeconds || 0));
+        resumedFromPause = true;
+        console.log(`[engine] resuming paused ${nextItem.kind}: ${nextItem.artist} — ${nextItem.title} at ${Math.round(resumeStartSeconds)}s`);
+      }
     }
 
     if (!nextItem && forcedNextItem) {
