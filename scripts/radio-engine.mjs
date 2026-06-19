@@ -76,6 +76,7 @@ const PODCAST_STATE_FILE = path.join(DATA_DIR, 'podcast-state.json');
 const PODCAST_TRANSCRIPT_DIR = path.join(DATA_DIR, 'podcast-transcripts');
 const TMP_DIR        = path.join(tmpdir(), 'personal-radio');
 const PUBLIC_DIR     = path.join(process.cwd(), 'public');
+const MODERATOR_SOUL_FILE = process.env.PERSONAL_RADIO_MODERATOR_SOUL || path.join(process.cwd(), 'config', 'moderator-soul.md');
 
 function envFlag(name, defaultValue = false) {
   const raw = process.env[name];
@@ -107,6 +108,7 @@ const FFPLAY_ANALYZE_DURATION = process.env.PERSONAL_RADIO_FFPLAY_ANALYZE_DURATI
 const FFPLAY_PROBE_SIZE       = process.env.PERSONAL_RADIO_FFPLAY_PROBE_SIZE || '1000000';
 const FFPLAY_AUDIO_FILTER     = process.env.PERSONAL_RADIO_FFPLAY_AUDIO_FILTER || 'aresample=async=1000:first_pts=0';
 const TTS_TAIL_PAD_SECONDS    = Number(process.env.PERSONAL_RADIO_TTS_TAIL_PAD_SECONDS || 0.6);
+const DEFAULT_CROSSFADE_SECONDS = Number(process.env.PERSONAL_RADIO_CROSSFADE_SECONDS || 5);
 const PODCAST_INTRO_JINGLE    = process.env.PERSONAL_RADIO_PODCAST_INTRO_JINGLE || path.join(PUBLIC_DIR, 'podcast-intro.mp3');
 const PODCAST_RETURN_JINGLE   = process.env.PERSONAL_RADIO_PODCAST_RETURN_JINGLE || path.join(PUBLIC_DIR, 'studio-return.mp3');
 const PODCAST_RESOLVED_URL_TTL_MS = Number(process.env.PERSONAL_RADIO_PODCAST_RESOLVED_URL_TTL_MS || 45 * 60_000);
@@ -127,6 +129,8 @@ const DEFAULT_SETTINGS = {
   prSplitPercent: 20,
   moderationEnabled: MODERATION_AFTER_SONGS > 0,
   moderationAfterSongs: MODERATION_AFTER_SONGS,
+  crossfadeEnabled: true,
+  crossfadeSeconds: Number.isFinite(DEFAULT_CROSSFADE_SECONDS) && DEFAULT_CROSSFADE_SECONDS > 0 ? DEFAULT_CROSSFADE_SECONDS : 5,
   musicSource: 'topCharts',
   wavlakePlaylistId: '',
   wavlakePlaylistTitle: '',
@@ -184,6 +188,36 @@ function loadSettings() {
 function saveSettings(next) {
   mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
   writeFileSync(SETTINGS_FILE, JSON.stringify(next, null, 2));
+}
+
+function loadModeratorSoul() {
+  try {
+    if (existsSync(MODERATOR_SOUL_FILE)) {
+      const text = readFileSync(MODERATOR_SOUL_FILE, 'utf8').trim();
+      if (text) return text;
+    }
+  } catch (err) {
+    console.warn(`[engine] moderator soul load failed: ${err.message}`);
+  }
+  return [
+    'Du bist der Moderator von PR, Personal Radio.',
+    'Du bist warm, locker, direkt, klug und persoenlich.',
+    'Du klingst wie ein echter Radiomoderator, nicht wie ein Nachrichtensprecher.',
+    'Du darfst Haltung haben, aber du bleibst kurz, sendefaehig und ehrlich.',
+  ].join('\n');
+}
+
+const MODERATOR_SOUL = loadModeratorSoul();
+
+function moderatorSystemPrompt(rules) {
+  return [
+    MODERATOR_SOUL,
+    '',
+    'AKTUELLE MODERATIONSAUFGABE:',
+    rules,
+    '',
+    'Antworte NUR mit dem direkt sendefaehigen Text. Keine Erklaerungen, keine Bulletpoints, keine Anfuehrungszeichen.',
+  ].filter(Boolean).join('\n');
 }
 
 function normalizeWavlakePlaylists(settings = engineSettings) {
@@ -254,6 +288,7 @@ let sessionIntroRequest = null;
 let pendingSessionIntroPromise = null;
 let sessionIntroSongKey = null;
 let listenerResumeInProgress = false;
+let nextMusicFadeInSeconds = 0;
 
 const listenerState = {
   mode: 'unknown',
@@ -275,6 +310,7 @@ const listenerState = {
 
 // Pre-generated moderation ready to play: Promise<ModerationItem|null>|null
 let pendingModerationPromise = null;
+let pendingModerationPlan = null;
 let pendingPodcastIntroPromise = null;
 let pendingPodcastIntroKey = null;
 
@@ -284,10 +320,28 @@ for (const o of OUTPUTS) {
   outputState[o.name] = { playing: false, error: null, pid: null, sink: o.sink };
 }
 
-// Active ffplay processes for the current item: Map<outputName, ChildProcess>
+// Active ffplay processes. Music crossfade may briefly run two processes per output.
 let activeProcs = new Map();
 // Cancellation token for the current playback
 let skipToken = { cancelled: false };
+
+function activeProcKey(outputName, proc) {
+  return `${outputName}:${proc.pid || Date.now()}:${Math.random().toString(16).slice(2)}`;
+}
+
+function activeProcCountForOutput(outputName) {
+  let count = 0;
+  for (const proc of activeProcs.values()) {
+    if (proc.__personalRadioOutput === outputName) count++;
+  }
+  return count;
+}
+
+function markOutputStoppedIfIdle(outputName) {
+  if (activeProcCountForOutput(outputName) > 0) return;
+  outputState[outputName].playing = false;
+  outputState[outputName].pid = null;
+}
 
 // ── Blocklist ─────────────────────────────────────────────────────────────────
 
@@ -1586,17 +1640,15 @@ async function buildPodcastSegmentContext(item, episodeState, segment) {
 
 async function generatePodcastModerationText(item, episodeState, segment, context, memoryContext = '') {
   try {
-    const system = [
-      'Du bist ein deutschsprachiger Radiosprecher für ein persönliches Radio.',
-      'Erzeuge eine kurze, persönliche Radio-Moderation auf Deutsch.',
-      'Fasse zusammen, was im gerade gehörten Podcast-Abschnitt wirklich vorkam.',
-      'Kein generisches "spannendes Gespräch". Nutze den Transcript-/STT-/Kapitel-Kontext.',
+    const system = moderatorSystemPrompt([
+      'Erzeuge eine kurze Podcast-Abmoderation auf Deutsch.',
+      'Keine trockene Inhaltszusammenfassung. Nimm den gehoerten Abschnitt als Material fuer eine persoenliche Beobachtung, einen Kommentar oder einen gedanklichen Anschluss.',
+      'Wenn du konkret zusammenfasst, dann nur als Sprungbrett fuer deinen Kommentar.',
+      'Kein generisches "spannendes Gespraech". Nutze den Transcript-/STT-/Kapitel-Kontext.',
       'Wichtig: Verwende nur den Kontext des angegebenen Segment-Zeitfensters, nicht das gesamte Podcast-Transkript.',
-      'Dann leite organisch in Musik über.',
-      'Ton: warm, klar, intelligent, nicht werblich.',
+      'Dann leite organisch in Musik ueber.',
       'Wenn kein brauchbarer Kontext vorhanden ist, sag das ehrlich und knapp. Nicht halluzinieren.',
-      'Antworte NUR mit sendefähigem Text.',
-    ].join(' ');
+    ].join(' '));
     const task = [
       `Show: ${episodeState.showTitle}`,
       `Episode: ${episodeState.episodeTitle}`,
@@ -1657,13 +1709,12 @@ async function buildPodcastModerationItem(item, episodeState, segment, context) 
 
 async function generatePodcastIntroText(item, episodeState, isResume, memoryContext = '', introContext = null) {
   try {
-    const system = [
-      'Du bist ein deutschsprachiger Radiosprecher für ein persönliches Radio.',
+    const system = moderatorSystemPrompt([
       'Erzeuge eine sehr kurze, warme Podcast-Anmoderation auf Deutsch.',
-      'Erwähne primär den Sendungsnamen, nicht unnötig Datum, Uhrzeit oder Episodennummern.',
-      'Erwähne keine nächste Musik. Fokus nur auf den Podcast.',
-      'Antworte NUR mit sendefähigem Text.',
-    ].join(' ');
+      'Erwaehne primaer den Sendungsnamen, nicht unnoetig Datum, Uhrzeit oder Episodennummern.',
+      'Wenn Kontext vorhanden ist, mische ihn mit deiner Haltung statt nur den Klappentext nachzuerzaehlen.',
+      'Erwaehne keine naechste Musik. Fokus nur auf den Podcast.',
+    ].join(' '));
     const minutes = Math.floor(Number(episodeState.positionSeconds || 0) / 60);
     const task = isResume
       ? [
@@ -1898,6 +1949,56 @@ function describeUpcomingItem(item) {
   return `Als Nächstes: "${item.artist || item.kind} — ${item.title}".`;
 }
 
+function moderationPlanKey(item) {
+  if (!item) return 'none';
+  return [
+    item.kind || 'unknown',
+    item.id || '',
+    item.guid || '',
+    item.liveUrl || item.audioUrl || '',
+    item.artist || '',
+    item.title || '',
+  ].join('|');
+}
+
+function crossfadeSeconds() {
+  const seconds = Number(engineSettings.crossfadeSeconds ?? 5);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(12, Math.max(1, seconds)) : 5;
+}
+
+function moderationDueAfterCurrentMusic() {
+  const moderationAfterSongs = Number(engineSettings.moderationAfterSongs);
+  return engineSettings.moderationEnabled
+    && moderationAfterSongs > 0
+    && Number.isFinite(moderationAfterSongs)
+    && (songCount + 1) >= moderationAfterSongs;
+}
+
+function musicCanCrossfade(item, resumeStartSeconds = 0) {
+  if (engineSettings.crossfadeEnabled === false) return false;
+  if (item?.kind !== 'music') return false;
+  if (resumeStartSeconds > 0) return false;
+  if (sessionIntroRequest) return false;
+  if (moderationDueAfterCurrentMusic()) return false;
+  if (isPodcastDueAfterCurrentMusic()) return false;
+  const duration = Number(item.duration || 0);
+  const fade = crossfadeSeconds();
+  return Number.isFinite(duration) && duration > fade * 2 + 8 && peekNextMusicItem();
+}
+
+function musicCrossfadeOptions(item, resumeStartSeconds = 0) {
+  if (!musicCanCrossfade(item, resumeStartSeconds)) return {};
+  const fade = crossfadeSeconds();
+  const duration = Number(item.duration || 0);
+  const fadeOutStartSeconds = Math.max(0, duration - fade);
+  return {
+    fadeOutStartSeconds,
+    fadeOutSeconds: fade,
+    resolveEarlyAfterMs: Math.max(1000, fadeOutStartSeconds * 1000),
+    allowOverlapTail: true,
+  };
+}
+
 function peekNextMusicItem() {
   const item = queue.find(t => !isBlocked(t));
   return item ? { ...item } : null;
@@ -1930,9 +2031,26 @@ async function planUpcomingAfterCurrentMusic() {
   return peekNextMusicItem();
 }
 
+async function validatePendingModerationPlan(plan) {
+  if (!plan || !currentItem || currentItem.kind !== 'music') return { valid: true, upcoming: null };
+  const currentKey = itemKey(currentItem);
+  const upcoming = await planUpcomingAfterCurrentMusic();
+  const freshUpcomingKey = moderationPlanKey(upcoming);
+  const valid = plan.afterSongKey === currentKey && plan.upcomingKey === freshUpcomingKey;
+  if (!valid) {
+    console.log(`[engine] moderation pre-gen invalidated: after=${plan.afterSongKey === currentKey ? 'same' : 'changed'} upcoming=${plan.upcomingKey} -> ${freshUpcomingKey}`);
+  }
+  return { valid, upcoming };
+}
+
 async function generateModerationText(currentSong, nextItem = null, memoryContext = '') {
   try {
-    const system = 'Du bist ein deutschsprachiger Radiosprecher für einen persönlichen Musiksender. Dein Stil ist warm, locker und authentisch. Antworte NUR mit dem direkt sendefähigen Text — keine Erklärungen, keine Anführungszeichen.';
+    const system = moderatorSystemPrompt([
+      'Schreibe eine kurze Uebergangsmoderation auf Deutsch.',
+      'Moderiere den gelaufenen Song kurz ab und den naechsten Inhalt organisch an.',
+      'Wenn als Naechstes ein Podcast kommt, leite klar aber nicht langatmig in den Podcast ueber.',
+      'Nutze Memory nur, wenn es wirklich organisch passt.',
+    ].join(' '));
     const task   = [
       `Schreibe eine kurze Übergangsmoderation (1-2 Sätze).`,
       `Gerade lief: "${currentSong.artist} — ${currentSong.title}".`,
@@ -2119,6 +2237,13 @@ async function playOnOutput(url, output, token, options = {}) {
     ];
     const filters = [];
     if (FFPLAY_AUDIO_FILTER) filters.push(FFPLAY_AUDIO_FILTER);
+    if (Number.isFinite(options.fadeInSeconds) && options.fadeInSeconds > 0) {
+      filters.push(`afade=t=in:st=0:d=${Math.min(12, Math.max(0.2, options.fadeInSeconds))}`);
+    }
+    if (Number.isFinite(options.fadeOutStartSeconds) && options.fadeOutStartSeconds >= 0
+        && Number.isFinite(options.fadeOutSeconds) && options.fadeOutSeconds > 0) {
+      filters.push(`afade=t=out:st=${Math.max(0, options.fadeOutStartSeconds)}:d=${Math.min(12, Math.max(0.2, options.fadeOutSeconds))}`);
+    }
     if (Number.isFinite(options.tailPadSeconds) && options.tailPadSeconds > 0) {
       filters.push(`apad=pad_dur=${Math.min(3, Math.max(0.1, options.tailPadSeconds))}`);
     }
@@ -2134,7 +2259,16 @@ async function playOnOutput(url, output, token, options = {}) {
       stdio: ['ignore', 'inherit', 'inherit'],
       env,
     });
+    const key = activeProcKey(output.name, proc);
+    proc.__personalRadioOutput = output.name;
     let hardStop = null;
+    let earlyResolve = null;
+    let resolved = false;
+    const finish = result => {
+      if (resolved) return;
+      resolved = true;
+      resolve(result);
+    };
     if (Number.isFinite(options.hardStopMs) && options.hardStopMs > 1000) {
       hardStop = setTimeout(() => {
         if (!proc.killed) {
@@ -2143,30 +2277,36 @@ async function playOnOutput(url, output, token, options = {}) {
         }
       }, options.hardStopMs);
     }
+    if (Number.isFinite(options.resolveEarlyAfterMs) && options.resolveEarlyAfterMs > 1000) {
+      earlyResolve = setTimeout(() => {
+        console.log(`[engine] crossfade handoff on ${output.name}`);
+        finish({ output: output.name, code: 0, reason: 'crossfade-overlap' });
+      }, options.resolveEarlyAfterMs);
+    }
 
     outputState[output.name].playing = true;
     outputState[output.name].pid     = proc.pid;
     outputState[output.name].error   = null;
-    activeProcs.set(output.name, proc);
+    activeProcs.set(key, proc);
 
     proc.on('close', code => {
       if (hardStop) clearTimeout(hardStop);
+      if (earlyResolve) clearTimeout(earlyResolve);
       if (playbackTmpFile) { try { unlinkSync(playbackTmpFile); } catch {} }
-      outputState[output.name].playing = false;
-      outputState[output.name].pid     = null;
-      activeProcs.delete(output.name);
-      resolve({ output: output.name, code, reason: 'close' });
+      activeProcs.delete(key);
+      markOutputStoppedIfIdle(output.name);
+      finish({ output: output.name, code, reason: 'close' });
     });
 
     proc.on('error', err => {
       if (hardStop) clearTimeout(hardStop);
+      if (earlyResolve) clearTimeout(earlyResolve);
       if (playbackTmpFile) { try { unlinkSync(playbackTmpFile); } catch {} }
-      outputState[output.name].playing = false;
-      outputState[output.name].pid     = null;
+      activeProcs.delete(key);
+      markOutputStoppedIfIdle(output.name);
       outputState[output.name].error   = err.message;
-      activeProcs.delete(output.name);
       console.error(`[engine] ffplay spawn error on ${output.name}: ${err.message}`);
-      resolve({ output: output.name, code: -1, reason: 'error' });
+      finish({ output: output.name, code: -1, reason: 'error' });
     });
   });
 }
@@ -2190,13 +2330,19 @@ async function playItemOnAllOutputs(item, options = {}) {
   const results = await Promise.allSettled(promises);
   const values = results.map(r => r.status === 'fulfilled' ? r.value : { output: 'unknown', code: -1, reason: 'rejected' });
 
-  // Clear any stragglers
-  for (const [name, proc] of activeProcs) {
-    if (!proc.killed) try { proc.kill('SIGTERM'); } catch {}
-    outputState[name].playing = false;
-    outputState[name].pid     = null;
+  if (!options.allowOverlapTail) {
+    // Clear any stragglers for ordinary playback. Crossfade deliberately leaves
+    // the previous track alive for its fade-out tail.
+    for (const proc of activeProcs.values()) {
+      if (!proc.killed) try { proc.kill('SIGTERM'); } catch {}
+      const outputName = proc.__personalRadioOutput;
+      if (outputName) {
+        outputState[outputName].playing = false;
+        outputState[outputName].pid     = null;
+      }
+    }
+    activeProcs.clear();
   }
-  activeProcs.clear();
   const startedSomeOutput = values.some(v => v?.code !== -1 || v?.reason === 'close');
   const allUnavailable = values.length > 0 && values.every(v => v?.reason === 'sink-unavailable' || v?.reason === 'cancelled');
   if (!startedSomeOutput && allUnavailable && engineSettings.autoSuspendWhenNoListeners !== false && !paused && playing) {
@@ -2210,10 +2356,15 @@ async function playItemOnAllOutputs(item, options = {}) {
 function killAll() {
   skipToken.cancelled = true;
   itemWasKilled       = true;
-  for (const [name, proc] of activeProcs) {
+  nextMusicFadeInSeconds = 0;
+  pendingModerationPlan = null;
+  for (const proc of activeProcs.values()) {
     if (!proc.killed) try { proc.kill('SIGTERM'); } catch {}
-    outputState[name].playing = false;
-    outputState[name].pid     = null;
+    const outputName = proc.__personalRadioOutput;
+    if (outputName) {
+      outputState[outputName].playing = false;
+      outputState[outputName].pid     = null;
+    }
   }
   activeProcs.clear();
 }
@@ -2251,18 +2402,28 @@ async function radioLoop() {
 
     // ── Check pre-generated moderation ──────────────────────────────────────
     if (!nextItem && pendingModerationPromise !== null && !itemWasKilled) {
+      const plan = pendingModerationPlan;
       // Wait up to 6s for pre-generated moderation (generation runs during prev song)
-      const modItem = await Promise.race([
+      let modItem = await Promise.race([
         pendingModerationPromise,
         sleep(6_000).then(() => null),
       ]);
       pendingModerationPromise = null;
+      pendingModerationPlan = null;
       if (modItem) {
+        const validation = await validatePendingModerationPlan(plan);
+        if (!validation.valid) {
+          if (modItem.tmpFile) { try { unlinkSync(modItem.tmpFile); } catch {} }
+          modItem = currentItem?.kind === 'music'
+            ? await buildModerationItem(currentItem, validation.upcoming)
+            : null;
+        }
         nextItem = modItem;
-        songCount = 0;
+        if (nextItem) songCount = 0;
       }
     }
     pendingModerationPromise = null; // clear regardless (skipped or just-used)
+    pendingModerationPlan = null;
 
     // ── Podcast resume after music break ──────────────────────────────────────
     if (!nextItem
@@ -2341,6 +2502,10 @@ async function radioLoop() {
       const upcomingPromise = planUpcomingAfterCurrentMusic();
       pendingModerationPromise = upcomingPromise
         .then(upcoming => {
+          pendingModerationPlan = {
+            afterSongKey: itemKey(songForMod),
+            upcomingKey: moderationPlanKey(upcoming),
+          };
           if (upcoming?.kind === 'podcast' && pendingPodcastIntroPromise === null) {
             const { state } = getEpisodeState(upcoming);
             const key = podcastEpisodeKey(upcoming);
@@ -2442,7 +2607,21 @@ async function radioLoop() {
       broadcastStatus();
       podcastSegmentResult = await playPodcastSegment(nextItem);
     } else {
-      await playItemOnAllOutputs(nextItem, resumeStartSeconds > 0 ? { startSeconds: resumeStartSeconds } : {});
+      const playOptions = resumeStartSeconds > 0 ? { startSeconds: resumeStartSeconds } : {};
+      if (nextItem.kind === 'music') {
+        if (nextMusicFadeInSeconds > 0) {
+          playOptions.fadeInSeconds = nextMusicFadeInSeconds;
+          nextMusicFadeInSeconds = 0;
+        }
+        Object.assign(playOptions, musicCrossfadeOptions(nextItem, resumeStartSeconds));
+      } else {
+        nextMusicFadeInSeconds = 0;
+      }
+      const playResults = await playItemOnAllOutputs(nextItem, playOptions);
+      if (nextItem.kind === 'music' && playResults.some(result => result?.reason === 'crossfade-overlap')) {
+        nextMusicFadeInSeconds = crossfadeSeconds();
+        console.log(`[engine] crossfade overlap armed for next music (${nextMusicFadeInSeconds}s)`);
+      }
     }
 
     // Cleanup TTS temp file
@@ -2775,14 +2954,11 @@ async function generateSessionIntroText(request, starterSong, callIns = []) {
     const memory = memorySafe('load memory for session intro', () => loadMemory()) || {};
     const today = memory.dailyMemory?.[new Date().toISOString().slice(0, 10)] || null;
     const recentPodcast = (memory.podcastSegments || [])[0];
-    const system = [
-      'Du bist ein deutschsprachiger Radiosprecher für ein persönliches Radio.',
-      'Erzeuge eine kurze Anmoderation für eine neue Radio-Session.',
-      'Die Session startet nach längerer Stille zuerst mit Musik, danach sprichst du.',
-      'Klinge warm, klar, intelligent und nahbar. Nicht werblich.',
+    const system = moderatorSystemPrompt([
+      'Erzeuge eine kurze Anmoderation fuer eine neue Radio-Session.',
+      'Die Session startet nach laengerer Stille zuerst mit Musik, danach sprichst du.',
       'Wenn Kontext unsicher ist, bleib ehrlich und knapp.',
-      'Antworte NUR mit sendefähigem Text.',
-    ].join(' ');
+    ].join(' '));
     const task = [
       `Das Radio stand still für: ${formatDurationGerman(request.suspendedSeconds)}.`,
       `Erster Song nach der Rückkehr: ${starterSong?.artist || 'Unbekannt'} — ${starterSong?.title || 'Unbekannt'}.`,
@@ -2859,6 +3035,7 @@ function suspendForNoListeners(snapshot) {
     pausedResumeItem = null;
   }
   pendingModerationPromise = null;
+  pendingModerationPlan = null;
   pendingPodcastIntroPromise = null;
   pendingPodcastIntroKey = null;
   pendingSessionIntroPromise = null;
@@ -3235,6 +3412,8 @@ const server = http.createServer(async (req, res) => {
         'prSplitPercent',
         'moderationEnabled',
         'moderationAfterSongs',
+        'crossfadeEnabled',
+        'crossfadeSeconds',
         'musicSource',
         'wavlakePlaylistId',
         'wavlakePlaylistTitle',
