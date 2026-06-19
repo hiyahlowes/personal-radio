@@ -21,7 +21,7 @@
 
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, renameSync, readdirSync, statSync } from 'node:fs';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir, homedir } from 'node:os';
@@ -108,7 +108,9 @@ const PULSE_LATENCY_MSEC      = process.env.PULSE_LATENCY_MSEC || '350';
 const FFPLAY_ANALYZE_DURATION = process.env.PERSONAL_RADIO_FFPLAY_ANALYZE_DURATION || '1000000';
 const FFPLAY_PROBE_SIZE       = process.env.PERSONAL_RADIO_FFPLAY_PROBE_SIZE || '1000000';
 const FFPLAY_AUDIO_FILTER     = process.env.PERSONAL_RADIO_FFPLAY_AUDIO_FILTER || 'aresample=async=1000:first_pts=0';
-const TTS_TAIL_PAD_SECONDS    = Number(process.env.PERSONAL_RADIO_TTS_TAIL_PAD_SECONDS || 0.6);
+const TTS_TAIL_PAD_SECONDS    = Number(process.env.PERSONAL_RADIO_TTS_TAIL_PAD_SECONDS || 1.2);
+const TTS_FILE_TAIL_SILENCE_SECONDS = Number(process.env.PERSONAL_RADIO_TTS_FILE_TAIL_SILENCE_SECONDS || 1.0);
+const TTS_KEEP_RECENT_FILES   = Number(process.env.PERSONAL_RADIO_TTS_KEEP_RECENT_FILES || 10);
 const DEFAULT_CROSSFADE_SECONDS = Number(process.env.PERSONAL_RADIO_CROSSFADE_SECONDS || 5);
 const DEFAULT_MODERATION_DUCK_SECONDS = Number(process.env.PERSONAL_RADIO_MODERATION_DUCK_SECONDS || 4);
 const AUDIO_ANALYSIS_VERSION = 1;
@@ -2459,6 +2461,8 @@ async function ttsToTempFile(text) {
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length < 1000) throw new Error(`TTS returned tiny response (${buf.length} bytes)`);
     writeFileSync(tmpFile, buf);
+    await addTailSilenceToAudioFile(tmpFile);
+    cleanupOldTtsFiles();
     const durationSeconds = await probeAudioDurationSeconds(tmpFile);
     console.log(`[engine] TTS file: ${tmpFile} (${buf.length} bytes${durationSeconds ? `, ${durationSeconds.toFixed(1)}s` : ''})`);
     return { file: tmpFile, durationSeconds };
@@ -2478,6 +2482,50 @@ async function probeAudioDurationSeconds(file) {
   ], 5_000);
   const value = Number(String(result.stdout || '').trim());
   return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+async function addTailSilenceToAudioFile(file, seconds = TTS_FILE_TAIL_SILENCE_SECONDS) {
+  const tailSeconds = Math.min(3, Math.max(0, Number(seconds || 0)));
+  if (!tailSeconds) return file;
+  const paddedFile = `${file}.padded.mp3`;
+  const result = await runCommand('ffmpeg', [
+    '-hide_banner',
+    '-y',
+    '-i', file,
+    '-af', `apad=pad_dur=${tailSeconds}`,
+    '-codec:a', 'libmp3lame',
+    '-b:a', '128k',
+    paddedFile,
+  ], 20_000);
+  if (!result.ok) {
+    try { unlinkSync(paddedFile); } catch {}
+    throw new Error(result.stderr || 'ffmpeg tail padding failed');
+  }
+  renameSync(paddedFile, file);
+  return file;
+}
+
+function cleanupOldTtsFiles() {
+  if (!Number.isFinite(TTS_KEEP_RECENT_FILES) || TTS_KEEP_RECENT_FILES <= 0) return;
+  try {
+    const files = readdirSync(TMP_DIR)
+      .filter(name => /^mod-\d+\.mp3$/.test(name))
+      .map(name => {
+        const file = path.join(TMP_DIR, name);
+        const stat = statSync(file);
+        return { file, mtimeMs: stat.mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const row of files.slice(TTS_KEEP_RECENT_FILES)) {
+      try { unlinkSync(row.file); } catch {}
+    }
+  } catch {}
+}
+
+function maybeKeepTtsFile(file) {
+  if (!file || !/\/mod-\d+\.mp3$/.test(file)) return false;
+  cleanupOldTtsFiles();
+  return true;
 }
 
 async function buildModerationItem(afterSong, nextItem = null) {
@@ -2916,7 +2964,7 @@ async function radioLoop() {
           console.log(`[engine] PLAY [${returnItem.kind}] ${returnItem.artist} — ${returnItem.title}`);
           broadcastStatus();
           await playItemOnAllOutputs(returnItem);
-          if (returnItem.tmpFile) { try { unlinkSync(returnItem.tmpFile); } catch {} }
+          if (returnItem.tmpFile && !maybeKeepTtsFile(returnItem.tmpFile)) { try { unlinkSync(returnItem.tmpFile); } catch {} }
           console.log(`[engine] DONE [${returnItem.kind}] ${returnItem.artist} — ${returnItem.title} (killed=${itemWasKilled})`);
         }
       } else if (!resumedFromPause) {
@@ -2945,7 +2993,7 @@ async function radioLoop() {
           console.log(`[engine] PLAY [${introItem.kind}] ${introItem.artist} — ${introItem.title}`);
           broadcastStatus();
           await playItemOnAllOutputs(introItem);
-          if (introItem.tmpFile) { try { unlinkSync(introItem.tmpFile); } catch {} }
+          if (introItem.tmpFile && !maybeKeepTtsFile(introItem.tmpFile)) { try { unlinkSync(introItem.tmpFile); } catch {} }
           console.log(`[engine] DONE [${introItem.kind}] ${introItem.artist} — ${introItem.title} (killed=${itemWasKilled})`);
         }
         const jingleItem = buildJingleItem(PODCAST_INTRO_JINGLE, 'Podcast Intro Jingle');
@@ -2991,8 +3039,8 @@ async function radioLoop() {
       }
     }
 
-    // Cleanup TTS temp file
-    if (nextItem.tmpFile) { try { unlinkSync(nextItem.tmpFile); } catch {} }
+    // Keep recent TTS temp files for debugging clipped moderation endings.
+    if (nextItem.tmpFile && !maybeKeepTtsFile(nextItem.tmpFile)) { try { unlinkSync(nextItem.tmpFile); } catch {} }
 
     console.log(`[engine] DONE [${nextItem.kind}] ${nextItem.artist} — ${nextItem.title} (killed=${itemWasKilled})`);
     if (nextItem.kind === 'music') {
@@ -3029,7 +3077,7 @@ async function radioLoop() {
         console.log(`[engine] PLAY [${introItem.kind}] ${introItem.artist} — ${introItem.title}`);
         broadcastStatus();
         await playItemOnAllOutputs(introItem);
-        if (introItem.tmpFile) { try { unlinkSync(introItem.tmpFile); } catch {} }
+        if (introItem.tmpFile && !maybeKeepTtsFile(introItem.tmpFile)) { try { unlinkSync(introItem.tmpFile); } catch {} }
         console.log(`[engine] DONE [${introItem.kind}] ${introItem.artist} — ${introItem.title} (killed=${itemWasKilled})`);
         playing = false;
       } else {
@@ -3069,7 +3117,7 @@ async function radioLoop() {
         console.log(`[engine] PLAY [${modItem.kind}] ${modItem.artist} — ${modItem.title}`);
         broadcastStatus();
         await playItemOnAllOutputs(modItem);
-        if (modItem.tmpFile) { try { unlinkSync(modItem.tmpFile); } catch {} }
+        if (modItem.tmpFile && !maybeKeepTtsFile(modItem.tmpFile)) { try { unlinkSync(modItem.tmpFile); } catch {} }
         console.log(`[engine] DONE [${modItem.kind}] ${modItem.artist} — ${modItem.title} (killed=${itemWasKilled})`);
         playing = false;
       }
