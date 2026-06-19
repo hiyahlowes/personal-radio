@@ -356,6 +356,8 @@ export function RadioPage() {
   const [callInSending, setCallInSending] = useState(false);
   const [callInMessage, setCallInMessage] = useState('');
   const [confirmBanTrackId, setConfirmBanTrackId] = useState<string | null>(null);
+  const remoteStreamAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [remoteStreamError, setRemoteStreamError] = useState('');
 
   // ── Episode management panel ──────────────────────────────────────────────
   const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
@@ -2025,9 +2027,66 @@ export function RadioPage() {
     await advanceLoop();
   }, [advanceLoop]);
 
+  const stopRemoteLivestream = useCallback(() => {
+    const audio = remoteStreamAudioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    remoteStreamAudioRef.current = null;
+  }, []);
+
+  const startRemoteLivestream = useCallback(() => {
+    let audio = remoteStreamAudioRef.current;
+    if (!audio) {
+      audio = new Audio();
+      audio.preload = 'none';
+      audio.crossOrigin = 'anonymous';
+      audio.addEventListener('playing', () => {
+        setBuf(false);
+        setRemoteStreamError('');
+      });
+      audio.addEventListener('waiting', () => setBuf(true));
+      audio.addEventListener('stalled', () => setBuf(true));
+      audio.addEventListener('error', () => {
+        setBuf(false);
+        setRemoteStreamError('Livestream konnte nicht gestartet werden.');
+      });
+      remoteStreamAudioRef.current = audio;
+    }
+    audio.volume = muted ? 0 : volume;
+    audio.muted = muted;
+    if (!audio.src || audio.ended) {
+      audio.src = `/live.mp3?ts=${Date.now()}`;
+    }
+    setBuf(true);
+    setRemoteStreamError('');
+    void audio.play().catch(err => {
+      setBuf(false);
+      setRemoteStreamError(err instanceof Error ? err.message : 'Livestream konnte nicht gestartet werden.');
+    });
+  }, [muted, volume]);
+
+  useEffect(() => {
+    if (!IS_REMOTE) return;
+    const audio = remoteStreamAudioRef.current;
+    if (!audio) return;
+    audio.volume = muted ? 0 : volume;
+    audio.muted = muted;
+  }, [IS_REMOTE, muted, volume]);
+
+  useEffect(() => {
+    if (!IS_REMOTE) return undefined;
+    return () => stopRemoteLivestream();
+  }, [IS_REMOTE, stopRemoteLivestream]);
+
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
-    if (IS_REMOTE) { engineMode.play(); return; }
+    if (IS_REMOTE) {
+      startRemoteLivestream();
+      engineMode.play();
+      return;
+    }
     console.log('[PlayPause] handlePlay — runningRef:', runningRef.current, '| greeted:', greetedRef.current, '| resumePodcast:', resumePodcastEpisodeRef.current?.title ?? 'none');
 
     // Guard: if the loop is already running and there is no paused podcast waiting
@@ -2093,10 +2152,14 @@ export function RadioPage() {
         advanceLoop();
       }
     }
-  }, [startRadio, advanceLoop]);
+  }, [IS_REMOTE, engineMode, startRemoteLivestream, startRadio, advanceLoop]);
 
   const handlePause = useCallback(() => {
-    if (IS_REMOTE) { engineMode.pause(); return; }
+    if (IS_REMOTE) {
+      stopRemoteLivestream();
+      engineMode.pause();
+      return;
+    }
     console.log('[PlayPause] handlePause — nowPlaying:', nowPlayingRef.current?.kind ?? 'none', '| resumePodcast before:', resumePodcastEpisodeRef.current?.title ?? 'none');
     runningRef.current = false;
     moderatorRef.current.stop();
@@ -2117,7 +2180,7 @@ export function RadioPage() {
     audioRef.current?.pause();
     podAudioRef.current?.pause(); // also pause podcast if one is playing
     v4vRef.current.onPause();
-  }, []);
+  }, [IS_REMOTE, engineMode, stopRemoteLivestream]);
 
   const jumpTo = useCallback((newIdx: number, userSkipped = false) => {
     if (IS_REMOTE) { engineMode.skip(); return; }
@@ -2989,7 +3052,7 @@ export function RadioPage() {
                   <text x="12" y="14.5" textAnchor="middle" fontSize="5.5" fontWeight="bold" fill="currentColor">30</text>
                 </svg>
               </button>
-              <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || (orderedTracks.length === 0 && tracks.length === 0)}
+              <button onClick={playing ? handlePause : handlePlay} disabled={isLoading || (!IS_REMOTE && orderedTracks.length === 0 && tracks.length === 0)}
                 className="w-12 h-12 sm:w-14 sm:h-14 rounded-full bg-gradient-to-br from-violet-600 to-purple-700 flex items-center justify-center glow-purple hover:scale-105 active:scale-95 transition-all shadow-lg disabled:opacity-40"
                 aria-label={playing ? 'Pause' : 'Play'}>
                 {buffering && !isModerating
@@ -3034,6 +3097,11 @@ export function RadioPage() {
               )}
             </div>
           </div>
+          {IS_REMOTE && remoteStreamError && (
+            <p className="mt-3 text-center text-xs font-medium text-red-200/85">
+              {remoteStreamError}
+            </p>
+          )}
           {IS_REMOTE && callInOpen && (
             <div className="mt-4 space-y-2 rounded-lg border border-amber-400/20 bg-black/25 p-3">
               <textarea
