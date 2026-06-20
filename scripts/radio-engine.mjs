@@ -167,7 +167,7 @@ const DEFAULT_SETTINGS = {
   podcastTranscriptPrefetchLimit: 5,
   podcastTranscriptProvider: 'assemblyai',
   podcastAdSkipEnabled: true,
-  musicBreakTracksAfterPodcast: 0,
+  musicBreakTracksAfterPodcast: 1,
   ttsProvider: (process.env.ELEVENLABS_API_KEY && (process.env.VITE_ELEVENLABS_VOICE_ID_DE || process.env.VITE_ELEVENLABS_VOICE_ID)) ? 'elevenlabs' : 'fish',
   elevenLabsVoiceIdEn: process.env.VITE_ELEVENLABS_VOICE_ID || '',
   elevenLabsVoiceIdDe: process.env.VITE_ELEVENLABS_VOICE_ID_DE || process.env.VITE_ELEVENLABS_VOICE_ID || '',
@@ -188,20 +188,29 @@ const DEFAULT_SETTINGS = {
   sessionIntroAfterFirstSong: true,
 };
 
+function normalizeEngineSettings(settings) {
+  const next = { ...settings };
+  const podcastBreakSongs = Number(next.musicBreakTracksAfterPodcast);
+  next.musicBreakTracksAfterPodcast = Number.isFinite(podcastBreakSongs)
+    ? Math.max(1, Math.min(6, Math.round(podcastBreakSongs)))
+    : DEFAULT_SETTINGS.musicBreakTracksAfterPodcast;
+  return next;
+}
+
 function loadSettings() {
   try {
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
+    if (!existsSync(SETTINGS_FILE)) return normalizeEngineSettings({ ...DEFAULT_SETTINGS });
     const parsed = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
-    return {
+    return normalizeEngineSettings({
       ...DEFAULT_SETTINGS,
       ...parsed,
       elevenLabsVoiceSettings: {
         ...DEFAULT_SETTINGS.elevenLabsVoiceSettings,
         ...(parsed.elevenLabsVoiceSettings && typeof parsed.elevenLabsVoiceSettings === 'object' ? parsed.elevenLabsVoiceSettings : {}),
       },
-    };
+    });
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return normalizeEngineSettings({ ...DEFAULT_SETTINGS });
   }
 }
 
@@ -2496,7 +2505,7 @@ function buildJingleItem(file, title) {
 function choosePodcastBreakSongs() {
   if (Object.prototype.hasOwnProperty.call(engineSettings, 'musicBreakTracksAfterPodcast')) {
     const configured = Number(engineSettings.musicBreakTracksAfterPodcast);
-    if (Number.isFinite(configured)) return Math.max(0, Math.min(6, Math.round(configured)));
+    if (Number.isFinite(configured)) return Math.max(1, Math.min(6, Math.round(configured)));
   }
   return 1 + Math.floor(Math.random() * 3);
 }
@@ -2639,6 +2648,22 @@ async function playPodcastSegment(item) {
     segmentPlaybackFile,
     segmentPlaybackSource,
   } = prepared;
+
+  if (paused || itemWasKilled || shuttingDown) {
+    itemWasKilled = true;
+    playing = false;
+    if (segmentPlaybackFile) { try { unlinkSync(segmentPlaybackFile); } catch {} }
+    console.log('[engine] podcast segment aborted before playback (paused/killed during preparation)');
+    return {
+      state,
+      segment,
+      context: { source: 'paused', excerpt: '', chapterTitle: '' },
+      moderationItem: null,
+      shouldModerate: false,
+      completed: false,
+      skipped: true,
+    };
+  }
 
   currentPodcastPlayback = {
     episodeKey,
@@ -3465,6 +3490,12 @@ function killAll() {
     }
   }
   activeProcs.clear();
+  // Defensive cleanup for pause/skip races: ffplay/ffmpeg children can be spawned
+  // during podcast preparation before they have been registered in activeProcs.
+  try {
+    const killer = spawn('pkill', ['-TERM', '-P', String(process.pid), '-f', 'ffplay|ffmpeg'], { stdio: 'ignore' });
+    killer.unref();
+  } catch {}
 }
 
 // ── Radio loop ────────────────────────────────────────────────────────────────
@@ -3653,6 +3684,11 @@ async function radioLoop() {
           await playItemOnAllOutputs(returnItem);
           if (returnItem.tmpFile && !maybeKeepTtsFile(returnItem.tmpFile)) { try { unlinkSync(returnItem.tmpFile); } catch {} }
           console.log(`[engine] DONE [${returnItem.kind}] ${returnItem.artist} — ${returnItem.title} (killed=${itemWasKilled})`);
+          if (paused || itemWasKilled || shuttingDown) {
+            playing = false;
+            console.log('[engine] podcast resume paused after return moderation; not starting segment');
+            continue;
+          }
         }
       } else if (!resumedFromPause) {
         const { state } = getEpisodeState(nextItem);
@@ -3694,6 +3730,11 @@ async function radioLoop() {
           await playItemOnAllOutputs(introItem);
           if (introItem.tmpFile && !maybeKeepTtsFile(introItem.tmpFile)) { try { unlinkSync(introItem.tmpFile); } catch {} }
           console.log(`[engine] DONE [${introItem.kind}] ${introItem.artist} — ${introItem.title} (killed=${itemWasKilled})`);
+          if (paused || itemWasKilled || shuttingDown) {
+            playing = false;
+            console.log('[engine] podcast start paused after intro moderation; not starting segment');
+            continue;
+          }
         }
         const jingleItem = buildJingleItem(PODCAST_INTRO_JINGLE, 'Podcast Intro Jingle');
         if (jingleItem && !paused && !shuttingDown) {
@@ -3706,6 +3747,11 @@ async function radioLoop() {
           broadcastStatus();
           await playItemOnAllOutputs(jingleItem);
           console.log(`[engine] DONE [${jingleItem.kind}] ${jingleItem.artist} — ${jingleItem.title} (killed=${itemWasKilled})`);
+          if (paused || itemWasKilled || shuttingDown) {
+            playing = false;
+            console.log('[engine] podcast start paused after intro jingle; not starting segment');
+            continue;
+          }
         }
       }
       currentItem = nextItem;
@@ -4506,11 +4552,11 @@ const server = http.createServer(async (req, res) => {
       if (!paused) {
         pausedResumeItem = snapshotCurrentForPause();
         persistPodcastPausePosition(pausedResumeItem);
-        paused  = true;
-        playing = false;
-        killAll();
-        broadcastStatus();
       }
+      paused  = true;
+      playing = false;
+      killAll();
+      broadcastStatus();
       return send(res, 200, { ok: true, action: 'pause', resume: pausedResumeItem });
     }
 
@@ -4689,7 +4735,6 @@ const server = http.createServer(async (req, res) => {
       ]) {
         if (Object.prototype.hasOwnProperty.call(body, key)) allowed[key] = body[key];
       }
-      engineSettings = { ...engineSettings, ...allowed };
       if (Object.prototype.hasOwnProperty.call(allowed, 'musicSource')
           || Object.prototype.hasOwnProperty.call(allowed, 'wavlakePlaylistId')
           || Object.prototype.hasOwnProperty.call(allowed, 'wavlakePlaylists')) {
@@ -4699,6 +4744,7 @@ const server = http.createServer(async (req, res) => {
         }
         queue = [];
       }
+      engineSettings = normalizeEngineSettings({ ...engineSettings, ...allowed });
       saveSettings(engineSettings);
       broadcastStatus();
       return send(res, 200, engineSettings);
