@@ -1871,16 +1871,29 @@ function podcastAdCueScore(text = '') {
     /\bdiscount\b/,
     /\bforward slash\b/,
     /\bslash wbd\b/,
+    /\bhead over to\b/,
+    /\buse the code\b/,
+    /\boff your first\b/,
     /\bget started (?:today )?at\b/,
     /\bgo to\b/,
     /\bvisit\b/,
     /\bi recommend\b/,
     /\bsupport (?:the|this) show\b/,
+    /\bprivacy first mobile carrier\b/,
+    /\bsim swaps?\b/,
+    /\bno social security number\b/,
+    /\bself-custody\b/,
+    /\bhardware wallets?\b/,
+    /\bseed phrase\b/,
   ];
   const brands = [
+    /\bcape\b/,
+    /\bcape\.co\b/,
     /\bswan(?: bitcoin)?\b/,
     /\bbitkey\b/,
+    /\banchorwatch\b/,
     /\bblockware\b/,
+    /\bledn\b/,
     /\bunchained\b/,
     /\briver\b/,
     /\bfold\b/,
@@ -1892,8 +1905,9 @@ function podcastAdCueScore(text = '') {
   for (const rx of strong) if (rx.test(t)) score += 3;
   for (const rx of brands) if (rx.test(t)) score += 2;
   if (/\bbitcoiners, as you know\b/.test(t)) score += 4;
+  if (/\b(?:c-a-p-e|w-b-d)\b/.test(t)) score += 3;
   if (/\b[a-z0-9.-]+\.(?:com|world|io|net)\b/.test(t)) score += 3;
-  if (/\b(?:tax|inheritance|wealth|clients|device|wallet|mining|miners|self-custody)\b/.test(t) && score > 0) score += 1;
+  if (/\b(?:tax|inheritance|wealth|clients|device|wallet|mining|miners|self-custody|carrier|network|identifier|subscriber|recovery|loans)\b/.test(t) && score > 0) score += 1;
   return score;
 }
 
@@ -1903,14 +1917,18 @@ function findPodcastAdBreak(raw, startSeconds, minSeconds, maxSeconds) {
   if (!entries.length) return null;
   const minTarget = startSeconds + minSeconds;
   const maxTarget = startSeconds + maxSeconds;
+  // Ads are an exception to the normal "no break before 8 minutes" rule.
+  // If a sponsor block starts shortly before the normal cut window, stopping
+  // early is better than making the listener sit through the ad read.
+  const scanStart = Math.max(startSeconds + 60, minTarget - 180);
   const windowEntries = entries
-    .filter(e => e.end >= minTarget - 45 && e.start <= maxTarget)
+    .filter(e => e.end >= scanStart - 45 && e.start <= maxTarget)
     .map((entry, index) => ({
       ...entry,
       index,
       adScore: podcastAdCueScore(entry.text),
     }));
-  const firstAd = windowEntries.find(entry => entry.end >= minTarget && entry.adScore >= 4);
+  const firstAd = windowEntries.find(entry => entry.end >= scanStart && entry.adScore >= 4);
   if (!firstAd) return null;
 
   let startIndex = firstAd.index;
@@ -1918,7 +1936,7 @@ function findPodcastAdBreak(raw, startSeconds, minSeconds, maxSeconds) {
     const prev = windowEntries[startIndex - 1];
     const current = windowEntries[startIndex];
     if (!prev || current.start - prev.end > 12) break;
-    if (prev.adScore >= 2 || /^(bitcoiners|if you're|do you want|well,|and if|so if)\b/i.test(prev.text.trim())) {
+    if (prev.adScore >= 1 || /^(bitcoiners|if you're|do you want|well,|and if|so if|you wouldn't|every|carriers|their|there's|your|the big|cape is)\b/i.test(prev.text.trim())) {
       startIndex--;
       continue;
     }
@@ -1927,14 +1945,25 @@ function findPodcastAdBreak(raw, startSeconds, minSeconds, maxSeconds) {
 
   let endIndex = firstAd.index;
   let lastStrongAdIndex = firstAd.index;
+  let neutralSinceStrong = 0;
   for (let i = firstAd.index + 1; i < windowEntries.length; i++) {
     const prev = windowEntries[i - 1];
     const entry = windowEntries[i];
     const gap = entry.start - prev.end;
     if (gap > 18) break;
-    if (entry.adScore >= 2) lastStrongAdIndex = i;
-    const connective = /^(and|so|this|that|you|if|well|because|it|they|their|the|a dedicated|including|which|with|under|get|go|that's)\b/i.test(entry.text.trim());
-    if (entry.adScore >= 1 || (connective && i - lastStrongAdIndex <= 4)) {
+    const trimmed = entry.text.trim();
+    if (/^(wow|i've literally|i want to go back|and i want to go back|let's get back|back to)\b/i.test(trimmed)) break;
+    if (entry.adScore >= 2) {
+      lastStrongAdIndex = i;
+      neutralSinceStrong = 0;
+    }
+    const connective = /^(and|so|this|that|you|if|well|because|it|they|their|the|a dedicated|including|which|with|under|get|go|that's|there's|your|no|it gives|before|it's simple)\b/i.test(entry.text.trim());
+    if (entry.adScore >= 1 || (connective && i - lastStrongAdIndex <= 8)) {
+      endIndex = i;
+      continue;
+    }
+    if (i - lastStrongAdIndex <= 8 && neutralSinceStrong < 3) {
+      neutralSinceStrong++;
       endIndex = i;
       continue;
     }
@@ -1943,7 +1972,7 @@ function findPodcastAdBreak(raw, startSeconds, minSeconds, maxSeconds) {
 
   const startEntry = windowEntries[startIndex];
   const endEntry = windowEntries[endIndex];
-  const adStartSeconds = Math.max(minTarget, startEntry.start);
+  const adStartSeconds = Math.max(scanStart, startEntry.start);
   const adEndSeconds = Math.min(maxTarget, endEntry.end);
   if (adEndSeconds - adStartSeconds < 20) return null;
   return {
@@ -2138,7 +2167,7 @@ async function choosePodcastSegment(item, episodeState) {
     console.log(`[engine] podcast break candidate accepted without silence confirmation: ${semanticCut.source} @ ${Math.round(cut.seconds)}s (${cut.detail})`);
   }
 
-  if (adBreak && adBreak.startSeconds >= startSeconds + minSeconds) {
+  if (adBreak && adBreak.startSeconds >= startSeconds + 60) {
     const plannedCutSeconds = cut?.seconds || hardMaxEnd;
     if (adBreak.startSeconds <= plannedCutSeconds + 30) {
       cut = {
@@ -2154,7 +2183,10 @@ async function choosePodcastSegment(item, episodeState) {
     }
   }
 
-  const endSeconds = Math.min(Math.max(cut?.seconds || hardMaxEnd, startSeconds + minSeconds), hardMaxEnd);
+  const minEndSeconds = cut?.source === 'adBreak'
+    ? Math.max(startSeconds + 60, startSeconds + 1)
+    : startSeconds + minSeconds;
+  const endSeconds = Math.min(Math.max(cut?.seconds || hardMaxEnd, minEndSeconds), hardMaxEnd);
   if (!cut) console.log(`[engine] podcast break candidate accepted: hardMax @ ${Math.round(endSeconds)}s`);
   return {
     startSeconds,
@@ -2269,12 +2301,16 @@ async function buildPodcastSegmentContext(item, episodeState, segment) {
 async function generatePodcastModerationText(item, episodeState, segment, context, memoryContext = '') {
   try {
     const system = moderatorSystemPrompt([
-      'Erzeuge eine kurze Podcast-Abmoderation auf Deutsch.',
+      'Erzeuge eine Podcast-Abmoderation auf Deutsch mit 2 bis 3 Saetzen.',
+      'Du bist ein echter Radiohost fuer PR, Personal Radio: warm, direkt, klug, persoenlich, mit Haltung. Kein Ansager, keine Corporate Voice.',
+      'Ein Gedanke pro Moderation: lieber eine konkrete Beobachtung vertiefen als drei Themen oberflaechlich antippen.',
+      'Reagiere ehrlich darauf, was im Abschnitt interessant, schwer, schraeg oder wichtig war. Sag warum es dich als Host interessiert.',
       'Keine trockene Inhaltszusammenfassung. Nimm den gehoerten Abschnitt als Material fuer eine persoenliche Beobachtung, einen Kommentar oder einen gedanklichen Anschluss.',
       'Wenn du konkret zusammenfasst, dann nur als Sprungbrett fuer deinen Kommentar.',
       'Kein generisches "spannendes Gespraech". Nutze den Transcript-/STT-/Kapitel-Kontext.',
       'Wichtig: Verwende nur den Kontext des angegebenen Segment-Zeitfensters, nicht das gesamte Podcast-Transkript.',
-      'Dann leite organisch in Musik ueber.',
+      'Dann leite organisch in das naechste Radio-Gefuehl ueber.',
+      'Keine Floskeln wie "bleib dran", "willkommen zurueck" oder "als naechstes".',
       'Wenn kein brauchbarer Kontext vorhanden ist, sag das ehrlich und knapp. Nicht halluzinieren.',
     ].join(' '));
     const task = [
@@ -2293,7 +2329,7 @@ async function generatePodcastModerationText(item, episodeState, segment, contex
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 220,
+        max_tokens: 340,
         purpose: 'radio-moderation',
         system,
         messages: [{ role: 'user', content: task }],
@@ -2310,7 +2346,17 @@ async function generatePodcastModerationText(item, episodeState, segment, contex
   }
 }
 
-async function buildPodcastModerationItem(item, episodeState, segment, context) {
+function recordPodcastModerationItem(modItem, item, context) {
+  if (!modItem) return;
+  const callInIds = Array.isArray(modItem.moderationCallInIds) ? modItem.moderationCallInIds : [];
+  const scriptText = modItem.scriptText || '';
+  memorySafe('record podcast moderation', () => {
+    recordModeration({ purpose: 'podcast-segment', item, scriptText, context: { ...context, callInIds } });
+    markCallInsUsed(callInIds, { purpose: 'podcast-segment' });
+  });
+}
+
+async function buildPodcastModerationItem(item, episodeState, segment, context, options = {}) {
   console.log(`[engine] generating podcast moderation (${context.source})…`);
   const compiled = memorySafe('podcast moderation context', () => buildPodcastModerationContext({ item, episodeState, segment, context })) || { promptText: '', callInIds: [] };
   const text = sanitizeModerationText(await generatePodcastModerationText(item, episodeState, segment, context, compiled.promptText));
@@ -2318,11 +2364,7 @@ async function buildPodcastModerationItem(item, episodeState, segment, context) 
   const tts = await ttsToTempFile(text || fallback);
   if (!tts?.file) return null;
   const scriptText = text || fallback;
-  memorySafe('record podcast moderation', () => {
-    recordModeration({ purpose: 'podcast-segment', item, scriptText, context: { ...context, callInIds: compiled.callInIds } });
-    markCallInsUsed(compiled.callInIds, { purpose: 'podcast-segment' });
-  });
-  return {
+  const modItem = {
     kind: 'moderation',
     id: `podcast-mod-${Date.now()}`,
     title: 'Podcast Moderation',
@@ -2332,8 +2374,11 @@ async function buildPodcastModerationItem(item, episodeState, segment, context) 
     duration: tts.durationSeconds || 0,
     tmpFile: tts.file,
     scriptText,
+    moderationCallInIds: compiled.callInIds,
     plannedNextKind: 'music',
   };
+  if (options.record !== false) recordPodcastModerationItem(modItem, item, context);
+  return modItem;
 }
 
 async function generatePodcastIntroText(item, episodeState, isResume, memoryContext = '', introContext = null) {
@@ -2621,6 +2666,17 @@ async function playPodcastSegment(item) {
 
   const startedMs = Date.now();
   const playbackItem = { ...item, liveUrl: segmentPlaybackFile || resolvedAudioUrl };
+  const podcastModerationPreGenPromise = (async () => {
+    try {
+      const preContext = await buildPodcastSegmentContext(resolvedItem, state, segment);
+      const preModItem = await buildPodcastModerationItem(resolvedItem, state, segment, preContext, { record: false });
+      if (preModItem) console.log('[engine] podcast moderation pre-generated, ready');
+      return { context: preContext, modItem: preModItem };
+    } catch (err) {
+      console.warn('[engine] podcast moderation pre-gen failed:', err.message);
+      return null;
+    }
+  })();
   const checkpointPodcastPosition = () => {
     const elapsed = Math.max(0, Math.min(segment.durationSeconds, (Date.now() - startedMs) / 1000));
     const checkpoint = Math.min(segment.endSeconds, segment.startSeconds + elapsed);
@@ -2677,9 +2733,15 @@ async function playPodcastSegment(item) {
   console.log(`[engine] podcast resume boundary saved: ${Math.round(state.positionSeconds)}s completed=${reachedEpisodeEnd}`);
 
   let context = { source: 'fallback', excerpt: '', chapterTitle: '' };
+  let moderationItem = null;
   const shouldModerate = (!itemWasKilled || podcastSegmentSkipRequested) && actualElapsed >= 1;
   if (shouldModerate) {
-    context = await buildPodcastSegmentContext(resolvedItem, state, { ...segment, endSeconds: endPosition });
+    const preGenerated = await Promise.race([
+      podcastModerationPreGenPromise,
+      sleep(4_000).then(() => null),
+    ]);
+    context = preGenerated?.context || await buildPodcastSegmentContext(resolvedItem, state, { ...segment, endSeconds: endPosition });
+    moderationItem = preGenerated?.modItem || null;
     state.lastContextSource = context.source;
   }
 
@@ -2727,6 +2789,7 @@ async function playPodcastSegment(item) {
     state,
     segment: { ...segment, endSeconds: endPosition },
     context,
+    moderationItem,
     shouldModerate,
     completed: reachedEpisodeEnd,
     skipped: wasSegmentSkip,
@@ -3753,13 +3816,16 @@ async function radioLoop() {
         await playItemOnAllOutputs(returnJingle);
         console.log(`[engine] DONE [${returnJingle.kind}] ${returnJingle.artist} — ${returnJingle.title} (killed=${itemWasKilled})`);
       }
-      const modItem = await buildPodcastModerationItem(
+      const modItem = podcastSegmentResult.moderationItem || await buildPodcastModerationItem(
         nextItem,
         podcastSegmentResult.state,
         podcastSegmentResult.segment,
         podcastSegmentResult.context,
       );
       if (modItem) {
+        if (podcastSegmentResult.moderationItem) {
+          recordPodcastModerationItem(modItem, nextItem, podcastSegmentResult.context);
+        }
         currentItem = modItem;
         startedAt = Date.now();
         playing = true;
