@@ -28,6 +28,10 @@ const LIVE_STREAM_REPLAY_SECONDS = Number.isFinite(configuredReplaySeconds) && c
   : 4;
 const liveStreamBitrateKbps = Number(String(LIVE_STREAM_BITRATE).match(/\d+/)?.[0] || 128);
 const LIVE_STREAM_REPLAY_BYTES = Math.max(0, Math.round((liveStreamBitrateKbps * 1000 / 8) * LIVE_STREAM_REPLAY_SECONDS));
+const configuredBackpressureMaxMs = Number(process.env.PERSONAL_RADIO_STREAM_BACKPRESSURE_MAX_MS);
+const LIVE_STREAM_BACKPRESSURE_MAX_MS = Number.isFinite(configuredBackpressureMaxMs) && configuredBackpressureMaxMs > 0
+  ? Math.max(1000, configuredBackpressureMaxMs)
+  : 8_000;
 
 // Load a simple KEY=VALUE .env file without printing secrets.
 try {
@@ -97,7 +101,18 @@ function liveClientDetails() {
     bytesWritten: client.bytesWritten,
     lastWriteAt: client.lastWriteAt?.toISOString() || null,
     backpressureCount: client.backpressureCount,
+    backpressured: client.backpressured,
+    skippedBytes: client.skippedBytes,
+    listener: isRealLiveListener(client),
   }));
+}
+
+function isProbeLiveClient(client) {
+  return /\b(Lavf|ffmpeg|ffprobe|curl|Wget)\b/i.test(client?.userAgent || '');
+}
+
+function isRealLiveListener(client) {
+  return !isProbeLiveClient(client);
 }
 
 function removeLiveClient(id, reason = 'removed') {
@@ -146,8 +161,41 @@ function writeLiveReplay(client) {
     const ok = client.res.write(chunk);
     client.bytesWritten += chunk.length;
     client.lastWriteAt = new Date();
-    if (!ok) client.backpressureCount += 1;
+    if (!ok) {
+      markClientBackpressured(client);
+      return;
+    }
   }
+}
+
+function markClientBackpressured(client) {
+  client.backpressureCount += 1;
+  if (client.backpressured) return;
+  client.backpressured = true;
+  client.backpressureStartedAt = Date.now();
+  client.res.once('drain', () => {
+    client.backpressured = false;
+    client.backpressureStartedAt = null;
+    client.lastDrainAt = new Date();
+  });
+}
+
+function writeLiveChunkToClient(client, chunk) {
+  if (client.res.destroyed || client.res.writableEnded) {
+    removeLiveClient(client.id, 'write:closed');
+    return;
+  }
+  if (client.backpressured) {
+    client.skippedBytes += chunk.length;
+    if (Date.now() - Number(client.backpressureStartedAt || Date.now()) > LIVE_STREAM_BACKPRESSURE_MAX_MS) {
+      removeLiveClient(client.id, 'write:backpressure-timeout');
+    }
+    return;
+  }
+  const ok = client.res.write(chunk);
+  client.bytesWritten += chunk.length;
+  client.lastWriteAt = new Date();
+  if (!ok) markClientBackpressured(client);
 }
 
 function startLiveEncoder() {
@@ -184,14 +232,7 @@ function startLiveEncoder() {
     pruneLiveClients('write');
     for (const client of liveClients.values()) {
       try {
-        if (client.res.destroyed || client.res.writableEnded) {
-          removeLiveClient(client.id, 'write:closed');
-          continue;
-        }
-        const ok = client.res.write(chunk);
-        client.bytesWritten += chunk.length;
-        client.lastWriteAt = new Date();
-        if (!ok) client.backpressureCount += 1;
+        writeLiveChunkToClient(client, chunk);
       } catch (err) {
         liveLastError = err.message;
         removeLiveClient(client.id, `write-error:${err.message}`);
@@ -242,7 +283,8 @@ function liveStreamStatus() {
     bitrate: LIVE_STREAM_BITRATE,
     requireTailscale: LIVE_STREAM_REQUIRE_TAILSCALE,
     maxClientAgeSeconds: Math.floor(LIVE_STREAM_CLIENT_MAX_MS / 1000),
-    clients: liveClients.size,
+    clients: Array.from(liveClients.values()).filter(isRealLiveListener).length,
+    totalClients: liveClients.size,
     clientDetails: liveClientDetails(),
     encoderRunning: !!liveEncoder,
     startedAt: liveEncoderStartedAt?.toISOString() || null,
@@ -293,6 +335,10 @@ function handleLiveMp3(req, res) {
     bytesWritten: 0,
     lastWriteAt: null,
     backpressureCount: 0,
+    backpressured: false,
+    backpressureStartedAt: null,
+    lastDrainAt: null,
+    skippedBytes: 0,
   };
   liveClients.set(id, client);
   console.log(`[live-stream] client #${id} connected from ${client.remoteAddress} ${client.userAgent}`);
