@@ -22,6 +22,12 @@ const configuredLiveStreamClientMaxMs = Number(process.env.PERSONAL_RADIO_STREAM
 const LIVE_STREAM_CLIENT_MAX_MS = Number.isFinite(configuredLiveStreamClientMaxMs) && configuredLiveStreamClientMaxMs > 0
   ? Math.max(60_000, configuredLiveStreamClientMaxMs)
   : 3 * 60 * 60_000;
+const configuredReplaySeconds = Number(process.env.PERSONAL_RADIO_STREAM_REPLAY_SECONDS);
+const LIVE_STREAM_REPLAY_SECONDS = Number.isFinite(configuredReplaySeconds) && configuredReplaySeconds >= 0
+  ? Math.min(15, configuredReplaySeconds)
+  : 4;
+const liveStreamBitrateKbps = Number(String(LIVE_STREAM_BITRATE).match(/\d+/)?.[0] || 128);
+const LIVE_STREAM_REPLAY_BYTES = Math.max(0, Math.round((liveStreamBitrateKbps * 1000 / 8) * LIVE_STREAM_REPLAY_SECONDS));
 
 // Load a simple KEY=VALUE .env file without printing secrets.
 try {
@@ -61,6 +67,8 @@ let liveEncoderStartedAt = null;
 let liveBytes = 0;
 let liveLastError = '';
 let liveStopTimer = null;
+let liveReplayBytes = 0;
+let liveReplayChunks = [];
 
 function normalizeRemoteAddress(req) {
   return String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -116,6 +124,32 @@ function pruneLiveClients(reason = 'prune') {
   }
 }
 
+function resetLiveReplayBuffer() {
+  liveReplayBytes = 0;
+  liveReplayChunks = [];
+}
+
+function rememberLiveChunk(chunk) {
+  if (!LIVE_STREAM_REPLAY_BYTES) return;
+  liveReplayChunks.push(chunk);
+  liveReplayBytes += chunk.length;
+  while (liveReplayBytes > LIVE_STREAM_REPLAY_BYTES && liveReplayChunks.length > 1) {
+    const old = liveReplayChunks.shift();
+    liveReplayBytes -= old.length;
+  }
+}
+
+function writeLiveReplay(client) {
+  if (!liveReplayChunks.length) return;
+  for (const chunk of liveReplayChunks) {
+    if (client.res.destroyed || client.res.writableEnded) return;
+    const ok = client.res.write(chunk);
+    client.bytesWritten += chunk.length;
+    client.lastWriteAt = new Date();
+    if (!ok) client.backpressureCount += 1;
+  }
+}
+
 function startLiveEncoder() {
   if (liveEncoder) return liveEncoder;
   if (liveStopTimer) {
@@ -125,6 +159,7 @@ function startLiveEncoder() {
 
   liveBytes = 0;
   liveLastError = '';
+  resetLiveReplayBuffer();
   liveEncoderStartedAt = new Date();
   const args = [
     '-hide_banner',
@@ -145,6 +180,7 @@ function startLiveEncoder() {
 
   liveEncoder.stdout.on('data', chunk => {
     liveBytes += chunk.length;
+    rememberLiveChunk(chunk);
     pruneLiveClients('write');
     for (const client of liveClients.values()) {
       try {
@@ -235,10 +271,14 @@ function handleLiveMp3(req, res) {
   if (!streamClientAllowed(req)) {
     return send(res, 403, { 'content-type': 'text/plain; charset=utf-8' }, 'Livestream is available over Tailscale only.\n');
   }
+  req.socket.setNoDelay(true);
+  req.socket.setKeepAlive(true, 30_000);
   res.writeHead(200, {
     'content-type': 'audio/mpeg',
     'cache-control': 'no-store, no-transform',
-    'connection': 'close',
+    'connection': 'keep-alive',
+    'transfer-encoding': 'chunked',
+    'x-accel-buffering': 'no',
     'access-control-allow-origin': '*',
     'icy-name': 'PR Personal Radio',
     'icy-metaint': '0',
@@ -257,6 +297,7 @@ function handleLiveMp3(req, res) {
   liveClients.set(id, client);
   console.log(`[live-stream] client #${id} connected from ${client.remoteAddress} ${client.userAgent}`);
   startLiveEncoder();
+  writeLiveReplay(client);
   const cleanup = reason => removeLiveClient(id, reason);
   req.on('close', () => cleanup('request-close'));
   req.on('aborted', () => cleanup('request-aborted'));
