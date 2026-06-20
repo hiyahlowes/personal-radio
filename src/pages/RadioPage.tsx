@@ -130,6 +130,7 @@ function randInt(min: number, max: number) {
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 const MIX_RATIO_KEY = 'pr:mix-ratio';
+const REMOTE_DEVICE_AUDIO_KEY = 'pr:remote-device-audio';
 /** Map mix slider value (0–100) to number of music tracks before a podcast slot. */
 function computeBudget(ratio: number): number {
   return Math.round(1 + (ratio / 100) * 8);
@@ -142,6 +143,11 @@ function loadMixRatio(): number {
     const v = parseInt(localStorage.getItem(MIX_RATIO_KEY) ?? '', 10);
     return isNaN(v) ? 50 : Math.max(0, Math.min(100, v));
   } catch { return 50; }
+}
+function loadRemoteDeviceAudioEnabled(): boolean {
+  try {
+    return localStorage.getItem(REMOTE_DEVICE_AUDIO_KEY) === '1';
+  } catch { return false; }
 }
 
 // Pre-load jingles as Howl instances — HTMLAudioElement is not gesture-unlocked
@@ -359,6 +365,7 @@ export function RadioPage() {
   const remoteStreamAudioRef = useRef<HTMLAudioElement | null>(null);
   const [remoteStreamError, setRemoteStreamError] = useState('');
   const [remoteStreamPlaying, setRemoteStreamPlaying] = useState(false);
+  const [remoteDeviceAudioEnabled, setRemoteDeviceAudioEnabled] = useState(loadRemoteDeviceAudioEnabled);
 
   // ── Episode management panel ──────────────────────────────────────────────
   const [expandedFeed, setExpandedFeed] = useState<string | null>(null);
@@ -2095,6 +2102,24 @@ export function RadioPage() {
     });
   }, [ensureRemoteStreamAudio, muted, volume]);
 
+  const toggleRemoteDeviceAudio = useCallback(() => {
+    const next = !remoteDeviceAudioEnabled;
+    setRemoteDeviceAudioEnabled(next);
+    try {
+      localStorage.setItem(REMOTE_DEVICE_AUDIO_KEY, next ? '1' : '0');
+    } catch {
+      // Local preference only; ignore storage failures.
+    }
+    if (next) {
+      setBuf(true);
+      startRemoteLivestream({ forceReload: true });
+    } else {
+      stopRemoteLivestream();
+      setBuf(false);
+      setRemoteStreamError('');
+    }
+  }, [remoteDeviceAudioEnabled, startRemoteLivestream, stopRemoteLivestream]);
+
   const _primeRemoteStreamListener = useCallback(() => {
     const controller = new AbortController();
     fetch(`/live.mp3?prime=${Date.now()}`, { signal: controller.signal })
@@ -2139,11 +2164,23 @@ export function RadioPage() {
     return () => stopRemoteLivestream();
   }, [IS_REMOTE, stopRemoteLivestream]);
 
+  useEffect(() => {
+    if (!IS_REMOTE || remoteDeviceAudioEnabled) return;
+    stopRemoteLivestream();
+    setBuf(false);
+    setRemoteStreamError('');
+  }, [IS_REMOTE, remoteDeviceAudioEnabled, stopRemoteLivestream]);
+
   // ── Public controls ───────────────────────────────────────────────────────
   const handlePlay = useCallback(() => {
     if (IS_REMOTE) {
-      setBuf(true);
-      startRemoteLivestream({ forceReload: true });
+      if (remoteDeviceAudioEnabled) {
+        setBuf(true);
+        startRemoteLivestream({ forceReload: true });
+      } else {
+        setBuf(false);
+        setRemoteStreamError('');
+      }
       void engineMode.play();
       return;
     }
@@ -2212,15 +2249,20 @@ export function RadioPage() {
         advanceLoop();
       }
     }
-  }, [IS_REMOTE, engineMode, startRemoteLivestream, startRadio, advanceLoop]);
+  }, [IS_REMOTE, engineMode, remoteDeviceAudioEnabled, startRemoteLivestream, startRadio, advanceLoop]);
 
   const handleFreshRestart = useCallback(() => {
     if (!IS_REMOTE) return;
     stopRemoteLivestream();
-    setBuf(true);
-    startRemoteLivestream({ forceReload: true });
+    if (remoteDeviceAudioEnabled) {
+      setBuf(true);
+      startRemoteLivestream({ forceReload: true });
+    } else {
+      setBuf(false);
+      setRemoteStreamError('');
+    }
     void engineMode.restart();
-  }, [IS_REMOTE, engineMode, stopRemoteLivestream, startRemoteLivestream]);
+  }, [IS_REMOTE, engineMode, remoteDeviceAudioEnabled, stopRemoteLivestream, startRemoteLivestream]);
 
   const handlePause = useCallback(() => {
     if (IS_REMOTE) {
@@ -2305,6 +2347,11 @@ export function RadioPage() {
   useEffect(() => {
     if (!IS_REMOTE || typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
     const mediaSession = navigator.mediaSession;
+    if (!remoteDeviceAudioEnabled && !remoteStreamPlaying) {
+      mediaSession.metadata = null;
+      mediaSession.playbackState = 'none';
+      return;
+    }
     const item = engineMode.status?.currentItem;
     const artworkUrl = item?.artworkUrl || '/icon-512.png';
     const title = item?.title
@@ -2324,7 +2371,7 @@ export function RadioPage() {
       });
     }
     mediaSession.playbackState = playing ? 'playing' : 'paused';
-  }, [IS_REMOTE, engineMode.status?.currentItem, engineMode.status?.playing, playing]);
+  }, [IS_REMOTE, engineMode.status?.currentItem, engineMode.status?.playing, playing, remoteDeviceAudioEnabled, remoteStreamPlaying]);
 
   useEffect(() => {
     if (!IS_REMOTE || typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
@@ -2334,6 +2381,12 @@ export function RadioPage() {
         // Some iOS/Safari builds expose Media Session but reject selected actions.
       }
     };
+    if (!remoteDeviceAudioEnabled && !remoteStreamPlaying) {
+      setHandler('play', null);
+      setHandler('pause', null);
+      setHandler('nexttrack', null);
+      return;
+    }
     setHandler('play', handlePlay);
     setHandler('pause', handlePause);
     setHandler('nexttrack', handleNext);
@@ -2342,7 +2395,7 @@ export function RadioPage() {
       setHandler('pause', null);
       setHandler('nexttrack', null);
     };
-  }, [IS_REMOTE, handlePlay, handlePause, handleNext]);
+  }, [IS_REMOTE, handlePlay, handlePause, handleNext, remoteDeviceAudioEnabled, remoteStreamPlaying]);
 
   const handleDislike = useCallback((track: WavlakeTrack) => {
     if (IS_REMOTE) {
@@ -2638,7 +2691,7 @@ export function RadioPage() {
     for (const output of outputs) engineMode.setVolume(output, nextVolume);
   };
   const openCallInCount = engineMode.callIns?.filter(c => c.status === 'open').length ?? 0;
-  const mainControlIsPlaying = IS_REMOTE ? remoteStreamPlaying : playing;
+  const mainControlIsPlaying = playing;
   const submitCallIn = async () => {
     const text = callInText.trim();
     if (!text || callInSending) return;
@@ -3204,19 +3257,35 @@ export function RadioPage() {
             </div>
             <div className="flex-1 flex justify-end">
               {IS_REMOTE ? (
-                <button
-                  type="button"
-                  onClick={() => setCallInOpen(open => !open)}
-                  className="relative px-3 py-1.5 rounded-full border border-amber-400/25 bg-amber-400/10 text-xs font-semibold text-amber-200 hover:bg-amber-400/15 transition-colors"
-                  aria-label="Call in"
-                >
-                  Call In
-                  {openCallInCount > 0 && (
-                    <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-amber-300 text-[10px] font-black text-black flex items-center justify-center">
-                      {openCallInCount}
-                    </span>
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={toggleRemoteDeviceAudio}
+                    className={`min-h-9 rounded-full border px-3 text-xs font-semibold transition-colors ${
+                      remoteDeviceAudioEnabled
+                        ? 'border-emerald-300/40 bg-emerald-300/15 text-emerald-100 hover:bg-emerald-300/20'
+                        : 'border-white/15 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white'
+                    }`}
+                    aria-pressed={remoteDeviceAudioEnabled}
+                    aria-label={remoteDeviceAudioEnabled ? 'Handy Audio ausschalten' : 'Handy Audio einschalten'}
+                    title={remoteDeviceAudioEnabled ? 'Handy Audio ausschalten' : 'Handy Audio einschalten'}
+                  >
+                    {remoteDeviceAudioEnabled ? 'Handy Audio' : 'Nur Remote'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCallInOpen(open => !open)}
+                    className="relative min-h-9 rounded-full border border-amber-400/25 bg-amber-400/10 px-3 text-xs font-semibold text-amber-200 hover:bg-amber-400/15 transition-colors"
+                    aria-label="Call in"
+                  >
+                    Call In
+                    {openCallInCount > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 px-1 rounded-full bg-amber-300 text-[10px] font-black text-black flex items-center justify-center">
+                        {openCallInCount}
+                      </span>
+                    )}
+                  </button>
+                </div>
               ) : (
                 <a href="https://wavlake.com" target="_blank" rel="noopener noreferrer" className="hidden sm:inline text-white/20 hover:text-purple-400 transition-colors text-xs">⚡ Wavlake</a>
               )}
