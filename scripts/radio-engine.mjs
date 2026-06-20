@@ -380,6 +380,7 @@ let pendingPodcastIntroPromise = null;
 let pendingPodcastIntroKey = null;
 const podcastSegmentPrefetches = new Map();
 const preparedPodcastSegmentCache = new Map();
+let coveredPodcastIntroKey = null;
 
 // Per-output state
 const outputState = {};
@@ -2527,17 +2528,24 @@ async function validatePendingModerationPlan(plan) {
 
 async function generateModerationText(currentSong, nextItem = null, memoryContext = '') {
   try {
+    const nextIsPodcast = nextItem?.kind === 'podcast';
     const system = moderatorSystemPrompt([
       'Schreibe eine kurze Uebergangsmoderation auf Deutsch.',
       'Moderiere den gelaufenen Song kurz ab und den naechsten Inhalt organisch an.',
-      'Wenn als Naechstes ein Podcast kommt, leite klar aber nicht langatmig in den Podcast ueber.',
+      nextIsPodcast
+        ? 'Wenn als Naechstes ein Podcast kommt, ist dies die einzige Podcast-Anmoderation vor dem Jingle. Fuehre Song-Abmoderation und Podcast-Anmoderation in einem zusammenhaengenden Text zusammen.'
+        : 'Wenn als Naechstes Musik kommt, moderiere den gelaufenen Song kurz ab und den naechsten Song organisch an.',
       'Nutze Memory nur, wenn es wirklich organisch passt.',
     ].join(' '));
     const task   = [
-      `Schreibe eine kurze Übergangsmoderation (1-2 Sätze).`,
+      nextIsPodcast
+        ? 'Schreibe eine zusammenhängende Übergangsmoderation (2-3 kurze Sätze). Sie ersetzt das separate Podcast-Intro vollständig.'
+        : 'Schreibe eine kurze Übergangsmoderation (1-2 Sätze).',
       `Gerade lief: "${currentSong.artist} — ${currentSong.title}".`,
       describeUpcomingItem(nextItem),
-      'Moderiere den gelaufenen Song kurz ab und den nächsten Inhalt organisch an. Wenn als Nächstes ein Podcast kommt, leite klar aber nicht langatmig in den Podcast über.',
+      nextIsPodcast
+        ? 'Erwähne den Podcast nur einmal. Kein zweites "jetzt geht es in..." am Ende. Danach kommt direkt der Podcast-Jingle.'
+        : 'Moderiere den gelaufenen Song kurz ab und den nächsten Inhalt organisch an.',
       memoryContext,
       'Nutze Memory nur, wenn es wirklich organisch passt. Nicht jedes Mal sagen, dass du dich erinnerst.',
     ].filter(Boolean).join('\n\n');
@@ -2700,6 +2708,8 @@ async function buildModerationItem(afterSong, nextItem = null) {
     tmpFile: tts.file,      // track temp file for cleanup
     scriptText: text,
     plannedNextKind: nextItem?.kind || 'music',
+    coversPodcastIntro: nextItem?.kind === 'podcast',
+    coveredPodcastIntroKey: nextItem?.kind === 'podcast' ? podcastEpisodeKey(nextItem) : null,
   };
 }
 
@@ -3146,14 +3156,7 @@ async function radioLoop() {
             afterSongKey: itemKey(songForMod),
             upcomingKey: moderationPlanKey(upcoming),
           };
-          if (upcoming?.kind === 'podcast' && pendingPodcastIntroPromise === null) {
-            const { state } = getEpisodeState(upcoming);
-            const key = podcastEpisodeKey(upcoming);
-            const isResume = Number(state.positionSeconds || 0) > 60 || Number(state.part || 1) > 1;
-            pendingPodcastIntroKey = key;
-            pendingPodcastIntroPromise = buildPodcastIntroItem(upcoming, state, isResume)
-              .then(item => { if (item) console.log('[engine] podcast intro pre-generated, ready'); return item; })
-              .catch(err => { console.warn('[engine] podcast intro pre-gen error:', err.message); return null; });
+          if (upcoming?.kind === 'podcast') {
             prefetchPodcastSegment(upcoming);
           }
           return buildModerationItem(songForMod, upcoming);
@@ -3165,6 +3168,7 @@ async function radioLoop() {
     if (nextItem.kind === 'music'
         && !sessionIntroRequest
         && pendingPodcastIntroPromise === null
+        && !moderationDueAfterCurrentMusic()
         && isPodcastDueAfterCurrentMusic()) {
       planUpcomingAfterCurrentMusic()
         .then(upcoming => {
@@ -3204,7 +3208,19 @@ async function radioLoop() {
         const isResume = Number(state.positionSeconds || 0) > 60 || Number(state.part || 1) > 1;
         const key = podcastEpisodeKey(nextItem);
         let introItem = null;
-        if (pendingPodcastIntroPromise && pendingPodcastIntroKey === key) {
+        const introCovered = !isResume && coveredPodcastIntroKey === key;
+        if (coveredPodcastIntroKey && coveredPodcastIntroKey !== key) coveredPodcastIntroKey = null;
+        if (introCovered) {
+          console.log(`[engine] skipping podcast intro; covered by transition moderation: ${key}`);
+          if (pendingPodcastIntroPromise && pendingPodcastIntroKey === key) {
+            pendingPodcastIntroPromise.then(item => {
+              if (item?.tmpFile && !maybeKeepTtsFile(item.tmpFile)) { try { unlinkSync(item.tmpFile); } catch {} }
+            }).catch(() => {});
+          }
+          pendingPodcastIntroPromise = null;
+          pendingPodcastIntroKey = null;
+          coveredPodcastIntroKey = null;
+        } else if (pendingPodcastIntroPromise && pendingPodcastIntroKey === key) {
           introItem = await Promise.race([
             pendingPodcastIntroPromise,
             sleep(2_000).then(() => null),
@@ -3215,7 +3231,7 @@ async function radioLoop() {
           pendingPodcastIntroPromise = null;
           pendingPodcastIntroKey = null;
         }
-        if (!introItem) introItem = await buildPodcastIntroItem(nextItem, state, isResume);
+        if (!introCovered && !introItem) introItem = await buildPodcastIntroItem(nextItem, state, isResume);
         if (introItem && !paused && !shuttingDown) {
           currentItem = introItem;
           startedAt = Date.now();
@@ -3270,6 +3286,10 @@ async function radioLoop() {
       } else if (nextItem.kind === 'moderation' && playResults.some(result => result?.reason === 'moderation-to-music-duck')) {
         nextMusicFadeInSeconds = Number(playOptions.nextMusicFadeInSeconds || moderationDuckSeconds());
         console.log(`[engine] moderation ducking armed for next music (${nextMusicFadeInSeconds}s)`);
+      }
+      if (nextItem.kind === 'moderation' && nextItem.coversPodcastIntro && nextItem.coveredPodcastIntroKey && !itemWasKilled) {
+        coveredPodcastIntroKey = nextItem.coveredPodcastIntroKey;
+        console.log(`[engine] podcast intro covered by transition moderation: ${coveredPodcastIntroKey}`);
       }
     }
 
@@ -3696,6 +3716,7 @@ function clearPendingPlaybackPlans() {
   clearPendingPodcastSegmentPrefetch();
   pendingSessionIntroPromise = null;
   sessionIntroSongKey = null;
+  coveredPodcastIntroKey = null;
 }
 
 async function startFreshRadioSession(reason = 'manual') {
