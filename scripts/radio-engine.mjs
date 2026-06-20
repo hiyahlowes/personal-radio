@@ -397,6 +397,8 @@ let pendingModerationPromise = null;
 let pendingModerationPlan = null;
 let pendingPodcastIntroPromise = null;
 let pendingPodcastIntroKey = null;
+let pendingPodcastReturnPromise = null;
+let pendingPodcastReturnKey = null;
 const podcastSegmentPrefetches = new Map();
 const preparedPodcastSegmentCache = new Map();
 let coveredPodcastIntroKey = null;
@@ -2492,6 +2494,38 @@ async function buildPodcastReturnItem(episodeState) {
   };
 }
 
+function discardPendingPodcastReturn() {
+  const pending = pendingPodcastReturnPromise;
+  pendingPodcastReturnPromise = null;
+  pendingPodcastReturnKey = null;
+  if (pending) {
+    pending.then(item => {
+      if (item?.tmpFile && !maybeKeepTtsFile(item.tmpFile)) {
+        try { unlinkSync(item.tmpFile); } catch {}
+      }
+    }).catch(() => {});
+  }
+}
+
+function pregenPodcastReturnForResume(reason = 'music-break') {
+  if (pendingPodcastReturnPromise) return;
+  const resumePodcast = currentPodcastResumeItem();
+  if (!resumePodcast) return;
+  const { state } = getEpisodeState(resumePodcast);
+  const key = podcastEpisodeKey(resumePodcast);
+  pendingPodcastReturnKey = key;
+  pendingPodcastReturnPromise = buildPodcastReturnItem(state)
+    .then(item => {
+      if (item) console.log(`[engine] podcast return pre-generated, ready (${reason})`);
+      return item;
+    })
+    .catch(err => {
+      console.warn('[engine] podcast return pre-gen error:', err.message);
+      return null;
+    });
+  prefetchPodcastSegment(resumePodcast);
+}
+
 function buildJingleItem(file, title) {
   if (!existsSync(file)) return null;
   return {
@@ -2507,8 +2541,12 @@ function buildJingleItem(file, title) {
 
 function choosePodcastBreakSongs() {
   const configured = Number(engineSettings.podcastAfterSongs);
-  if (Number.isFinite(configured)) return Math.max(1, Math.min(12, Math.round(configured)));
-  return DEFAULT_SETTINGS.podcastAfterSongs;
+  const target = Number.isFinite(configured)
+    ? Math.max(1, Math.min(12, Math.round(configured)))
+    : DEFAULT_SETTINGS.podcastAfterSongs;
+  const min = Math.max(1, target - 1);
+  const max = Math.max(min, Math.min(12, target + 1));
+  return min + Math.floor(Math.random() * (max - min + 1));
 }
 
 function cleanupPreparedPodcastSegment(prepared) {
@@ -3618,6 +3656,9 @@ async function radioLoop() {
           .then(item => { if (item) console.log('[engine] session intro pre-generated, ready'); return item; })
           .catch(err => { console.warn('[engine] session intro pre-gen error:', err.message); return null; });
       }
+      if (podcastBreakSongsRemaining === 1) {
+        pregenPodcastReturnForResume('last music break song');
+      }
     }
     broadcastStatus();
 
@@ -3673,7 +3714,19 @@ async function radioLoop() {
     if (nextItem.kind === 'podcast') {
       if (resumedAfterPodcastBreak) {
         const { state } = getEpisodeState(nextItem);
-        const returnItem = await buildPodcastReturnItem(state);
+        const key = podcastEpisodeKey(nextItem);
+        let returnItem = null;
+        if (pendingPodcastReturnPromise && pendingPodcastReturnKey === key) {
+          returnItem = await Promise.race([
+            pendingPodcastReturnPromise,
+            sleep(2_000).then(() => null),
+          ]);
+          pendingPodcastReturnPromise = null;
+          pendingPodcastReturnKey = null;
+        } else if (pendingPodcastReturnPromise) {
+          discardPendingPodcastReturn();
+        }
+        if (!returnItem) returnItem = await buildPodcastReturnItem(state);
         if (returnItem && !paused && !shuttingDown) {
           currentItem = returnItem;
           startedAt = Date.now();
@@ -4221,6 +4274,7 @@ function clearPendingPlaybackPlans() {
   pendingModerationPlan = null;
   pendingPodcastIntroPromise = null;
   pendingPodcastIntroKey = null;
+  discardPendingPodcastReturn();
   clearPendingPodcastSegmentPrefetch();
   pendingSessionIntroPromise = null;
   sessionIntroSongKey = null;
@@ -4293,6 +4347,7 @@ function suspendForNoListeners(snapshot) {
   pendingModerationPlan = null;
   pendingPodcastIntroPromise = null;
   pendingPodcastIntroKey = null;
+  discardPendingPodcastReturn();
   pendingSessionIntroPromise = null;
   sessionIntroSongKey = null;
   paused = true;
