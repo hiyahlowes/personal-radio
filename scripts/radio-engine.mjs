@@ -1738,12 +1738,13 @@ function findTranscriptCut(raw, startSeconds, minSeconds, maxSeconds) {
     if (cue.end < minTarget || cue.end > maxTarget) continue;
     const next = entries[i + 1];
     const gap = next ? next.start - cue.end : 2;
-    if (terminal.test(cue.text.trim()) && gap >= 1.5) {
-      return { seconds: cue.end, title: '', source: 'transcriptCue' };
+    const text = String(cue.text || '').trim();
+    const words = text.split(/\s+/).filter(Boolean).length;
+    if (terminal.test(text) && words >= 6 && gap >= 0.25) {
+      return { seconds: cue.end, title: '', source: 'transcriptCue', gapSeconds: gap };
     }
   }
-  const firstAfterMin = entries.find(e => e.end >= minTarget && e.end <= maxTarget);
-  return firstAfterMin ? { seconds: firstAfterMin.end, title: '', source: 'transcriptCue' } : null;
+  return null;
 }
 
 async function fetchTranscriptRawForEpisode(item, episodeState) {
@@ -1815,10 +1816,18 @@ async function choosePodcastSegment(item, episodeState) {
 
   if (engineSettings.podcastPreferTranscriptChapters !== false) {
     cut = findChapterCut(episodeState.chapters, startSeconds, minSeconds, maxSeconds);
+    if (cut) {
+      console.log(`[engine] podcast break candidate accepted: chapter @ ${Math.round(cut.seconds)}s${cut.title ? ` (${cut.title})` : ''}`);
+    }
     if (!cut && (episodeState.transcriptUrl || readCachedPodcastTranscript(item.episode || item)?.status === 'completed')) {
       try {
         transcriptRaw = await fetchTranscriptRawForEpisode(item, episodeState);
         cut = findTranscriptCut(transcriptRaw, startSeconds, minSeconds, maxSeconds);
+        if (cut) {
+          console.log(`[engine] podcast break candidate accepted: transcriptCue @ ${Math.round(cut.seconds)}s gap=${Number(cut.gapSeconds || 0).toFixed(1)}s`);
+        } else {
+          console.log('[engine] podcast transcript had no logical break candidate in segment window; trying silence');
+        }
       } catch(e) {
         console.warn('[engine] podcast transcript cut failed:', e.message);
       }
@@ -1827,9 +1836,11 @@ async function choosePodcastSegment(item, episodeState) {
 
   if (!cut) {
     cut = await findSilenceCut(item, startSeconds, minSeconds, maxSeconds);
+    if (cut) console.log(`[engine] podcast break candidate accepted: silence @ ${Math.round(cut.seconds)}s`);
   }
 
   const endSeconds = Math.min(Math.max(cut?.seconds || hardMaxEnd, startSeconds + minSeconds), hardMaxEnd);
+  if (!cut) console.log(`[engine] podcast break candidate accepted: hardMax @ ${Math.round(endSeconds)}s`);
   return {
     startSeconds,
     endSeconds,
@@ -2303,6 +2314,7 @@ async function playPodcastSegment(item) {
   state.completed = reachedEpisodeEnd;
   state.lastSegmentStart = segment.startSeconds;
   state.lastSegmentEnd = endPosition;
+  console.log(`[engine] podcast resume boundary saved: ${Math.round(state.positionSeconds)}s completed=${reachedEpisodeEnd}`);
 
   let context = { source: 'fallback', excerpt: '', chapterTitle: '' };
   const shouldModerate = (!itemWasKilled || podcastSegmentSkipRequested) && actualElapsed >= 1;
