@@ -3893,6 +3893,9 @@ async function radioLoop() {
       podcastState.breakSongsRemaining = podcastBreakSongsRemaining;
       savePodcastState();
       console.log(`[engine] podcast music break: ${podcastBreakSongsRemaining} track(s) before resume`);
+      if (podcastBreakSongsRemaining > 0) {
+        prefetchPodcastSegment(nextItem);
+      }
     }
 
     // Only count natural completions — not skips/bans/pauses
