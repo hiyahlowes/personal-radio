@@ -4861,7 +4861,7 @@ mkdirSync(TMP_DIR, { recursive: true });
 server.listen(PORT, HOST, () => {
   console.log(`[radio-engine] listening on http://${HOST}:${PORT}`);
   console.log(`[radio-engine] outputs: ${OUTPUTS.map(o => `${o.name}(${o.sink})`).join(', ')}`);
-  console.log(`[radio-engine] moderation every ${MODERATION_AFTER_SONGS} songs, podcast every ${PODCAST_AFTER_SONGS} songs`);
+  console.log(`[radio-engine] moderation every ${engineSettings.moderationAfterSongs} songs, podcast every ${engineSettings.podcastAfterSongs} songs`);
   listenerMonitorLoop().catch(err => console.error('[radio-engine] listener monitor crashed:', err));
   radioLoop().catch(err => {
     console.error('[radio-engine] loop crashed:', err);
