@@ -104,6 +104,8 @@ const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY || process.env.ASSEMBL
 const MODERATION_AFTER_SONGS = Number(process.env.MODERATION_AFTER_SONGS || 3);
 const PODCAST_AFTER_SONGS    = Number(process.env.PODCAST_AFTER_SONGS    || 6);
 const CACHE_HTTP_AUDIO        = envFlag('PERSONAL_RADIO_CACHE_HTTP_AUDIO', false);
+const PLAYBACK_PREFETCH_ENABLED = envFlag('PERSONAL_RADIO_PLAYBACK_PREFETCH', true);
+const PLAYBACK_PREFETCH_TTL_MS = Number(process.env.PERSONAL_RADIO_PLAYBACK_PREFETCH_TTL_MS || 2 * 60 * 60_000);
 const PULSE_LATENCY_MSEC      = process.env.PULSE_LATENCY_MSEC || '350';
 const FFPLAY_ANALYZE_DURATION = process.env.PERSONAL_RADIO_FFPLAY_ANALYZE_DURATION || '1000000';
 const FFPLAY_PROBE_SIZE       = process.env.PERSONAL_RADIO_FFPLAY_PROBE_SIZE || '1000000';
@@ -253,6 +255,28 @@ function moderatorSystemPrompt(rules) {
   ].filter(Boolean).join('\n');
 }
 
+function sanitizeModerationText(text) {
+  if (text == null) return '';
+  const original = String(text || '').replace(/\r\n/g, '\n').trim();
+  if (!original) return '';
+  const lines = original
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => {
+      if (!line) return false;
+      if (/^Session\s+\S+\s+found but has no messages\.?\s*$/i.test(line)) return false;
+      if (/^Starting fresh\.?$/i.test(line)) return false;
+      if (/^Session\s+\S+\s+found but has no messages\.?\s*Starting fresh\.?$/i.test(line)) return false;
+      if (/^(debug|info|warning|error|trace)\s*:/i.test(line)) return false;
+      return true;
+    });
+  const cleaned = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (cleaned !== original) {
+    console.warn(`[engine] sanitized moderation text (${original.length} -> ${cleaned.length} chars)`);
+  }
+  return cleaned;
+}
+
 function normalizeWavlakePlaylists(settings = engineSettings) {
   const rows = Array.isArray(settings.wavlakePlaylists) ? settings.wavlakePlaylists : [];
   const normalized = rows
@@ -309,6 +333,8 @@ let itemWasKilled = false; // true when current item was skip/ban/pause-killed
 let engineSettings = loadSettings();
 let audioAnalysisCache = loadAudioAnalysisCache();
 const audioAnalysisInFlight = new Map();
+const playbackAudioCache = new Map();
+const playbackAudioPrefetches = new Map();
 let forcedNextItem = null;
 let podcastState = loadPodcastState();
 podcastBreakSongsRemaining = Number(podcastState.breakSongsRemaining || 0);
@@ -1939,8 +1965,8 @@ async function generatePodcastModerationText(item, episodeState, segment, contex
     });
     if (!res.ok) throw new Error(`claude-proxy HTTP ${res.status}: ${await res.text().catch(() => '')}`);
     const json = await res.json();
-    const text = json?.content?.[0]?.text || '';
-    return text.trim() || null;
+    const text = sanitizeModerationText(json?.content?.[0]?.text || '');
+    return text || null;
   } catch(e) {
     console.warn('[engine] podcast moderation text failed:', e.message);
     return null;
@@ -1950,7 +1976,7 @@ async function generatePodcastModerationText(item, episodeState, segment, contex
 async function buildPodcastModerationItem(item, episodeState, segment, context) {
   console.log(`[engine] generating podcast moderation (${context.source})…`);
   const compiled = memorySafe('podcast moderation context', () => buildPodcastModerationContext({ item, episodeState, segment, context })) || { promptText: '', callInIds: [] };
-  const text = await generatePodcastModerationText(item, episodeState, segment, context, compiled.promptText);
+  const text = sanitizeModerationText(await generatePodcastModerationText(item, episodeState, segment, context, compiled.promptText));
   const fallback = `Das war ein Abschnitt aus ${episodeState.showTitle}: ${episodeState.episodeTitle}. Für die genaue Einordnung fehlt mir gerade belastbarer Kontext, deshalb halten wir es ehrlich kurz und lassen das Gehörte mit Musik nachklingen.`;
   const tts = await ttsToTempFile(text || fallback);
   if (!tts?.file) return null;
@@ -2014,8 +2040,8 @@ async function generatePodcastIntroText(item, episodeState, isResume, memoryCont
     });
     if (!res.ok) throw new Error(`claude-proxy HTTP ${res.status}: ${await res.text().catch(() => '')}`);
     const json = await res.json();
-    const text = json?.content?.[0]?.text || '';
-    return text.trim() || null;
+    const text = sanitizeModerationText(json?.content?.[0]?.text || '');
+    return text || null;
   } catch(e) {
     console.warn('[engine] podcast intro text failed:', e.message);
     return null;
@@ -2025,7 +2051,7 @@ async function generatePodcastIntroText(item, episodeState, isResume, memoryCont
 async function buildPodcastIntroItem(item, episodeState, isResume) {
   const compiled = memorySafe('podcast intro context', () => buildPodcastIntroContext({ item, episodeState, isResume })) || { promptText: '', callInIds: [] };
   const introContext = isResume ? null : await getPodcastIntroContextText(item, episodeState);
-  const text = await generatePodcastIntroText(item, episodeState, isResume, compiled.promptText, introContext);
+  const text = sanitizeModerationText(await generatePodcastIntroText(item, episodeState, isResume, compiled.promptText, introContext));
   const fallback = isResume
     ? `Und wir gehen zurück in ${episodeState.showTitle}, ungefähr ab Minute ${Math.max(1, Math.floor(Number(episodeState.positionSeconds || 0) / 60))}.`
     : `Zeit für ${episodeState.showTitle}. Wir hören kurz rein.`;
@@ -2410,9 +2436,9 @@ async function generateModerationText(currentSong, nextItem = null, memoryContex
     });
     if (!res.ok) throw new Error(`claude-proxy HTTP ${res.status}: ${await res.text().catch(() => '')}`);
     const json = await res.json();
-    const text = json?.content?.[0]?.text || '';
+    const text = sanitizeModerationText(json?.content?.[0]?.text || '');
     if (!text) throw new Error('empty moderation response');
-    return text.trim();
+    return text;
   } catch(e) {
     console.warn('[engine] moderation text failed:', e.message);
     return null;
@@ -2423,6 +2449,8 @@ async function ttsToTempFile(text) {
   mkdirSync(TMP_DIR, { recursive: true });
   const tmpFile = path.join(TMP_DIR, `mod-${Date.now()}.mp3`);
   try {
+    text = sanitizeModerationText(text);
+    if (!text) throw new Error('empty TTS text after sanitizing');
     const provider = engineSettings.ttsProvider === 'fish' ? 'fish' : 'elevenlabs';
     const isGerman = TTS_LANG === 'de';
     const url = provider === 'fish' ? TTS_FISH_URL : TTS_ELEVEN_URL;
@@ -2560,6 +2588,84 @@ async function buildModerationItem(afterSong, nextItem = null) {
  * Resolves when ffplay exits (naturally or killed).
  * Never rejects.
  */
+function playbackAudioCacheKey(url) {
+  return createHash('sha1').update(String(url || '')).digest('hex');
+}
+
+function cleanupOldPlaybackAudioCache() {
+  const ttl = Number.isFinite(PLAYBACK_PREFETCH_TTL_MS) && PLAYBACK_PREFETCH_TTL_MS > 0 ? PLAYBACK_PREFETCH_TTL_MS : 2 * 60 * 60_000;
+  try {
+    const now = Date.now();
+    for (const [key, row] of playbackAudioCache.entries()) {
+      if (!row?.file || !existsSync(row.file) || now - Number(row.createdAt || 0) > ttl) {
+        if (row?.file) { try { unlinkSync(row.file); } catch {} }
+        playbackAudioCache.delete(key);
+      }
+    }
+    for (const name of readdirSync(TMP_DIR)) {
+      if (!/^play-prefetch-[a-f0-9]{40}-\d+\.mp3$/.test(name)) continue;
+      const file = path.join(TMP_DIR, name);
+      const stat = statSync(file);
+      if (now - stat.mtimeMs > ttl) {
+        try { unlinkSync(file); } catch {}
+      }
+    }
+  } catch {}
+}
+
+async function downloadHttpAudioToFile(url, file) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(45_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 1024) throw new Error('download too small');
+  writeFileSync(file, buf);
+  return buf.length;
+}
+
+async function prefetchHttpAudioForStablePlayback(url, label = '') {
+  if (!PLAYBACK_PREFETCH_ENABLED || !CACHE_HTTP_AUDIO) return null;
+  if (!/^https?:\/\//i.test(String(url || ''))) return null;
+  const key = playbackAudioCacheKey(url);
+  const cached = playbackAudioCache.get(key);
+  if (cached?.file && existsSync(cached.file)) return cached;
+  if (playbackAudioPrefetches.has(key)) return playbackAudioPrefetches.get(key);
+
+  const promise = (async () => {
+    try {
+      mkdirSync(TMP_DIR, { recursive: true });
+      cleanupOldPlaybackAudioCache();
+      const file = path.join(TMP_DIR, `play-prefetch-${key}-${Date.now()}.mp3`);
+      const bytes = await downloadHttpAudioToFile(url, file);
+      const row = { file, bytes, createdAt: Date.now() };
+      playbackAudioCache.set(key, row);
+      console.log(`[engine] prefetched audio for crossfade: ${label || url} -> ${file} (${bytes} bytes)`);
+      return row;
+    } catch (err) {
+      console.warn(`[engine] audio prefetch failed for ${label || url}: ${err.message}`);
+      return null;
+    } finally {
+      playbackAudioPrefetches.delete(key);
+    }
+  })();
+
+  playbackAudioPrefetches.set(key, promise);
+  return promise;
+}
+
+function prefetchUpcomingMusicForTransition(item) {
+  if (item?.kind === 'music') {
+    const upcoming = peekNextMusicItem();
+    if (upcoming?.liveUrl) {
+      void prefetchHttpAudioForStablePlayback(upcoming.liveUrl, `${upcoming.artist || ''} — ${upcoming.title || ''}`);
+    }
+  } else if (item?.kind === 'moderation' && item.plannedNextKind === 'music') {
+    const upcoming = peekNextMusicItem();
+    if (upcoming?.liveUrl) {
+      void prefetchHttpAudioForStablePlayback(upcoming.liveUrl, `${upcoming.artist || ''} — ${upcoming.title || ''}`);
+    }
+  }
+}
+
 async function cacheHttpAudioForStablePlayback(url, options = {}) {
   if (!CACHE_HTTP_AUDIO || options.cacheHttpAudio !== true) return { playUrl: url, tmpFile: null };
   // Do not download full podcast episodes; segmented podcast playback uses -ss/-t.
@@ -2568,13 +2674,15 @@ async function cacheHttpAudioForStablePlayback(url, options = {}) {
 
   try {
     mkdirSync(TMP_DIR, { recursive: true });
-    const res = await fetch(url, { signal: AbortSignal.timeout(45_000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 1024) throw new Error('download too small');
+    const key = playbackAudioCacheKey(url);
+    const prefetched = playbackAudioCache.get(key) || (playbackAudioPrefetches.has(key) ? await playbackAudioPrefetches.get(key) : null);
+    if (prefetched?.file && existsSync(prefetched.file)) {
+      console.log(`[engine] using prefetched audio for stable playback: ${prefetched.file}`);
+      return { playUrl: prefetched.file, tmpFile: null };
+    }
     const tmpFile = path.join(TMP_DIR, `play-${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`);
-    writeFileSync(tmpFile, buf);
-    console.log(`[engine] cached audio for stable playback: ${tmpFile} (${buf.length} bytes)`);
+    const bytes = await downloadHttpAudioToFile(url, tmpFile);
+    console.log(`[engine] cached audio for stable playback: ${tmpFile} (${bytes} bytes)`);
     return { playUrl: tmpFile, tmpFile };
   } catch (err) {
     console.warn(`[engine] audio cache failed, streaming live: ${err.message}`);
@@ -3024,8 +3132,10 @@ async function radioLoop() {
           nextMusicFadeInSeconds = 0;
         }
         Object.assign(playOptions, musicCrossfadeOptions(nextItem, resumeStartSeconds));
+        if (playOptions.resolveEarlyAfterMs) prefetchUpcomingMusicForTransition(nextItem);
       } else if (nextItem.kind === 'moderation') {
         Object.assign(playOptions, moderationToMusicOptions(nextItem));
+        if (playOptions.resolveEarlyAfterMs) prefetchUpcomingMusicForTransition(nextItem);
       } else {
         nextMusicFadeInSeconds = 0;
       }
@@ -3076,7 +3186,13 @@ async function radioLoop() {
         itemWasKilled = false;
         console.log(`[engine] PLAY [${introItem.kind}] ${introItem.artist} — ${introItem.title}`);
         broadcastStatus();
-        await playItemOnAllOutputs(introItem);
+        const introOptions = moderationToMusicOptions(introItem);
+        if (introOptions.resolveEarlyAfterMs) prefetchUpcomingMusicForTransition(introItem);
+        const introResults = await playItemOnAllOutputs(introItem, introOptions);
+        if (introResults.some(result => result?.reason === 'moderation-to-music-duck')) {
+          nextMusicFadeInSeconds = Number(introOptions.nextMusicFadeInSeconds || moderationDuckSeconds());
+          console.log(`[engine] session intro ducking armed for next music (${nextMusicFadeInSeconds}s)`);
+        }
         if (introItem.tmpFile && !maybeKeepTtsFile(introItem.tmpFile)) { try { unlinkSync(introItem.tmpFile); } catch {} }
         console.log(`[engine] DONE [${introItem.kind}] ${introItem.artist} — ${introItem.title} (killed=${itemWasKilled})`);
         playing = false;
@@ -3116,7 +3232,13 @@ async function radioLoop() {
         itemWasKilled = false;
         console.log(`[engine] PLAY [${modItem.kind}] ${modItem.artist} — ${modItem.title}`);
         broadcastStatus();
-        await playItemOnAllOutputs(modItem);
+        const modOptions = moderationToMusicOptions(modItem);
+        if (modOptions.resolveEarlyAfterMs) prefetchUpcomingMusicForTransition(modItem);
+        const modResults = await playItemOnAllOutputs(modItem, modOptions);
+        if (modResults.some(result => result?.reason === 'moderation-to-music-duck')) {
+          nextMusicFadeInSeconds = Number(modOptions.nextMusicFadeInSeconds || moderationDuckSeconds());
+          console.log(`[engine] podcast moderation ducking armed for next music (${nextMusicFadeInSeconds}s)`);
+        }
         if (modItem.tmpFile && !maybeKeepTtsFile(modItem.tmpFile)) { try { unlinkSync(modItem.tmpFile); } catch {} }
         console.log(`[engine] DONE [${modItem.kind}] ${modItem.artist} — ${modItem.title} (killed=${itemWasKilled})`);
         playing = false;
@@ -3398,7 +3520,8 @@ async function generateSessionIntroText(request, starterSong, callIns = []) {
     });
     if (!res.ok) throw new Error(`claude-proxy HTTP ${res.status}: ${await res.text().catch(() => '')}`);
     const json = await res.json();
-    return String(json?.content?.[0]?.text || '').trim() || null;
+    const text = sanitizeModerationText(json?.content?.[0]?.text || '');
+    return text || null;
   } catch (err) {
     console.warn('[engine] session intro text failed:', err.message);
     return null;
@@ -3408,7 +3531,7 @@ async function generateSessionIntroText(request, starterSong, callIns = []) {
 async function buildSessionIntroItem(request, starterSong) {
   console.log('[engine] generating session intro…');
   const callIns = memorySafe('list call-ins for session intro', () => listCallIns({ status: 'open', limit: 3 })) || [];
-  const text = await generateSessionIntroText(request, starterSong, callIns);
+  const text = sanitizeModerationText(await generateSessionIntroText(request, starterSong, callIns));
   const fallback = `Willkommen zurück. Das Radio stand etwa ${formatDurationGerman(request.suspendedSeconds)} still; jetzt holen wir den Faden wieder auf.`;
   const scriptText = text || fallback;
   const tts = await ttsToTempFile(scriptText);

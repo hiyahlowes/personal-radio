@@ -2063,7 +2063,7 @@ export function RadioPage() {
     return audio;
   }, []);
 
-  const unlockRemoteStreamAudio = useCallback(() => {
+  const _unlockRemoteStreamAudio = useCallback(() => {
     const audio = ensureRemoteStreamAudio();
     const silent = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
     audio.src = silent;
@@ -2095,7 +2095,7 @@ export function RadioPage() {
     });
   }, [ensureRemoteStreamAudio, muted, volume]);
 
-  const primeRemoteStreamListener = useCallback(() => {
+  const _primeRemoteStreamListener = useCallback(() => {
     const controller = new AbortController();
     fetch(`/live.mp3?prime=${Date.now()}`, { signal: controller.signal })
       .then(async response => {
@@ -2110,7 +2110,7 @@ export function RadioPage() {
     return () => controller.abort();
   }, []);
 
-  const waitForRemoteOutput = useCallback(async () => {
+  const _waitForRemoteOutput = useCallback(async () => {
     const deadline = Date.now() + 18_000;
     while (Date.now() < deadline) {
       try {
@@ -2118,7 +2118,9 @@ export function RadioPage() {
         const status = await response.json();
         const outputs = Object.values(status?.outputs || {}) as Array<{ playing?: boolean }>;
         if (outputs.some(output => output?.playing)) return true;
-      } catch {}
+      } catch {
+        // Status polling is best-effort; the next poll/SSE event will recover.
+      }
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     return false;
@@ -2299,6 +2301,48 @@ export function RadioPage() {
   const handlePrev   = useCallback(() => jumpTo((idxRef.current - 1 + tracksRef.current.length) % tracksRef.current.length, true), [jumpTo]);
   const handleNext   = useCallback(() => jumpTo((idxRef.current + 1) % tracksRef.current.length, true), [jumpTo]);
   const handleSelect = useCallback((i: number) => jumpTo(i, false), [jumpTo]);
+
+  useEffect(() => {
+    if (!IS_REMOTE || typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    const mediaSession = navigator.mediaSession;
+    const item = engineMode.status?.currentItem;
+    const artworkUrl = item?.artworkUrl || '/icon-512.png';
+    const title = item?.title
+      || (engineMode.status?.playing ? 'Personal Radio' : 'Personal Radio pausiert');
+    const artist = item?.artist
+      || (item?.kind === 'podcast' ? 'Podcast' : 'PR');
+
+    if (typeof window !== 'undefined' && 'MediaMetadata' in window) {
+      mediaSession.metadata = new MediaMetadata({
+        title,
+        artist,
+        album: item?.kind === 'podcast' ? 'Personal Radio Podcast' : 'Personal Radio',
+        artwork: [
+          { src: artworkUrl, sizes: '512x512', type: 'image/png' },
+          { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+        ],
+      });
+    }
+    mediaSession.playbackState = playing ? 'playing' : 'paused';
+  }, [IS_REMOTE, engineMode.status?.currentItem, engineMode.status?.playing, playing]);
+
+  useEffect(() => {
+    if (!IS_REMOTE || typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    const mediaSession = navigator.mediaSession;
+    const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+      try { mediaSession.setActionHandler(action, handler); } catch {
+        // Some iOS/Safari builds expose Media Session but reject selected actions.
+      }
+    };
+    setHandler('play', handlePlay);
+    setHandler('pause', handlePause);
+    setHandler('nexttrack', handleNext);
+    return () => {
+      setHandler('play', null);
+      setHandler('pause', null);
+      setHandler('nexttrack', null);
+    };
+  }, [IS_REMOTE, handlePlay, handlePause, handleNext]);
 
   const handleDislike = useCallback((track: WavlakeTrack) => {
     if (IS_REMOTE) {
