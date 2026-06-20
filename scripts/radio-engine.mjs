@@ -122,6 +122,8 @@ const PODCAST_INTRO_JINGLE    = process.env.PERSONAL_RADIO_PODCAST_INTRO_JINGLE 
 const PODCAST_RETURN_JINGLE   = process.env.PERSONAL_RADIO_PODCAST_RETURN_JINGLE || path.join(PUBLIC_DIR, 'studio-return.mp3');
 const PODCAST_RESOLVED_URL_TTL_MS = Number(process.env.PERSONAL_RADIO_PODCAST_RESOLVED_URL_TTL_MS || 45 * 60_000);
 const PODCAST_SEGMENT_CACHE_ENABLED = envFlag('PERSONAL_RADIO_PODCAST_SEGMENT_CACHE', true);
+const PODCAST_SEGMENT_PREFETCH_TTL_MS = Number(process.env.PERSONAL_RADIO_PODCAST_SEGMENT_PREFETCH_TTL_MS || 30 * 60_000);
+const PODCAST_SEGMENT_PREFETCH_MAX = Number(process.env.PERSONAL_RADIO_PODCAST_SEGMENT_PREFETCH_MAX || 4);
 
 // Two independent outputs — each gets its own ffplay process per track.
 // Override with: RADIO_OUTPUTS='[{"name":"cleo","sink":"bluez_output.EC_81_93_4A_9D_E7.1"},{"name":"deck","sink":"via_pi2_living_combined"}]'
@@ -376,8 +378,8 @@ let pendingModerationPromise = null;
 let pendingModerationPlan = null;
 let pendingPodcastIntroPromise = null;
 let pendingPodcastIntroKey = null;
-let pendingPodcastSegmentPromise = null;
-let pendingPodcastSegmentKey = null;
+const podcastSegmentPrefetches = new Map();
+const preparedPodcastSegmentCache = new Map();
 
 // Per-output state
 const outputState = {};
@@ -2124,21 +2126,65 @@ function cleanupPreparedPodcastSegment(prepared) {
 }
 
 function clearPendingPodcastSegmentPrefetch() {
-  const pending = pendingPodcastSegmentPromise;
-  pendingPodcastSegmentPromise = null;
-  pendingPodcastSegmentKey = null;
-  if (pending) {
+  for (const pending of podcastSegmentPrefetches.values()) {
     pending.then(cleanupPreparedPodcastSegment).catch(() => {});
   }
+  podcastSegmentPrefetches.clear();
+  for (const prepared of preparedPodcastSegmentCache.values()) {
+    cleanupPreparedPodcastSegment(prepared);
+  }
+  preparedPodcastSegmentCache.clear();
 }
 
-async function preparePodcastSegment(item) {
+function normalizeEpisodeStateForSegment(item) {
   const { episodeKey, state } = getEpisodeState(item);
   if (state.completed) {
     state.positionSeconds = 0;
     state.completed = false;
     state.part = 1;
   }
+  return { episodeKey, state };
+}
+
+function podcastSegmentPlanKey(episodeKey, state) {
+  const { minSeconds, maxSeconds } = normalizePodcastSegmentSettings();
+  return [
+    episodeKey,
+    Math.max(0, Math.floor(Number(state.positionSeconds || 0))),
+    Math.max(1, Math.floor(Number(state.part || 1))),
+    Math.round(minSeconds),
+    Math.round(maxSeconds),
+    engineSettings.podcastPreferTranscriptChapters === false ? 'no-cues' : 'cues',
+  ].join('|');
+}
+
+function cleanupOldPreparedPodcastSegments() {
+  const ttl = Number.isFinite(PODCAST_SEGMENT_PREFETCH_TTL_MS) && PODCAST_SEGMENT_PREFETCH_TTL_MS > 0
+    ? PODCAST_SEGMENT_PREFETCH_TTL_MS
+    : 30 * 60_000;
+  const maxEntries = Number.isFinite(PODCAST_SEGMENT_PREFETCH_MAX) && PODCAST_SEGMENT_PREFETCH_MAX > 0
+    ? Math.floor(PODCAST_SEGMENT_PREFETCH_MAX)
+    : 4;
+  const now = Date.now();
+  for (const [key, prepared] of preparedPodcastSegmentCache.entries()) {
+    if (!prepared?.segmentPlaybackFile
+        || !existsSync(prepared.segmentPlaybackFile)
+        || now - Number(prepared.createdAt || 0) > ttl) {
+      cleanupPreparedPodcastSegment(prepared);
+      preparedPodcastSegmentCache.delete(key);
+    }
+  }
+  const rows = [...preparedPodcastSegmentCache.entries()]
+    .sort((a, b) => Number(b[1]?.createdAt || 0) - Number(a[1]?.createdAt || 0));
+  for (const [key, prepared] of rows.slice(maxEntries)) {
+    cleanupPreparedPodcastSegment(prepared);
+    preparedPodcastSegmentCache.delete(key);
+  }
+}
+
+async function preparePodcastSegment(item) {
+  const { episodeKey, state } = normalizeEpisodeStateForSegment(item);
+  const planKey = podcastSegmentPlanKey(episodeKey, state);
   const resolvedAudioUrl = await resolvePodcastAudioUrl(item, state);
   const resolvedItem = { ...item, liveUrl: resolvedAudioUrl };
   const segment = await choosePodcastSegment(resolvedItem, state);
@@ -2151,24 +2197,28 @@ async function preparePodcastSegment(item) {
     console.warn(`[engine] podcast segment cache failed, falling back to resolved URL: ${err.message}`);
   }
   return {
+    planKey,
     episodeKey,
     state,
     resolvedAudioUrl,
     segment,
     segmentPlaybackFile,
     segmentPlaybackSource,
+    createdAt: Date.now(),
   };
 }
 
 function prefetchPodcastSegment(item) {
   if (!item || item.kind !== 'podcast') return;
-  const key = podcastEpisodeKey(item);
-  if (!key) return;
-  if (pendingPodcastSegmentPromise && pendingPodcastSegmentKey === key) return;
-  pendingPodcastSegmentKey = key;
-  pendingPodcastSegmentPromise = preparePodcastSegment(item)
+  const { episodeKey, state } = normalizeEpisodeStateForSegment(item);
+  const planKey = podcastSegmentPlanKey(episodeKey, state);
+  cleanupOldPreparedPodcastSegments();
+  if (preparedPodcastSegmentCache.has(planKey) || podcastSegmentPrefetches.has(planKey)) return;
+  const promise = preparePodcastSegment(item)
     .then(prepared => {
       if (prepared) {
+        preparedPodcastSegmentCache.set(prepared.planKey, prepared);
+        cleanupOldPreparedPodcastSegments();
         console.log(`[engine] podcast segment pre-cached, ready: ${prepared.state.showTitle} — ${prepared.state.episodeTitle}`);
       }
       return prepared;
@@ -2176,18 +2226,27 @@ function prefetchPodcastSegment(item) {
     .catch(err => {
       console.warn(`[engine] podcast segment pre-cache failed: ${err.message}`);
       return null;
+    })
+    .finally(() => {
+      podcastSegmentPrefetches.delete(planKey);
     });
+  podcastSegmentPrefetches.set(planKey, promise);
 }
 
 async function playPodcastSegment(item) {
   podcastSessionActive = true;
-  const key = podcastEpisodeKey(item);
-  let prepared = null;
-  if (pendingPodcastSegmentPromise && pendingPodcastSegmentKey === key) {
-    prepared = await pendingPodcastSegmentPromise;
+  const { episodeKey: plannedEpisodeKey, state: plannedState } = normalizeEpisodeStateForSegment(item);
+  const planKey = podcastSegmentPlanKey(plannedEpisodeKey, plannedState);
+  let prepared = preparedPodcastSegmentCache.get(planKey) || null;
+  if (prepared) {
+    preparedPodcastSegmentCache.delete(planKey);
+    console.log(`[engine] using pre-cached podcast segment: ${prepared.state.showTitle} — ${prepared.state.episodeTitle}`);
+  } else if (podcastSegmentPrefetches.has(planKey)) {
+    prepared = await podcastSegmentPrefetches.get(planKey);
+    podcastSegmentPrefetches.delete(planKey);
+    preparedPodcastSegmentCache.delete(planKey);
+    if (prepared) console.log(`[engine] using just-finished podcast segment pre-cache: ${prepared.state.showTitle} — ${prepared.state.episodeTitle}`);
   }
-  pendingPodcastSegmentPromise = null;
-  pendingPodcastSegmentKey = null;
   if (!prepared) prepared = await preparePodcastSegment(item);
 
   const {
