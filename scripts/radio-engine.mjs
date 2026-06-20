@@ -162,6 +162,7 @@ const DEFAULT_SETTINGS = {
   podcastTranscriptPrefetchEnabled: true,
   podcastTranscriptPrefetchLimit: 5,
   podcastTranscriptProvider: 'assemblyai',
+  podcastAdSkipEnabled: true,
   musicBreakTracksAfterPodcast: 0,
   ttsProvider: (process.env.ELEVENLABS_API_KEY && (process.env.VITE_ELEVENLABS_VOICE_ID_DE || process.env.VITE_ELEVENLABS_VOICE_ID)) ? 'elevenlabs' : 'fish',
   elevenLabsVoiceIdEn: process.env.VITE_ELEVENLABS_VOICE_ID || '',
@@ -691,6 +692,8 @@ function buildPodcastStatus() {
       nextBreakTargetSeconds: null,
       breakReason: null,
       breakReasonDetail: null,
+      adSkipStartSeconds: null,
+      adSkipEndSeconds: null,
       hasTranscript: false,
       hasChapters: false,
       lastSegmentContextSource: null,
@@ -713,6 +716,8 @@ function buildPodcastStatus() {
     nextBreakTargetSeconds: active?.segmentEndSeconds ?? null,
     breakReason: active?.breakReason || (lastSegmentIsCurrent ? podcastState.lastSegment?.breakReason : null) || null,
     breakReasonDetail: active?.breakReasonDetail || (lastSegmentIsCurrent ? podcastState.lastSegment?.breakReasonDetail : null) || null,
+    adSkipStartSeconds: active?.adSkipStartSeconds || (lastSegmentIsCurrent ? podcastState.lastSegment?.adSkipStartSeconds : null) || null,
+    adSkipEndSeconds: active?.adSkipEndSeconds || (lastSegmentIsCurrent ? podcastState.lastSegment?.adSkipEndSeconds : null) || null,
     hasTranscript: !!(active?.hasTranscript ?? episodeState?.transcriptUrl) || !!readCachedPodcastTranscript({ id: episodeState?.guid || currentEpisodeKey, audioUrl: episodeState?.episodeUrl, title: episodeState?.episodeTitle })?.text,
     hasChapters: !!(active?.hasChapters ?? (Array.isArray(episodeState?.chapters) && episodeState.chapters.length > 0)),
     lastSegmentContextSource: lastSegmentIsCurrent ? (podcastState.lastSegment?.contextSource || null) : null,
@@ -1733,6 +1738,102 @@ function findTranscriptCut(raw, startSeconds, minSeconds, maxSeconds) {
   return findTranscriptCutNear(raw, startSeconds, minSeconds, maxSeconds);
 }
 
+function podcastAdCueScore(text = '') {
+  const t = String(text || '').toLowerCase();
+  let score = 0;
+  const strong = [
+    /\bsponsor(?:ed|s)?\b/,
+    /\bthis episode is brought to you by\b/,
+    /\bpartner(?:ed)? with\b/,
+    /\buse (?:the )?code\b/,
+    /\bpromo code\b/,
+    /\bdiscount\b/,
+    /\bforward slash\b/,
+    /\bslash wbd\b/,
+    /\bget started (?:today )?at\b/,
+    /\bgo to\b/,
+    /\bvisit\b/,
+    /\bi recommend\b/,
+    /\bsupport (?:the|this) show\b/,
+  ];
+  const brands = [
+    /\bswan(?: bitcoin)?\b/,
+    /\bbitkey\b/,
+    /\bblockware\b/,
+    /\bunchained\b/,
+    /\briver\b/,
+    /\bfold\b/,
+    /\bkraken\b/,
+    /\bledger\b/,
+    /\bcoldcard\b/,
+    /\bfoundation\b/,
+  ];
+  for (const rx of strong) if (rx.test(t)) score += 3;
+  for (const rx of brands) if (rx.test(t)) score += 2;
+  if (/\bbitcoiners, as you know\b/.test(t)) score += 4;
+  if (/\b[a-z0-9.-]+\.(?:com|world|io|net)\b/.test(t)) score += 3;
+  if (/\b(?:tax|inheritance|wealth|clients|device|wallet|mining|miners|self-custody)\b/.test(t) && score > 0) score += 1;
+  return score;
+}
+
+function findPodcastAdBreak(raw, startSeconds, minSeconds, maxSeconds) {
+  if (!engineSettings.podcastAdSkipEnabled) return null;
+  const entries = parseCueEntries(raw);
+  if (!entries.length) return null;
+  const minTarget = startSeconds + minSeconds;
+  const maxTarget = startSeconds + maxSeconds;
+  const windowEntries = entries
+    .filter(e => e.end >= minTarget - 45 && e.start <= maxTarget)
+    .map((entry, index) => ({
+      ...entry,
+      index,
+      adScore: podcastAdCueScore(entry.text),
+    }));
+  const firstAd = windowEntries.find(entry => entry.end >= minTarget && entry.adScore >= 4);
+  if (!firstAd) return null;
+
+  let startIndex = firstAd.index;
+  while (startIndex > 0) {
+    const prev = windowEntries[startIndex - 1];
+    const current = windowEntries[startIndex];
+    if (!prev || current.start - prev.end > 12) break;
+    if (prev.adScore >= 2 || /^(bitcoiners|if you're|do you want|well,|and if|so if)\b/i.test(prev.text.trim())) {
+      startIndex--;
+      continue;
+    }
+    break;
+  }
+
+  let endIndex = firstAd.index;
+  let lastStrongAdIndex = firstAd.index;
+  for (let i = firstAd.index + 1; i < windowEntries.length; i++) {
+    const prev = windowEntries[i - 1];
+    const entry = windowEntries[i];
+    const gap = entry.start - prev.end;
+    if (gap > 18) break;
+    if (entry.adScore >= 2) lastStrongAdIndex = i;
+    const connective = /^(and|so|this|that|you|if|well|because|it|they|their|the|a dedicated|including|which|with|under|get|go|that's)\b/i.test(entry.text.trim());
+    if (entry.adScore >= 1 || (connective && i - lastStrongAdIndex <= 4)) {
+      endIndex = i;
+      continue;
+    }
+    break;
+  }
+
+  const startEntry = windowEntries[startIndex];
+  const endEntry = windowEntries[endIndex];
+  const adStartSeconds = Math.max(minTarget, startEntry.start);
+  const adEndSeconds = Math.min(maxTarget, endEntry.end);
+  if (adEndSeconds - adStartSeconds < 20) return null;
+  return {
+    startSeconds: adStartSeconds,
+    endSeconds: adEndSeconds,
+    source: 'transcriptAd',
+    title: 'Podcast ad break',
+    excerpt: windowEntries.slice(startIndex, Math.min(endIndex + 1, startIndex + 8)).map(e => e.text).join(' ').slice(0, 320),
+  };
+}
+
 function findTranscriptCutNear(raw, startSeconds, minSeconds, maxSeconds, anchorSeconds = null) {
   const entries = parseCueEntries(raw);
   if (!entries.length) return null;
@@ -1843,6 +1944,7 @@ async function choosePodcastSegment(item, episodeState) {
   let semanticCut = null;
   let cut = null;
   let transcriptRaw = '';
+  let adBreak = null;
   const refinement = [];
 
   if (engineSettings.podcastPreferTranscriptChapters !== false) {
@@ -1862,6 +1964,10 @@ async function choosePodcastSegment(item, episodeState) {
           console.log(`[engine] podcast break anchor refined by transcriptCue @ ${Math.round(transcriptCut.seconds)}s gap=${Number(transcriptCut.gapSeconds || 0).toFixed(1)}s${chapterCut ? ` from chapter ${Math.round(chapterCut.seconds)}s` : ''}`);
         } else {
           console.log('[engine] podcast transcript had no logical break candidate in segment window');
+        }
+        adBreak = findPodcastAdBreak(transcriptRaw, startSeconds, minSeconds, maxSeconds);
+        if (adBreak) {
+          console.log(`[engine] podcast ad break detected: ${Math.round(adBreak.startSeconds)}s → ${Math.round(adBreak.endSeconds)}s (${adBreak.excerpt})`);
         }
       } catch(e) {
         console.warn('[engine] podcast transcript cut failed:', e.message);
@@ -1911,6 +2017,22 @@ async function choosePodcastSegment(item, episodeState) {
     console.log(`[engine] podcast break candidate accepted without silence confirmation: ${semanticCut.source} @ ${Math.round(cut.seconds)}s (${cut.detail})`);
   }
 
+  if (adBreak && adBreak.startSeconds >= startSeconds + minSeconds) {
+    const plannedCutSeconds = cut?.seconds || hardMaxEnd;
+    if (adBreak.startSeconds <= plannedCutSeconds + 30) {
+      cut = {
+        seconds: adBreak.startSeconds,
+        title: adBreak.title,
+        source: 'adBreak',
+        detail: `${cut?.detail || cut?.source || 'segment'}->adBreak`,
+        adSkipStartSeconds: adBreak.startSeconds,
+        adSkipEndSeconds: adBreak.endSeconds,
+        adExcerpt: adBreak.excerpt,
+      };
+      console.log(`[engine] podcast segment will stop before ad and resume after it: ${Math.round(adBreak.startSeconds)}s → ${Math.round(adBreak.endSeconds)}s`);
+    }
+  }
+
   const endSeconds = Math.min(Math.max(cut?.seconds || hardMaxEnd, startSeconds + minSeconds), hardMaxEnd);
   if (!cut) console.log(`[engine] podcast break candidate accepted: hardMax @ ${Math.round(endSeconds)}s`);
   return {
@@ -1923,6 +2045,9 @@ async function choosePodcastSegment(item, episodeState) {
     cutDetail: cut?.detail || cut?.source || 'hardMax',
     semanticSource: cut?.semanticSource || (cut?.source && cut.source !== 'silence' ? cut.source : ''),
     semanticSeconds: cut?.semanticSeconds ?? (cut?.source && cut.source !== 'silence' ? cut.seconds : null),
+    adSkipStartSeconds: cut?.adSkipStartSeconds || null,
+    adSkipEndSeconds: cut?.adSkipEndSeconds || null,
+    adExcerpt: cut?.adExcerpt || '',
     chapterTitle: cut?.title || '',
     transcriptRaw,
   };
@@ -2358,6 +2483,8 @@ async function playPodcastSegment(item) {
     segmentEndSeconds: segment.endSeconds,
     breakReason: segment.cutSource,
     breakReasonDetail: segment.cutDetail,
+    adSkipStartSeconds: segment.adSkipStartSeconds,
+    adSkipEndSeconds: segment.adSkipEndSeconds,
     playbackSource: segmentPlaybackSource,
     hasTranscript: !!state.transcriptUrl || !!readCachedPodcastTranscript(item.episode || item)?.text,
     hasChapters: Array.isArray(state.chapters) && state.chapters.length > 0,
@@ -2383,14 +2510,25 @@ async function playPodcastSegment(item) {
   const endPosition = itemWasKilled
     ? Math.min(segment.endSeconds, segment.startSeconds + actualElapsed)
     : segment.endSeconds;
-  const reachedEpisodeEnd = state.durationSeconds > 0 && endPosition >= state.durationSeconds - 5;
+  const resumePosition = !itemWasKilled && segment.adSkipEndSeconds && segment.adSkipEndSeconds > endPosition
+    ? segment.adSkipEndSeconds
+    : endPosition;
+  const reachedEpisodeEnd = state.durationSeconds > 0 && resumePosition >= state.durationSeconds - 5;
 
-  state.positionSeconds = reachedEpisodeEnd ? 0 : endPosition;
+  state.positionSeconds = reachedEpisodeEnd ? 0 : resumePosition;
   state.durationSeconds = state.durationSeconds || item.duration || 0;
   state.part = reachedEpisodeEnd ? 1 : state.part + 1;
   state.completed = reachedEpisodeEnd;
   state.lastSegmentStart = segment.startSeconds;
   state.lastSegmentEnd = endPosition;
+  if (segment.adSkipStartSeconds && segment.adSkipEndSeconds && !itemWasKilled) {
+    state.lastSkippedAd = {
+      startSeconds: segment.adSkipStartSeconds,
+      endSeconds: segment.adSkipEndSeconds,
+      excerpt: segment.adExcerpt || '',
+      skippedAt: new Date().toISOString(),
+    };
+  }
   console.log(`[engine] podcast resume boundary saved: ${Math.round(state.positionSeconds)}s completed=${reachedEpisodeEnd}`);
 
   let context = { source: 'fallback', excerpt: '', chapterTitle: '' };
@@ -2408,8 +2546,11 @@ async function playPodcastSegment(item) {
     startSeconds: segment.startSeconds,
     endSeconds: endPosition,
     plannedEndSeconds: segment.endSeconds,
+    resumePositionSeconds: resumePosition,
     breakReason: segment.cutSource,
     breakReasonDetail: segment.cutDetail,
+    adSkipStartSeconds: segment.adSkipStartSeconds || null,
+    adSkipEndSeconds: segment.adSkipEndSeconds || null,
     playbackSource: segmentPlaybackSource,
     contextSource: context.source,
     chapterTitle: context.chapterTitle,
@@ -4278,6 +4419,7 @@ const server = http.createServer(async (req, res) => {
         'podcastTranscriptPrefetchEnabled',
         'podcastTranscriptPrefetchLimit',
         'podcastTranscriptProvider',
+        'podcastAdSkipEnabled',
         'musicBreakTracksAfterPodcast',
         'ttsProvider',
         'elevenLabsVoiceIdEn',
