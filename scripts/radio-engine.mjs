@@ -376,6 +376,8 @@ let pendingModerationPromise = null;
 let pendingModerationPlan = null;
 let pendingPodcastIntroPromise = null;
 let pendingPodcastIntroKey = null;
+let pendingPodcastSegmentPromise = null;
+let pendingPodcastSegmentKey = null;
 
 // Per-output state
 const outputState = {};
@@ -2117,8 +2119,20 @@ function choosePodcastBreakSongs() {
   return 1 + Math.floor(Math.random() * 3);
 }
 
-async function playPodcastSegment(item) {
-  podcastSessionActive = true;
+function cleanupPreparedPodcastSegment(prepared) {
+  if (prepared?.segmentPlaybackFile) { try { unlinkSync(prepared.segmentPlaybackFile); } catch {} }
+}
+
+function clearPendingPodcastSegmentPrefetch() {
+  const pending = pendingPodcastSegmentPromise;
+  pendingPodcastSegmentPromise = null;
+  pendingPodcastSegmentKey = null;
+  if (pending) {
+    pending.then(cleanupPreparedPodcastSegment).catch(() => {});
+  }
+}
+
+async function preparePodcastSegment(item) {
   const { episodeKey, state } = getEpisodeState(item);
   if (state.completed) {
     state.positionSeconds = 0;
@@ -2136,6 +2150,55 @@ async function playPodcastSegment(item) {
   } catch (err) {
     console.warn(`[engine] podcast segment cache failed, falling back to resolved URL: ${err.message}`);
   }
+  return {
+    episodeKey,
+    state,
+    resolvedAudioUrl,
+    segment,
+    segmentPlaybackFile,
+    segmentPlaybackSource,
+  };
+}
+
+function prefetchPodcastSegment(item) {
+  if (!item || item.kind !== 'podcast') return;
+  const key = podcastEpisodeKey(item);
+  if (!key) return;
+  if (pendingPodcastSegmentPromise && pendingPodcastSegmentKey === key) return;
+  pendingPodcastSegmentKey = key;
+  pendingPodcastSegmentPromise = preparePodcastSegment(item)
+    .then(prepared => {
+      if (prepared) {
+        console.log(`[engine] podcast segment pre-cached, ready: ${prepared.state.showTitle} — ${prepared.state.episodeTitle}`);
+      }
+      return prepared;
+    })
+    .catch(err => {
+      console.warn(`[engine] podcast segment pre-cache failed: ${err.message}`);
+      return null;
+    });
+}
+
+async function playPodcastSegment(item) {
+  podcastSessionActive = true;
+  const key = podcastEpisodeKey(item);
+  let prepared = null;
+  if (pendingPodcastSegmentPromise && pendingPodcastSegmentKey === key) {
+    prepared = await pendingPodcastSegmentPromise;
+  }
+  pendingPodcastSegmentPromise = null;
+  pendingPodcastSegmentKey = null;
+  if (!prepared) prepared = await preparePodcastSegment(item);
+
+  const {
+    episodeKey,
+    state,
+    resolvedAudioUrl,
+    segment,
+    segmentPlaybackFile,
+    segmentPlaybackSource,
+  } = prepared;
+
   currentPodcastPlayback = {
     episodeKey,
     showTitle: state.showTitle,
@@ -3032,6 +3095,7 @@ async function radioLoop() {
             pendingPodcastIntroPromise = buildPodcastIntroItem(upcoming, state, isResume)
               .then(item => { if (item) console.log('[engine] podcast intro pre-generated, ready'); return item; })
               .catch(err => { console.warn('[engine] podcast intro pre-gen error:', err.message); return null; });
+            prefetchPodcastSegment(upcoming);
           }
           return buildModerationItem(songForMod, upcoming);
         })
@@ -3053,6 +3117,7 @@ async function radioLoop() {
           pendingPodcastIntroPromise = buildPodcastIntroItem(upcoming, state, isResume)
             .then(item => { if (item) console.log('[engine] podcast intro pre-generated, ready'); return item; })
             .catch(err => { console.warn('[engine] podcast intro pre-gen error:', err.message); return null; });
+          prefetchPodcastSegment(upcoming);
           return null;
         })
         .catch(err => console.warn('[engine] podcast intro preview failed:', err.message));
@@ -3569,6 +3634,7 @@ function clearPendingPlaybackPlans() {
   pendingModerationPlan = null;
   pendingPodcastIntroPromise = null;
   pendingPodcastIntroKey = null;
+  clearPendingPodcastSegmentPrefetch();
   pendingSessionIntroPromise = null;
   sessionIntroSongKey = null;
 }
