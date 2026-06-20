@@ -1495,20 +1495,7 @@ export function SettingsPage() {
                       />
                     </label>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="space-y-1">
-                      <span className="text-xs text-white/40">Music break tracks</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={6}
-                        step={1}
-                        value={engineMode.settings?.musicBreakTracksAfterPodcast ?? 0}
-                        onChange={e => engineMode.saveSettings({ musicBreakTracksAfterPodcast: Number(e.target.value) })}
-                        className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-amber-400/60"
-                      />
-                    </label>
-                    <div className="space-y-2 pt-5">
+                  <div className="space-y-2">
                       <label className="flex items-center justify-between gap-3 text-sm text-white/60">
                         <span>Transcript/chapters</span>
                         <input
@@ -1527,7 +1514,6 @@ export function SettingsPage() {
                           className="accent-amber-400"
                         />
                       </label>
-                    </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <label className="flex items-center justify-between gap-3 text-sm text-white/60 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2">

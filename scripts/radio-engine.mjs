@@ -167,7 +167,7 @@ const DEFAULT_SETTINGS = {
   podcastTranscriptPrefetchLimit: 5,
   podcastTranscriptProvider: 'assemblyai',
   podcastAdSkipEnabled: true,
-  musicBreakTracksAfterPodcast: 1,
+  musicBreakTracksAfterPodcast: PODCAST_AFTER_SONGS,
   ttsProvider: (process.env.ELEVENLABS_API_KEY && (process.env.VITE_ELEVENLABS_VOICE_ID_DE || process.env.VITE_ELEVENLABS_VOICE_ID)) ? 'elevenlabs' : 'fish',
   elevenLabsVoiceIdEn: process.env.VITE_ELEVENLABS_VOICE_ID || '',
   elevenLabsVoiceIdDe: process.env.VITE_ELEVENLABS_VOICE_ID_DE || process.env.VITE_ELEVENLABS_VOICE_ID || '',
@@ -190,10 +190,13 @@ const DEFAULT_SETTINGS = {
 
 function normalizeEngineSettings(settings) {
   const next = { ...settings };
-  const podcastBreakSongs = Number(next.musicBreakTracksAfterPodcast);
-  next.musicBreakTracksAfterPodcast = Number.isFinite(podcastBreakSongs)
-    ? Math.max(1, Math.min(6, Math.round(podcastBreakSongs)))
-    : DEFAULT_SETTINGS.musicBreakTracksAfterPodcast;
+  const podcastAfterSongs = Number(next.podcastAfterSongs);
+  next.podcastAfterSongs = Number.isFinite(podcastAfterSongs)
+    ? Math.max(1, Math.min(12, Math.round(podcastAfterSongs)))
+    : DEFAULT_SETTINGS.podcastAfterSongs;
+  // Back-compat only: older remotes may still read this field, but the visible
+  // "songs before podcast" setting is the single source of truth.
+  next.musicBreakTracksAfterPodcast = next.podcastAfterSongs;
   return next;
 }
 
@@ -2503,11 +2506,9 @@ function buildJingleItem(file, title) {
 }
 
 function choosePodcastBreakSongs() {
-  if (Object.prototype.hasOwnProperty.call(engineSettings, 'musicBreakTracksAfterPodcast')) {
-    const configured = Number(engineSettings.musicBreakTracksAfterPodcast);
-    if (Number.isFinite(configured)) return Math.max(1, Math.min(6, Math.round(configured)));
-  }
-  return 1 + Math.floor(Math.random() * 3);
+  const configured = Number(engineSettings.podcastAfterSongs);
+  if (Number.isFinite(configured)) return Math.max(1, Math.min(12, Math.round(configured)));
+  return DEFAULT_SETTINGS.podcastAfterSongs;
 }
 
 function cleanupPreparedPodcastSegment(prepared) {
