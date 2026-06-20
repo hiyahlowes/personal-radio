@@ -11,6 +11,7 @@ const MAX_RECENT_TRACKS = 80;
 const MAX_PODCAST_SEGMENTS = 120;
 const MAX_MODERATION_HISTORY = 80;
 const MAX_CALL_INS = 200;
+const MAX_TRANSITION_HISTORY = 240;
 
 function nowIso() {
   return new Date().toISOString();
@@ -26,6 +27,7 @@ function defaultMemory() {
     trackStats: {},
     recentTracks: [],
     podcastSegments: [],
+    transitions: [],
     dailyMemory: {},
     moderationHistory: [],
     callIns: [],
@@ -81,6 +83,18 @@ function itemKey(item = {}) {
 function normalizedTrack(item = {}) {
   return {
     trackId: itemKey(item),
+    title: item.title || item.name || '',
+    artist: item.artist || '',
+    albumTitle: item.albumTitle || '',
+    liveUrl: item.liveUrl || '',
+    duration: Number(item.duration || 0),
+  };
+}
+
+function normalizedRadioItem(item = {}) {
+  return {
+    itemId: itemKey(item),
+    kind: item.kind || 'unknown',
     title: item.title || item.name || '',
     artist: item.artist || '',
     albumTitle: item.albumTitle || '',
@@ -257,6 +271,45 @@ export function recordModeration({ purpose, item, scriptText, context = {} }) {
   return row;
 }
 
+export function recordTransition({ fromItem = null, toItem = null, details = {} } = {}) {
+  if (!toItem) return null;
+  const from = fromItem ? normalizedRadioItem(fromItem) : null;
+  const to = normalizedRadioItem(toItem);
+  const transitionType = details.transitionType
+    || details.reason
+    || `${from?.kind || 'silence'}->${to.kind}`;
+  const row = {
+    id: randomUUID(),
+    ts: nowIso(),
+    from,
+    to,
+    transitionType,
+    details: {
+      phase: details.phase || '',
+      reason: details.reason || '',
+      detail: details.detail || '',
+      fadeInSeconds: Number(details.fadeInSeconds || 0),
+      fadeOutSeconds: Number(details.fadeOutSeconds || 0),
+      fadeOutStartSeconds: Number(details.fadeOutStartSeconds || 0),
+      startSeconds: Number(details.startSeconds || 0),
+      resumeStartSeconds: Number(details.resumeStartSeconds || 0),
+      silenceSinceLastEndSeconds: details.silenceSinceLastEndSeconds == null ? null : Number(details.silenceSinceLastEndSeconds || 0),
+      podcastPart: details.podcastPart ?? null,
+      podcastSegmentStartSeconds: details.podcastSegmentStartSeconds ?? null,
+      podcastSegmentEndSeconds: details.podcastSegmentEndSeconds ?? null,
+      podcastBreakSongsRemaining: details.podcastBreakSongsRemaining ?? null,
+      usedPrecache: Boolean(details.usedPrecache),
+      usedPregeneratedTts: Boolean(details.usedPregeneratedTts),
+      outputs: Array.isArray(details.outputs) ? details.outputs.slice(0, 8) : [],
+    },
+  };
+  appendEvent('transition_started', row);
+  const memory = loadMemory();
+  memory.transitions = [row, ...(Array.isArray(memory.transitions) ? memory.transitions : [])].slice(0, MAX_TRANSITION_HISTORY);
+  saveMemory(memory);
+  return row;
+}
+
 export function addCallIn({ text, mood = '', intent = '', source = 'remote' }) {
   const trimmed = String(text || '').trim();
   if (!trimmed) throw new Error('Call-in text is required');
@@ -326,6 +379,7 @@ export function memorySnapshot({ trackId = '', openCallInLimit = 2 } = {}) {
     trackStats: trackId ? memory.trackStats?.[trackId] || null : null,
     recentTracks: (memory.recentTracks || []).slice(0, 8),
     recentPodcastSegments: (memory.podcastSegments || []).slice(0, 5),
+    recentTransitions: (memory.transitions || []).slice(0, 12),
     recentModerations: (memory.moderationHistory || []).slice(0, 5),
     openCallIns,
   };

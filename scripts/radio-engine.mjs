@@ -40,6 +40,7 @@ import {
   recordTrackLiked,
   recordTrackSkipped,
   recordTrackStarted,
+  recordTransition,
   rememberRecentTrack,
 } from './radio-memory.mjs';
 import {
@@ -402,6 +403,8 @@ let pendingPodcastReturnKey = null;
 const podcastSegmentPrefetches = new Map();
 const preparedPodcastSegmentCache = new Map();
 let coveredPodcastIntroKey = null;
+let lastAudibleItem = null;
+let lastAudibleEndedAt = null;
 
 // Per-output state
 const outputState = {};
@@ -570,6 +573,50 @@ function memorySafe(label, fn) {
     console.warn(`[memory] ${label} failed:`, err.message);
     return null;
   }
+}
+
+function compactPlaybackOptions(options = {}) {
+  return {
+    transitionType: options.transitionReason || '',
+    reason: options.transitionReason || '',
+    detail: options.transitionDetail || '',
+    fadeInSeconds: Number(options.fadeInSeconds || 0),
+    fadeOutSeconds: Number(options.fadeOutSeconds || 0),
+    fadeOutStartSeconds: Number(options.fadeOutStartSeconds || 0),
+    startSeconds: Number(options.startSeconds || 0),
+    resumeStartSeconds: Number(options.startSeconds || 0),
+  };
+}
+
+function beginAudibleItem(item, details = {}) {
+  if (!item) return;
+  const fromItem = lastAudibleItem;
+  const sinceLastEndSeconds = lastAudibleEndedAt
+    ? Math.max(0, (Date.now() - lastAudibleEndedAt) / 1000)
+    : null;
+  memorySafe('record transition', () => recordTransition({
+    fromItem,
+    toItem: item,
+    details: {
+      ...details,
+      silenceSinceLastEndSeconds: sinceLastEndSeconds,
+      podcastBreakSongsRemaining,
+    },
+  }));
+  lastAudibleItem = {
+    kind: item.kind,
+    id: item.id,
+    title: item.title,
+    artist: item.artist,
+    albumTitle: item.albumTitle,
+    liveUrl: item.liveUrl,
+    duration: item.duration,
+  };
+  lastAudibleEndedAt = null;
+}
+
+function finishAudibleItem() {
+  lastAudibleEndedAt = Date.now();
 }
 
 function itemDurationSeconds(item) {
@@ -2516,7 +2563,10 @@ function pregenPodcastReturnForResume(reason = 'music-break') {
   pendingPodcastReturnKey = key;
   pendingPodcastReturnPromise = buildPodcastReturnItem(state)
     .then(item => {
-      if (item) console.log(`[engine] podcast return pre-generated, ready (${reason})`);
+      if (item) {
+        item.__preGenerated = true;
+        console.log(`[engine] podcast return pre-generated, ready (${reason})`);
+      }
       return item;
     })
     .catch(err => {
@@ -2759,6 +2809,17 @@ async function playPodcastSegment(item) {
   let podcastCheckpointTimer = null;
   try {
     podcastCheckpointTimer = setInterval(checkpointPodcastPosition, 15_000);
+    beginAudibleItem(playbackItem, {
+      phase: 'podcast-segment',
+      transitionType: 'podcast-segment',
+      reason: segment.cutSource,
+      detail: segment.cutDetail,
+      startSeconds: segmentPlaybackFile ? 0 : segment.startSeconds,
+      podcastPart: state.part,
+      podcastSegmentStartSeconds: segment.startSeconds,
+      podcastSegmentEndSeconds: segment.endSeconds,
+      usedPrecache: segmentPlaybackSource === 'segmentCache',
+    });
     await playItemOnAllOutputs(playbackItem, {
       startSeconds: segmentPlaybackFile ? 0 : segment.startSeconds,
       durationSeconds: segmentPlaybackFile ? 0 : segment.durationSeconds,
@@ -2768,6 +2829,7 @@ async function playPodcastSegment(item) {
   } finally {
     if (podcastCheckpointTimer) clearInterval(podcastCheckpointTimer);
     checkpointPodcastPosition();
+    finishAudibleItem();
   }
   if (segmentPlaybackFile) { try { unlinkSync(segmentPlaybackFile); } catch {} }
 
@@ -3653,7 +3715,7 @@ async function radioLoop() {
         const starterSong = { ...nextItem };
         sessionIntroSongKey = itemKey(nextItem);
         pendingSessionIntroPromise = buildSessionIntroItem(request, starterSong)
-          .then(item => { if (item) console.log('[engine] session intro pre-generated, ready'); return item; })
+          .then(item => { if (item) { item.__preGenerated = true; console.log('[engine] session intro pre-generated, ready'); } return item; })
           .catch(err => { console.warn('[engine] session intro pre-gen error:', err.message); return null; });
       }
       if (podcastBreakSongsRemaining === 1) {
@@ -3685,7 +3747,7 @@ async function radioLoop() {
           }
           return buildModerationItem(songForMod, upcoming);
         })
-        .then(item => { if (item) console.log('[engine] moderation pre-generated, ready'); return item; })
+        .then(item => { if (item) { item.__preGenerated = true; console.log('[engine] moderation pre-generated, ready'); } return item; })
         .catch(err  => { console.warn('[engine] moderation pre-gen error:', err.message); return null; });
     }
 
@@ -3702,7 +3764,7 @@ async function radioLoop() {
           const isResume = Number(state.positionSeconds || 0) > 60 || Number(state.part || 1) > 1;
           pendingPodcastIntroKey = key;
           pendingPodcastIntroPromise = buildPodcastIntroItem(upcoming, state, isResume)
-            .then(item => { if (item) console.log('[engine] podcast intro pre-generated, ready'); return item; })
+            .then(item => { if (item) { item.__preGenerated = true; console.log('[engine] podcast intro pre-generated, ready'); } return item; })
             .catch(err => { console.warn('[engine] podcast intro pre-gen error:', err.message); return null; });
           prefetchPodcastSegment(upcoming);
           return null;
@@ -3735,7 +3797,13 @@ async function radioLoop() {
           itemWasKilled = false;
           console.log(`[engine] PLAY [${returnItem.kind}] ${returnItem.artist} — ${returnItem.title}`);
           broadcastStatus();
+          beginAudibleItem(returnItem, {
+            phase: 'podcast-return',
+            transitionType: 'podcast-return',
+            usedPregeneratedTts: !!returnItem.__preGenerated,
+          });
           await playItemOnAllOutputs(returnItem);
+          finishAudibleItem();
           if (returnItem.tmpFile && !maybeKeepTtsFile(returnItem.tmpFile)) { try { unlinkSync(returnItem.tmpFile); } catch {} }
           console.log(`[engine] DONE [${returnItem.kind}] ${returnItem.artist} — ${returnItem.title} (killed=${itemWasKilled})`);
           if (paused || itemWasKilled || shuttingDown) {
@@ -3781,7 +3849,13 @@ async function radioLoop() {
           itemWasKilled = false;
           console.log(`[engine] PLAY [${introItem.kind}] ${introItem.artist} — ${introItem.title}`);
           broadcastStatus();
+          beginAudibleItem(introItem, {
+            phase: 'podcast-intro',
+            transitionType: 'podcast-intro',
+            usedPregeneratedTts: !!introItem.__preGenerated,
+          });
           await playItemOnAllOutputs(introItem);
+          finishAudibleItem();
           if (introItem.tmpFile && !maybeKeepTtsFile(introItem.tmpFile)) { try { unlinkSync(introItem.tmpFile); } catch {} }
           console.log(`[engine] DONE [${introItem.kind}] ${introItem.artist} — ${introItem.title} (killed=${itemWasKilled})`);
           if (paused || itemWasKilled || shuttingDown) {
@@ -3799,7 +3873,12 @@ async function radioLoop() {
           itemWasKilled = false;
           console.log(`[engine] PLAY [${jingleItem.kind}] ${jingleItem.artist} — ${jingleItem.title}`);
           broadcastStatus();
+          beginAudibleItem(jingleItem, {
+            phase: 'podcast-intro-jingle',
+            transitionType: 'jingle',
+          });
           await playItemOnAllOutputs(jingleItem);
+          finishAudibleItem();
           console.log(`[engine] DONE [${jingleItem.kind}] ${jingleItem.artist} — ${jingleItem.title} (killed=${itemWasKilled})`);
           if (paused || itemWasKilled || shuttingDown) {
             playing = false;
@@ -3832,7 +3911,13 @@ async function radioLoop() {
       } else {
         nextMusicFadeInSeconds = 0;
       }
+      beginAudibleItem(nextItem, {
+        phase: nextItem.kind,
+        ...compactPlaybackOptions(playOptions),
+        usedPregeneratedTts: !!nextItem.__preGenerated,
+      });
       const playResults = await playItemOnAllOutputs(nextItem, playOptions);
+      finishAudibleItem();
       if (nextItem.kind === 'music' && playResults.some(result => result?.reason === 'music-crossfade')) {
         nextMusicFadeInSeconds = crossfadeSeconds();
         console.log(`[engine] crossfade overlap armed for next music (${nextMusicFadeInSeconds}s)`);
@@ -3885,7 +3970,13 @@ async function radioLoop() {
         broadcastStatus();
         const introOptions = moderationToMusicOptions(introItem);
         if (introOptions.resolveEarlyAfterMs) prefetchUpcomingMusicForTransition(introItem);
+        beginAudibleItem(introItem, {
+          phase: 'session-intro',
+          ...compactPlaybackOptions(introOptions),
+          usedPregeneratedTts: true,
+        });
         const introResults = await playItemOnAllOutputs(introItem, introOptions);
+        finishAudibleItem();
         if (introResults.some(result => result?.reason === 'moderation-to-music-duck')) {
           nextMusicFadeInSeconds = Number(introOptions.nextMusicFadeInSeconds || moderationDuckSeconds());
           console.log(`[engine] session intro ducking armed for next music (${nextMusicFadeInSeconds}s)`);
@@ -3913,7 +4004,12 @@ async function radioLoop() {
         itemWasKilled = false;
         console.log(`[engine] PLAY [${returnJingle.kind}] ${returnJingle.artist} — ${returnJingle.title}`);
         broadcastStatus();
+        beginAudibleItem(returnJingle, {
+          phase: 'podcast-return-jingle',
+          transitionType: 'jingle',
+        });
         await playItemOnAllOutputs(returnJingle);
+        finishAudibleItem();
         console.log(`[engine] DONE [${returnJingle.kind}] ${returnJingle.artist} — ${returnJingle.title} (killed=${itemWasKilled})`);
       }
       const modItem = podcastSegmentResult.moderationItem || await buildPodcastModerationItem(
@@ -3934,7 +4030,13 @@ async function radioLoop() {
         broadcastStatus();
         const modOptions = moderationToMusicOptions(modItem);
         if (modOptions.resolveEarlyAfterMs) prefetchUpcomingMusicForTransition(modItem);
+        beginAudibleItem(modItem, {
+          phase: 'podcast-moderation',
+          ...compactPlaybackOptions(modOptions),
+          usedPregeneratedTts: !!podcastSegmentResult.moderationItem,
+        });
         const modResults = await playItemOnAllOutputs(modItem, modOptions);
+        finishAudibleItem();
         if (modResults.some(result => result?.reason === 'moderation-to-music-duck')) {
           nextMusicFadeInSeconds = Number(modOptions.nextMusicFadeInSeconds || moderationDuckSeconds());
           console.log(`[engine] podcast moderation ducking armed for next music (${nextMusicFadeInSeconds}s)`);
@@ -4535,6 +4637,7 @@ const server = http.createServer(async (req, res) => {
         today: memory.dailyMemory?.[new Date().toISOString().slice(0, 10)] || null,
         recentTracks: (memory.recentTracks || []).slice(0, 20),
         recentPodcastSegments: (memory.podcastSegments || []).slice(0, 10),
+        recentTransitions: (memory.transitions || []).slice(0, 20),
         openCallIns: (memory.callIns || []).filter(c => c.status === 'open').slice(0, 20),
       });
     }
