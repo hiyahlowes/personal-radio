@@ -86,6 +86,7 @@ function envFlag(name, defaultValue = false) {
 }
 
 const APP_PORT   = Number(process.env.APP_PORT || 8899);
+const MANUAL_START_GRACE_MS = Math.max(5_000, Number(process.env.PERSONAL_RADIO_MANUAL_START_GRACE_MS || 45_000));
 const CHARTS_URL = `http://127.0.0.1:${APP_PORT}/.netlify/functions/wavlake-charts`;
 const WAVLAKE_PLAYLIST_URL = 'https://catalog.wavlake.com/v1/playlists';
 const TTS_ELEVEN_URL = `http://127.0.0.1:${APP_PORT}/.netlify/functions/podcast-proxy?action=tts`;
@@ -353,6 +354,8 @@ let pendingSessionIntroPromise = null;
 let sessionIntroSongKey = null;
 let listenerResumeInProgress = false;
 let nextMusicFadeInSeconds = 0;
+let manualStartGraceUntil = 0;
+let manualStartGraceReason = null;
 
 const RESUME_END_GUARD_SECONDS = 5;
 
@@ -667,6 +670,8 @@ function buildListenerStatus() {
       : !!listenerState.resumeWillStartNewSession,
     pendingSessionIntro: !!sessionIntroRequest || !!pendingSessionIntroPromise,
     deferredResumeKind: deferredResumeItem?.item?.kind || null,
+    manualStartGraceSeconds: Math.max(0, Math.ceil((manualStartGraceUntil - now) / 1000)),
+    manualStartGraceReason,
   };
 }
 
@@ -3814,6 +3819,8 @@ function applyListenerSnapshot(snapshot) {
     listenerState.lastHeardAt = snapshot.checkedAt;
     listenerState.silenceDurationSeconds = 0;
     if (listenerState.mode !== 'suspended') {
+      manualStartGraceUntil = 0;
+      manualStartGraceReason = null;
       listenerState.mode = 'active';
       listenerState.reason = null;
       listenerState.graceStartedAt = null;
@@ -4032,12 +4039,32 @@ function suspendForNoListeners(snapshot) {
   broadcastStatus();
 }
 
+function armManualStartGrace(reason = 'manual-play') {
+  manualStartGraceUntil = Date.now() + MANUAL_START_GRACE_MS;
+  manualStartGraceReason = reason;
+}
+
 async function ensureListenerBeforePlayback() {
   if (engineSettings.autoSuspendWhenNoListeners === false) return true;
   const snapshot = await inspectActiveListeners();
   applyListenerSnapshot(snapshot);
   if (snapshot.activeListeners > 0) return true;
 
+  const manualStartGraceRemainingMs = manualStartGraceUntil - Date.now();
+  if (manualStartGraceRemainingMs > 0) {
+    listenerState.mode = 'starting';
+    listenerState.graceStartedAt = snapshot.checkedAt;
+    listenerState.reason = 'manual-start-grace';
+    listenerState.silenceDurationSeconds = 0;
+    console.warn(
+      `[engine] manual start grace: starting without confirmed listener for ${Math.ceil(manualStartGraceRemainingMs / 1000)}s (${manualStartGraceReason || 'manual-play'})`
+    );
+    broadcastStatus();
+    return true;
+  }
+
+  manualStartGraceUntil = 0;
+  manualStartGraceReason = null;
   paused = true;
   playing = false;
   listenerState.mode = 'suspended';
@@ -4269,17 +4296,20 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/play') {
+      armManualStartGrace('api-play');
       if (paused) { paused = false; broadcastStatus(); }
       return send(res, 200, { ok: true, action: 'play', resume: pausedResumeItem });
     }
 
     if (url.pathname === '/api/restart') {
+      armManualStartGrace('api-restart');
       const starter = await startFreshRadioSession('remote-restart');
       return send(res, 200, { ok: true, action: 'restart', starter });
     }
 
     if (url.pathname === '/api/toggle') {
       if (paused) {
+        armManualStartGrace('api-toggle-play');
         paused = false;
         broadcastStatus();
         return send(res, 200, { ok: true, action: 'play', resume: pausedResumeItem });
