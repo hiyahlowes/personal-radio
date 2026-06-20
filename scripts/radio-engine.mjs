@@ -3763,7 +3763,7 @@ async function inspectActiveListeners() {
       const clients = Number(liveStatus?.clients || 0);
       const clientDetails = Array.isArray(liveStatus?.clientDetails) ? liveStatus.clientDetails : [];
       const freshClients = clientDetails.length > 0
-        ? clientDetails.filter(client => Number(client.ageSeconds || 0) <= streamMaxAgeSeconds).length
+        ? clientDetails.filter(client => client.listener !== false && Number(client.ageSeconds || 0) <= streamMaxAgeSeconds).length
         : clients;
       return {
         name: output.name,

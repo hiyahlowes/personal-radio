@@ -251,31 +251,39 @@ export function useEngineMode() {
   const sseRef  = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const applyStatus = useCallback((s: EngineStatus) => {
+    setStatus(s);
+    if (Array.isArray(s.queue)) setQueue(s.queue.filter(i => i.kind === 'music').map(engineItemToTrack));
+    if (Array.isArray(s.podcastQueue)) setPodcastQueue(s.podcastQueue);
+    if (s.settings) setSettings(s.settings);
+    if (s.volumes) setVolumes(s.volumes);
+  }, []);
+
+  const refreshStatusSnapshot = useCallback(() =>
+    fetch('/api/status')
+      .then(r => r.json())
+      .then((s: EngineStatus) => {
+        applyStatus(s);
+        return s;
+      })
+      .catch(() => null),
+  [applyStatus]);
+
+  const refreshQueueSnapshot = useCallback(() =>
+    fetch('/api/queue')
+      .then(r => r.json())
+      .then((q: { queue?: EngineCurrentItem[] }) => {
+        setQueue((q.queue ?? []).filter(i => i.kind === 'music').map(engineItemToTrack));
+        return q;
+      })
+      .catch(() => null),
+  []);
+
   useEffect(() => {
     if (!isRemote) return;
 
-    const fetchStatus = () =>
-      fetch('/api/status')
-        .then(r => r.json())
-        .then((s: EngineStatus) => {
-          setStatus(s);
-          if (Array.isArray(s.queue)) setQueue(s.queue.filter(i => i.kind === 'music').map(engineItemToTrack));
-          if (Array.isArray(s.podcastQueue)) setPodcastQueue(s.podcastQueue);
-          if (s.settings) setSettings(s.settings);
-          if (s.volumes) setVolumes(s.volumes);
-        })
-        .catch(() => {}); // swallow network errors — SSE will recover
-
-    const fetchQueue = () =>
-      fetch('/api/queue')
-        .then(r => r.json())
-        .then((q: { queue?: EngineCurrentItem[] }) => {
-          setQueue((q.queue ?? []).filter(i => i.kind === 'music').map(engineItemToTrack));
-        })
-        .catch(() => {});
-
-    fetchStatus(); // initial load
-    fetchQueue();
+    refreshStatusSnapshot(); // initial load
+    refreshQueueSnapshot();
     fetch('/api/call-ins?status=open')
       .then(r => r.json())
       .then((out: { callIns?: EngineCallIn[] }) => {
@@ -284,7 +292,7 @@ export function useEngineMode() {
       .catch(() => {});
 
     // Fallback polling — catches missed SSE events
-    pollRef.current = setInterval(() => { fetchStatus(); fetchQueue(); }, 3000);
+    pollRef.current = setInterval(() => { refreshStatusSnapshot(); refreshQueueSnapshot(); }, 3000);
 
     // SSE for near-instant state updates
     const es = new EventSource('/api/events');
@@ -292,11 +300,7 @@ export function useEngineMode() {
     es.addEventListener('status', (e: Event) => {
       try {
         const data = JSON.parse((e as MessageEvent).data) as EngineStatus;
-        setStatus(data);
-        if (Array.isArray(data.queue)) setQueue(data.queue.filter(i => i.kind === 'music').map(engineItemToTrack));
-        if (Array.isArray(data.podcastQueue)) setPodcastQueue(data.podcastQueue);
-        if (data.settings) setSettings(data.settings);
-        if (data.volumes) setVolumes(data.volumes);
+        applyStatus(data);
       } catch {
         // Ignore malformed SSE payloads; polling will refresh state.
       }
@@ -310,7 +314,7 @@ export function useEngineMode() {
       es.close();
       sseRef.current = null;
     };
-  }, [isRemote]);
+  }, [isRemote, applyStatus, refreshQueueSnapshot, refreshStatusSnapshot]);
 
   const apiPost = useCallback(async (path: string, body?: unknown) => {
     try {
@@ -319,11 +323,13 @@ export function useEngineMode() {
         headers: body ? { 'content-type': 'application/json' } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      return response.json().catch(() => null);
+      const out = await response.json().catch(() => null);
+      if (isRemote) void refreshStatusSnapshot();
+      return out;
     } catch {
       return null;
     }
-  }, []);
+  }, [isRemote, refreshStatusSnapshot]);
 
   const refreshSettings = useCallback(async () => {
     if (!isRemote) return null;

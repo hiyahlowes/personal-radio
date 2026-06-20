@@ -112,7 +112,11 @@ function isProbeLiveClient(client) {
 }
 
 function isRealLiveListener(client) {
-  return !isProbeLiveClient(client);
+  if (!isProbeLiveClient(client)) return true;
+  const ageMs = Date.now() - Number(client?.connectedAt?.getTime?.() || Date.now());
+  // ffplay/mpv based real listeners often identify as Lavf. Short 2-6s Lavf
+  // connections are status probes; a sustained stream with real bytes is a listener.
+  return ageMs >= 15_000 && Number(client?.bytesWritten || 0) >= 256_000;
 }
 
 function removeLiveClient(id, reason = 'removed') {
