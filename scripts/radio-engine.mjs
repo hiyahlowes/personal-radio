@@ -2449,8 +2449,10 @@ function buildJingleItem(file, title) {
 }
 
 function choosePodcastBreakSongs() {
-  const configured = Number(engineSettings.musicBreakTracksAfterPodcast || 0);
-  if (Number.isFinite(configured) && configured > 0) return Math.max(1, Math.min(6, Math.round(configured)));
+  if (Object.prototype.hasOwnProperty.call(engineSettings, 'musicBreakTracksAfterPodcast')) {
+    const configured = Number(engineSettings.musicBreakTracksAfterPodcast);
+    if (Number.isFinite(configured)) return Math.max(0, Math.min(6, Math.round(configured)));
+  }
   return 1 + Math.floor(Math.random() * 3);
 }
 
@@ -3464,7 +3466,6 @@ async function radioLoop() {
     // ── Podcast resume after music break ──────────────────────────────────────
     if (!nextItem
         && engineSettings.podcastsEnabled !== false
-        && podcastSessionActive
         && podcastBreakSongsRemaining <= 0) {
       const resumePodcast = currentPodcastResumeItem();
       if (resumePodcast) {
