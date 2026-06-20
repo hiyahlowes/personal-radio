@@ -2201,6 +2201,7 @@ async function preparePodcastSegment(item) {
     planKey,
     episodeKey,
     state,
+    resolvedItem,
     resolvedAudioUrl,
     segment,
     segmentPlaybackFile,
