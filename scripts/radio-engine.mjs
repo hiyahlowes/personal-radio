@@ -147,6 +147,7 @@ const DEFAULT_SETTINGS = {
   moderationDuckSeconds: Number.isFinite(DEFAULT_MODERATION_DUCK_SECONDS) && DEFAULT_MODERATION_DUCK_SECONDS > 0 ? DEFAULT_MODERATION_DUCK_SECONDS : 4,
   audioAnalysisEnabled: true,
   audioAnalysisWindowSeconds: Number.isFinite(DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS) && DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS > 0 ? DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS : 45,
+  recentTrackCooldownMinutes: 180,
   musicSource: 'topCharts',
   wavlakePlaylistId: '',
   wavlakePlaylistTitle: '',
@@ -821,6 +822,75 @@ function shuffle(arr) {
   return a;
 }
 
+function recentTrackCooldownMinutes() {
+  const minutes = Number(engineSettings.recentTrackCooldownMinutes ?? 180);
+  return Number.isFinite(minutes) && minutes > 0 ? Math.min(24 * 60, Math.max(5, minutes)) : 0;
+}
+
+function normalizeTrackTitle(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function trackMatchesMemoryRow(item, row = {}) {
+  if (!item || !row) return false;
+  const id = String(item.id || '').trim();
+  const rowId = String(row.trackId || row.id || '').trim();
+  const liveUrl = String(item.liveUrl || '').trim();
+  const rowUrl = String(row.liveUrl || '').trim();
+  if (id && rowId && id === rowId) return true;
+  if (liveUrl && rowUrl && liveUrl === rowUrl) return true;
+  return normalizeTrackTitle(item.title) === normalizeTrackTitle(row.title)
+    && normalizeTrackTitle(item.artist) === normalizeTrackTitle(row.artist);
+}
+
+function recentlyPlayedHit(item, memory = loadMemory()) {
+  if (!item || item.kind !== 'music') return null;
+  const cooldownMs = recentTrackCooldownMinutes() * 60_000;
+  if (cooldownMs <= 0) return null;
+  const cutoff = Date.now() - cooldownMs;
+  const recentRows = Array.isArray(memory.recentTracks) ? memory.recentTracks : [];
+  for (const row of recentRows) {
+    if (!trackMatchesMemoryRow(item, row)) continue;
+    const ts = Date.parse(row.ts || row.lastPlayedAt || row.lastFinishedAt || '');
+    if (Number.isFinite(ts) && ts >= cutoff) return { source: 'recentTracks', ts: row.ts || new Date(ts).toISOString() };
+  }
+  const stats = memory.trackStats && typeof memory.trackStats === 'object' ? Object.values(memory.trackStats) : [];
+  for (const row of stats) {
+    if (!trackMatchesMemoryRow(item, row)) continue;
+    const ts = Math.max(
+      Date.parse(row.lastPlayedAt || '') || 0,
+      Date.parse(row.lastFinishedAt || '') || 0,
+      Date.parse(row.lastSkippedAt || '') || 0
+    );
+    if (ts >= cutoff) return { source: 'trackStats', ts: new Date(ts).toISOString() };
+  }
+  return null;
+}
+
+function filterRecentlyPlayedTracks(tracks) {
+  const playable = tracks.filter(t => !isBlocked(t));
+  const memory = loadMemory();
+  const fresh = [];
+  const skipped = [];
+  for (const track of playable) {
+    const hit = recentlyPlayedHit(track, memory);
+    if (hit) skipped.push({ track, hit });
+    else fresh.push(track);
+  }
+  if (fresh.length > 0) {
+    if (skipped.length > 0) {
+      console.log(
+        `[engine] recent-track cooldown filtered ${skipped.length} track(s) for ${recentTrackCooldownMinutes()} min; ${fresh.length} remain`
+      );
+    }
+    return fresh;
+  }
+  if (skipped.length > 0) {
+    console.warn('[engine] recent-track cooldown would empty queue; allowing repeats as fallback');
+  }
+  return playable;
+}
+
 function audioAnalysisWindowSeconds() {
   const seconds = Number(engineSettings.audioAnalysisWindowSeconds ?? 45);
   return Number.isFinite(seconds) && seconds > 5 ? Math.min(120, Math.max(15, seconds)) : 45;
@@ -1053,7 +1123,7 @@ async function refillQueue() {
     }
   }
   catch(e) { console.error('[engine] music source fetch failed permanently:', e.message); return false; }
-  queue = shuffle(tracks).filter(t => !isBlocked(t));
+  queue = shuffle(filterRecentlyPlayedTracks(tracks));
   console.log(`[engine] queue ready: ${queue.length} music tracks`);
   prefetchAudioAnalysis(queue);
   return queue.length > 0;
@@ -4432,6 +4502,7 @@ const server = http.createServer(async (req, res) => {
         'moderationDuckSeconds',
         'audioAnalysisEnabled',
         'audioAnalysisWindowSeconds',
+        'recentTrackCooldownMinutes',
         'musicSource',
         'wavlakePlaylistId',
         'wavlakePlaylistTitle',
