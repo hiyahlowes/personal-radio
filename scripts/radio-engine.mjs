@@ -690,6 +690,7 @@ function buildPodcastStatus() {
       segmentEndSeconds: null,
       nextBreakTargetSeconds: null,
       breakReason: null,
+      breakReasonDetail: null,
       hasTranscript: false,
       hasChapters: false,
       lastSegmentContextSource: null,
@@ -711,6 +712,7 @@ function buildPodcastStatus() {
     segmentEndSeconds: active?.segmentEndSeconds ?? (lastSegmentIsCurrent ? podcastState.lastSegment?.endSeconds : null) ?? null,
     nextBreakTargetSeconds: active?.segmentEndSeconds ?? null,
     breakReason: active?.breakReason || (lastSegmentIsCurrent ? podcastState.lastSegment?.breakReason : null) || null,
+    breakReasonDetail: active?.breakReasonDetail || (lastSegmentIsCurrent ? podcastState.lastSegment?.breakReasonDetail : null) || null,
     hasTranscript: !!(active?.hasTranscript ?? episodeState?.transcriptUrl) || !!readCachedPodcastTranscript({ id: episodeState?.guid || currentEpisodeKey, audioUrl: episodeState?.episodeUrl, title: episodeState?.episodeTitle })?.text,
     hasChapters: !!(active?.hasChapters ?? (Array.isArray(episodeState?.chapters) && episodeState.chapters.length > 0)),
     lastSegmentContextSource: lastSegmentIsCurrent ? (podcastState.lastSegment?.contextSource || null) : null,
@@ -1728,11 +1730,17 @@ function findChapterCut(chapters, startSeconds, minSeconds, maxSeconds) {
 }
 
 function findTranscriptCut(raw, startSeconds, minSeconds, maxSeconds) {
+  return findTranscriptCutNear(raw, startSeconds, minSeconds, maxSeconds);
+}
+
+function findTranscriptCutNear(raw, startSeconds, minSeconds, maxSeconds, anchorSeconds = null) {
   const entries = parseCueEntries(raw);
   if (!entries.length) return null;
   const minTarget = startSeconds + minSeconds;
   const maxTarget = startSeconds + maxSeconds;
+  const anchor = Number(anchorSeconds);
   const terminal = /[.!?…]["')\]]*$/;
+  const candidates = [];
   for (let i = 0; i < entries.length; i++) {
     const cue = entries[i];
     if (cue.end < minTarget || cue.end > maxTarget) continue;
@@ -1741,10 +1749,17 @@ function findTranscriptCut(raw, startSeconds, minSeconds, maxSeconds) {
     const text = String(cue.text || '').trim();
     const words = text.split(/\s+/).filter(Boolean).length;
     if (terminal.test(text) && words >= 6 && gap >= 0.25) {
-      return { seconds: cue.end, title: '', source: 'transcriptCue', gapSeconds: gap };
+      candidates.push({ seconds: cue.end, title: '', source: 'transcriptCue', gapSeconds: gap, words });
     }
   }
-  return null;
+  if (!candidates.length) return null;
+  if (Number.isFinite(anchor)) {
+    const near = candidates
+      .filter(candidate => Math.abs(candidate.seconds - anchor) <= 120)
+      .sort((a, b) => Math.abs(a.seconds - anchor) - Math.abs(b.seconds - anchor));
+    if (near[0]) return { ...near[0], anchorSeconds: anchor };
+  }
+  return candidates[0];
 }
 
 async function fetchTranscriptRawForEpisode(item, episodeState) {
@@ -1761,27 +1776,41 @@ async function fetchTranscriptRawForEpisode(item, episodeState) {
   return '';
 }
 
-function parseSilenceCut(stderr, startSeconds, minSeconds, maxSeconds) {
-  const minTarget = startSeconds + minSeconds;
-  const maxTarget = startSeconds + maxSeconds;
+function parseSilenceCut(stderr, windowStartSeconds, minTarget, maxTarget, anchorSeconds = null) {
   const starts = [...String(stderr || '').matchAll(/silence_start:\s*([0-9.]+)/g)]
     .map(m => Number(m[1]))
     .filter(Number.isFinite);
+  const anchor = Number(anchorSeconds);
+  const candidates = [];
 
   for (const raw of starts) {
-    const absolute = raw >= minTarget - 0.5 ? raw : minTarget + raw;
+    const absolute = raw >= minTarget - 0.5 ? raw : windowStartSeconds + raw;
     const clamped = Math.max(minTarget, absolute);
     if (clamped >= minTarget && clamped <= maxTarget) {
-      return { seconds: clamped, title: '', source: 'silence' };
+      candidates.push({ seconds: clamped, title: '', source: 'silence' });
     }
   }
 
-  return null;
+  if (!candidates.length) return null;
+  if (Number.isFinite(anchor)) {
+    candidates.sort((a, b) => Math.abs(a.seconds - anchor) - Math.abs(b.seconds - anchor));
+    return { ...candidates[0], anchorSeconds: anchor };
+  }
+  return candidates[0];
 }
 
-async function findSilenceCut(item, startSeconds, minSeconds, maxSeconds) {
-  const windowStart = startSeconds + minSeconds;
-  const windowDuration = Math.max(1, maxSeconds - minSeconds);
+async function findSilenceCut(item, startSeconds, minSeconds, maxSeconds, options = {}) {
+  const minTarget = startSeconds + minSeconds;
+  const maxTarget = startSeconds + maxSeconds;
+  const anchor = Number(options.anchorSeconds);
+  const hasAnchor = Number.isFinite(anchor);
+  const windowStart = hasAnchor
+    ? Math.max(minTarget, anchor - Number(options.beforeSeconds ?? 45))
+    : minTarget;
+  const windowEnd = hasAnchor
+    ? Math.min(maxTarget, anchor + Number(options.afterSeconds ?? 90))
+    : maxTarget;
+  const windowDuration = Math.max(1, windowEnd - windowStart);
   try {
     const result = await runCommand('ffmpeg', [
       '-nostdin',
@@ -1795,7 +1824,7 @@ async function findSilenceCut(item, startSeconds, minSeconds, maxSeconds) {
       '-f', 'null',
       '-',
     ], Math.ceil((windowDuration + 90) * 1000));
-    const cut = parseSilenceCut(result.stderr, startSeconds, minSeconds, maxSeconds);
+    const cut = parseSilenceCut(result.stderr, windowStart, minTarget, maxTarget, hasAnchor ? anchor : null);
     if (cut) return cut;
     if (!result.ok) console.warn('[engine] podcast silence detect failed:', result.stderr.split(/\r?\n/).slice(-3).join(' | '));
   } catch(e) {
@@ -1811,22 +1840,28 @@ async function choosePodcastSegment(item, episodeState) {
   const hardMaxEnd = durationSeconds > 0
     ? Math.min(startSeconds + maxSeconds, durationSeconds)
     : startSeconds + maxSeconds;
+  let semanticCut = null;
   let cut = null;
   let transcriptRaw = '';
+  const refinement = [];
 
   if (engineSettings.podcastPreferTranscriptChapters !== false) {
-    cut = findChapterCut(episodeState.chapters, startSeconds, minSeconds, maxSeconds);
-    if (cut) {
-      console.log(`[engine] podcast break candidate accepted: chapter @ ${Math.round(cut.seconds)}s${cut.title ? ` (${cut.title})` : ''}`);
+    const chapterCut = findChapterCut(episodeState.chapters, startSeconds, minSeconds, maxSeconds);
+    if (chapterCut) {
+      semanticCut = chapterCut;
+      refinement.push('chapter');
+      console.log(`[engine] podcast break anchor: chapter @ ${Math.round(chapterCut.seconds)}s${chapterCut.title ? ` (${chapterCut.title})` : ''}`);
     }
-    if (!cut && (episodeState.transcriptUrl || readCachedPodcastTranscript(item.episode || item)?.status === 'completed')) {
+    if (episodeState.transcriptUrl || readCachedPodcastTranscript(item.episode || item)?.status === 'completed') {
       try {
         transcriptRaw = await fetchTranscriptRawForEpisode(item, episodeState);
-        cut = findTranscriptCut(transcriptRaw, startSeconds, minSeconds, maxSeconds);
-        if (cut) {
-          console.log(`[engine] podcast break candidate accepted: transcriptCue @ ${Math.round(cut.seconds)}s gap=${Number(cut.gapSeconds || 0).toFixed(1)}s`);
+        const transcriptCut = findTranscriptCutNear(transcriptRaw, startSeconds, minSeconds, maxSeconds, chapterCut?.seconds ?? null);
+        if (transcriptCut) {
+          semanticCut = transcriptCut;
+          refinement.push('transcriptCue');
+          console.log(`[engine] podcast break anchor refined by transcriptCue @ ${Math.round(transcriptCut.seconds)}s gap=${Number(transcriptCut.gapSeconds || 0).toFixed(1)}s${chapterCut ? ` from chapter ${Math.round(chapterCut.seconds)}s` : ''}`);
         } else {
-          console.log('[engine] podcast transcript had no logical break candidate in segment window; trying silence');
+          console.log('[engine] podcast transcript had no logical break candidate in segment window');
         }
       } catch(e) {
         console.warn('[engine] podcast transcript cut failed:', e.message);
@@ -1834,9 +1869,46 @@ async function choosePodcastSegment(item, episodeState) {
     }
   }
 
+  if (semanticCut) {
+    const silenceCut = await findSilenceCut(item, startSeconds, minSeconds, maxSeconds, {
+      anchorSeconds: semanticCut.seconds,
+      beforeSeconds: 45,
+      afterSeconds: 90,
+    });
+    if (silenceCut) {
+      cut = {
+        ...silenceCut,
+        title: semanticCut.title || silenceCut.title || '',
+        semanticSource: semanticCut.source,
+        semanticSeconds: semanticCut.seconds,
+        detail: [...refinement, 'silence'].join('->'),
+      };
+      console.log(`[engine] podcast break anchor confirmed by silence @ ${Math.round(cut.seconds)}s (${cut.detail})`);
+    } else {
+      console.log(`[engine] podcast break anchor had no nearby silence confirmation @ ${Math.round(semanticCut.seconds)}s; trying full-window silence`);
+    }
+  }
+
   if (!cut) {
-    cut = await findSilenceCut(item, startSeconds, minSeconds, maxSeconds);
-    if (cut) console.log(`[engine] podcast break candidate accepted: silence @ ${Math.round(cut.seconds)}s`);
+    const silenceCut = await findSilenceCut(item, startSeconds, minSeconds, maxSeconds);
+    if (silenceCut) {
+      cut = {
+        ...silenceCut,
+        title: semanticCut?.title || silenceCut.title || '',
+        semanticSource: semanticCut?.source || '',
+        semanticSeconds: semanticCut?.seconds || null,
+        detail: semanticCut ? [...refinement, 'silence'].join('->') : 'silence',
+      };
+      console.log(`[engine] podcast break candidate accepted: silence @ ${Math.round(cut.seconds)}s${semanticCut ? ` after unconfirmed ${semanticCut.source}` : ''}`);
+    }
+  }
+
+  if (!cut && semanticCut) {
+    cut = {
+      ...semanticCut,
+      detail: [...refinement, 'unconfirmed'].join('->'),
+    };
+    console.log(`[engine] podcast break candidate accepted without silence confirmation: ${semanticCut.source} @ ${Math.round(cut.seconds)}s (${cut.detail})`);
   }
 
   const endSeconds = Math.min(Math.max(cut?.seconds || hardMaxEnd, startSeconds + minSeconds), hardMaxEnd);
@@ -1848,6 +1920,9 @@ async function choosePodcastSegment(item, episodeState) {
     minSeconds,
     maxSeconds,
     cutSource: cut?.source || 'hardMax',
+    cutDetail: cut?.detail || cut?.source || 'hardMax',
+    semanticSource: cut?.semanticSource || (cut?.source && cut.source !== 'silence' ? cut.source : ''),
+    semanticSeconds: cut?.semanticSeconds ?? (cut?.source && cut.source !== 'silence' ? cut.seconds : null),
     chapterTitle: cut?.title || '',
     transcriptRaw,
   };
@@ -2265,6 +2340,7 @@ async function playPodcastSegment(item) {
   const {
     episodeKey,
     state,
+    resolvedItem,
     resolvedAudioUrl,
     segment,
     segmentPlaybackFile,
@@ -2281,6 +2357,7 @@ async function playPodcastSegment(item) {
     segmentStartSeconds: segment.startSeconds,
     segmentEndSeconds: segment.endSeconds,
     breakReason: segment.cutSource,
+    breakReasonDetail: segment.cutDetail,
     playbackSource: segmentPlaybackSource,
     hasTranscript: !!state.transcriptUrl || !!readCachedPodcastTranscript(item.episode || item)?.text,
     hasChapters: Array.isArray(state.chapters) && state.chapters.length > 0,
@@ -2289,7 +2366,7 @@ async function playPodcastSegment(item) {
   podcastState.currentEpisodeKey = episodeKey;
   savePodcastState();
 
-  console.log(`[engine] podcast segment part ${state.part}: ${Math.round(segment.startSeconds)}s → ${Math.round(segment.endSeconds)}s breakReason=${segment.cutSource} playback=${segmentPlaybackSource}`);
+  console.log(`[engine] podcast segment part ${state.part}: ${Math.round(segment.startSeconds)}s → ${Math.round(segment.endSeconds)}s breakReason=${segment.cutSource} detail=${segment.cutDetail} playback=${segmentPlaybackSource}`);
   broadcastStatus();
 
   const startedMs = Date.now();
@@ -2332,6 +2409,7 @@ async function playPodcastSegment(item) {
     endSeconds: endPosition,
     plannedEndSeconds: segment.endSeconds,
     breakReason: segment.cutSource,
+    breakReasonDetail: segment.cutDetail,
     playbackSource: segmentPlaybackSource,
     contextSource: context.source,
     chapterTitle: context.chapterTitle,
