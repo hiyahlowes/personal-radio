@@ -116,7 +116,7 @@ const TTS_FILE_TAIL_SILENCE_SECONDS = Number(process.env.PERSONAL_RADIO_TTS_FILE
 const TTS_KEEP_RECENT_FILES   = Number(process.env.PERSONAL_RADIO_TTS_KEEP_RECENT_FILES || 10);
 const DEFAULT_CROSSFADE_SECONDS = Number(process.env.PERSONAL_RADIO_CROSSFADE_SECONDS || 5);
 const DEFAULT_MODERATION_DUCK_SECONDS = Number(process.env.PERSONAL_RADIO_MODERATION_DUCK_SECONDS || 4);
-const AUDIO_ANALYSIS_VERSION = 1;
+const AUDIO_ANALYSIS_VERSION = 2;
 const DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS = Number(process.env.PERSONAL_RADIO_AUDIO_ANALYSIS_WINDOW_SECONDS || 45);
 const AUDIO_ANALYSIS_PREFETCH_LIMIT = Number(process.env.PERSONAL_RADIO_AUDIO_ANALYSIS_PREFETCH_LIMIT || 4);
 const PODCAST_INTRO_JINGLE    = process.env.PERSONAL_RADIO_PODCAST_INTRO_JINGLE || path.join(PUBLIC_DIR, 'podcast-intro.mp3');
@@ -147,6 +147,8 @@ const DEFAULT_SETTINGS = {
   moderationDuckSeconds: Number.isFinite(DEFAULT_MODERATION_DUCK_SECONDS) && DEFAULT_MODERATION_DUCK_SECONDS > 0 ? DEFAULT_MODERATION_DUCK_SECONDS : 4,
   audioAnalysisEnabled: true,
   audioAnalysisWindowSeconds: Number.isFinite(DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS) && DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS > 0 ? DEFAULT_AUDIO_ANALYSIS_WINDOW_SECONDS : 45,
+  transitionIntroAnalysisEnabled: true,
+  transitionIntroSkipMaxSeconds: 8,
   recentTrackCooldownMinutes: 180,
   musicSource: 'topCharts',
   wavlakePlaylistId: '',
@@ -931,6 +933,21 @@ function parseSilenceStart(text, duration, windowSeconds) {
   return matches.length ? Math.min(...matches) : null;
 }
 
+function parseInitialSilenceEnd(text) {
+  const raw = String(text || '');
+  const start = raw.match(/silence_start:\s*0(?:\.0+)?/);
+  if (!start) return 0;
+  const after = raw.slice(start.index || 0);
+  const end = after.match(/silence_end:\s*([0-9.]+)/);
+  const seconds = end ? Number(end[1]) : 0;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+function introSkipMaxSeconds() {
+  const seconds = Number(engineSettings.transitionIntroSkipMaxSeconds ?? 8);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(20, Math.max(0, seconds)) : 0;
+}
+
 function parseRmsPoints(text, duration, windowSeconds) {
   const lines = String(text || '').split(/\r?\n/);
   const points = [];
@@ -1015,6 +1032,27 @@ async function analyzeTrackOutro(item, sourceUrl = item?.liveUrl) {
     const windowSeconds = Math.min(audioAnalysisWindowSeconds(), Math.max(15, duration - 1));
     const input = sourceUrl;
     try {
+      let audibleStartSeconds = 0;
+      let introSilenceEndSeconds = null;
+      if (engineSettings.transitionIntroAnalysisEnabled !== false && introSkipMaxSeconds() > 0) {
+        const introWindowSeconds = Math.min(30, Math.max(8, duration - 1));
+        const intro = await runCommand('ffmpeg', [
+          '-hide_banner',
+          '-nostdin',
+          '-t', String(Math.round(introWindowSeconds)),
+          '-i', input,
+          '-vn',
+          '-af', 'silencedetect=n=-45dB:d=0.15',
+          '-f', 'null',
+          '-',
+        ], 15_000);
+        const introText = `${intro.stdout || ''}\n${intro.stderr || ''}`;
+        introSilenceEndSeconds = parseInitialSilenceEnd(introText);
+        if (Number.isFinite(introSilenceEndSeconds) && introSilenceEndSeconds > 0) {
+          audibleStartSeconds = Math.min(introSkipMaxSeconds(), Math.max(0, introSilenceEndSeconds - 0.05));
+        }
+      }
+
       const silence = await runCommand('ffmpeg', [
         '-hide_banner',
         '-nostdin',
@@ -1057,11 +1095,13 @@ async function analyzeTrackOutro(item, sourceUrl = item?.liveUrl) {
         fadeStartSeconds,
         transitionStartSeconds: recommendation?.transitionStartSeconds ?? Math.max(0, duration - crossfadeSeconds()),
         transitionReason: recommendation?.reason || 'duration',
+        introSilenceEndSeconds,
+        audibleStartSeconds,
         analyzedAt: new Date().toISOString(),
       };
       audioAnalysisCache.tracks[key] = row;
       saveAudioAnalysisCache();
-      console.log(`[engine] audio analysis cached: ${item.artist} — ${item.title} transition=${Math.round(row.transitionStartSeconds)}s reason=${row.transitionReason}`);
+      console.log(`[engine] audio analysis cached: ${item.artist} — ${item.title} transition=${Math.round(row.transitionStartSeconds)}s reason=${row.transitionReason} audibleStart=${Number(row.audibleStartSeconds || 0).toFixed(2)}s`);
       return row;
     } catch (err) {
       console.warn(`[engine] audio analysis failed for ${item.artist} — ${item.title}: ${err.message}`);
@@ -1358,6 +1398,12 @@ function currentPodcastResumeItem() {
 }
 
 async function nextPodcastEpisode() {
+  const resume = currentPodcastResumeItem();
+  if (resume) {
+    const state = podcastState.episodes?.[podcastState.currentEpisodeKey] || {};
+    console.log(`[engine] podcast resume selected from state: ${resume.artist} — ${resume.title} @ ${Math.round(Number(state.positionSeconds || 0))}s`);
+    return resume;
+  }
   const queued = shiftQueuedPodcastEpisode();
   if (queued) return queued;
   return fetchLatestPodcastEpisode();
@@ -2573,12 +2619,34 @@ async function playPodcastSegment(item) {
 
   const startedMs = Date.now();
   const playbackItem = { ...item, liveUrl: segmentPlaybackFile || resolvedAudioUrl };
-  await playItemOnAllOutputs(playbackItem, {
-    startSeconds: segmentPlaybackFile ? 0 : segment.startSeconds,
-    durationSeconds: segmentPlaybackFile ? 0 : segment.durationSeconds,
-    hardStopMs: Math.ceil((segment.durationSeconds + 5) * 1000),
-    cacheHttpAudio: false,
-  });
+  const checkpointPodcastPosition = () => {
+    const elapsed = Math.max(0, Math.min(segment.durationSeconds, (Date.now() - startedMs) / 1000));
+    const checkpoint = Math.min(segment.endSeconds, segment.startSeconds + elapsed);
+    state.positionSeconds = checkpoint;
+    state.completed = false;
+    state.lastSegmentStart = segment.startSeconds;
+    state.lastSegmentEnd = checkpoint;
+    podcastState.episodes[episodeKey] = state;
+    podcastState.currentEpisodeKey = episodeKey;
+    if (currentPodcastPlayback?.episodeKey === episodeKey) {
+      currentPodcastPlayback.currentPositionSeconds = checkpoint;
+      podcastState.active = currentPodcastPlayback;
+    }
+    savePodcastState();
+  };
+  let podcastCheckpointTimer = null;
+  try {
+    podcastCheckpointTimer = setInterval(checkpointPodcastPosition, 15_000);
+    await playItemOnAllOutputs(playbackItem, {
+      startSeconds: segmentPlaybackFile ? 0 : segment.startSeconds,
+      durationSeconds: segmentPlaybackFile ? 0 : segment.durationSeconds,
+      hardStopMs: Math.ceil((segment.durationSeconds + 5) * 1000),
+      cacheHttpAudio: false,
+    });
+  } finally {
+    if (podcastCheckpointTimer) clearInterval(podcastCheckpointTimer);
+    checkpointPodcastPosition();
+  }
   if (segmentPlaybackFile) { try { unlinkSync(segmentPlaybackFile); } catch {} }
 
   const actualElapsed = Math.max(0, Math.min(segment.durationSeconds, (Date.now() - startedMs) / 1000));
@@ -3173,6 +3241,18 @@ async function playOnOutput(url, output, token, options = {}) {
     options.transitionDetail = transition.reason;
   }
 
+  if (options.skipInitialSilence
+      && options.analysisItem?.kind === 'music'
+      && engineSettings.transitionIntroAnalysisEnabled !== false
+      && (!Number.isFinite(options.startSeconds) || options.startSeconds <= 0)) {
+    const analysis = await analyzeTrackOutro(options.analysisItem, playUrl);
+    const audibleStart = Math.min(introSkipMaxSeconds(), Math.max(0, Number(analysis?.audibleStartSeconds || 0)));
+    if (audibleStart > 0.05) {
+      options.startSeconds = audibleStart;
+      console.log(`[engine] transition intro trim: ${options.analysisItem.artist} — ${options.analysisItem.title} starts at ${audibleStart.toFixed(2)}s`);
+    }
+  }
+
   return new Promise(resolve => {
     const env = {
       ...process.env,
@@ -3576,6 +3656,8 @@ async function radioLoop() {
       if (nextItem.kind === 'music') {
         if (nextMusicFadeInSeconds > 0) {
           playOptions.fadeInSeconds = nextMusicFadeInSeconds;
+          playOptions.skipInitialSilence = true;
+          playOptions.analysisItem = nextItem;
           nextMusicFadeInSeconds = 0;
         }
         Object.assign(playOptions, musicCrossfadeOptions(nextItem, resumeStartSeconds));
@@ -4502,6 +4584,8 @@ const server = http.createServer(async (req, res) => {
         'moderationDuckSeconds',
         'audioAnalysisEnabled',
         'audioAnalysisWindowSeconds',
+        'transitionIntroAnalysisEnabled',
+        'transitionIntroSkipMaxSeconds',
         'recentTrackCooldownMinutes',
         'musicSource',
         'wavlakePlaylistId',
